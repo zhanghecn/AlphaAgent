@@ -918,3 +918,118 @@ def test_backtest_sync_respects_an_explicit_window(monkeypatch) -> None:
 
     assert captured["start_date"] == date(2026, 2, 9)
     assert captured["end_date"] == date(2026, 8, 14)
+
+
+def test_backfill_live_snapshots_fills_only_missing_history_days(monkeypatch) -> None:
+    """发版回填：只补当前版本缺失的历史交易日，当天与已有日期不碰。"""
+
+    observed_at = datetime(2026, 8, 17, 16, 0, tzinfo=daily_picks_service.SHANGHAI)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (
+                observed_at.astimezone(tz)
+                if tz is not None
+                else observed_at.replace(tzinfo=None)
+            )
+
+    calendar = (
+        date(2026, 8, 11),
+        date(2026, 8, 12),
+        date(2026, 8, 13),
+        date(2026, 8, 14),
+        date(2026, 8, 17),
+    )
+    bars = pd.DataFrame({"trade_date": [date(2026, 8, 14)]})
+    inputs = SimpleNamespace(
+        market_calendar=calendar,
+        bars=bars,
+        security_status=pd.DataFrame(),
+    )
+    scan_calls: list[tuple[date, date]] = []
+    saved: list[dict[str, object]] = []
+
+    def fake_scan(bars_arg, calendar_arg, *_args, **_kwargs):
+        scan_calls.append((max(calendar_arg), bars_arg["trade_date"].max()))
+        return [_candidate("600000.SSE")]
+
+    monkeypatch.setattr(daily_picks_service, "datetime", FrozenDateTime)
+    monkeypatch.setattr(daily_picks_service, "_live_inputs", lambda _now: inputs)
+    monkeypatch.setattr(
+        daily_picks_service,
+        "list_live_snapshot_dates",
+        lambda _version: ["2026-08-14"],  # 已有一天 → 跳过
+    )
+    monkeypatch.setattr(daily_picks_service, "scan_low_suction_candidates", fake_scan)
+    monkeypatch.setattr(daily_picks_service, "_load_market_regimes", lambda _cal: {})
+    monkeypatch.setattr(daily_picks_service, "_load_stock_names", lambda _symbols: {})
+    monkeypatch.setattr(daily_picks_service, "save_live_snapshot", saved.append)
+
+    result = daily_picks_service.backfill_live_snapshots()
+
+    # 当天(8-17)由盘中/eod 链路负责；已有 8-14 跳过；正序回填 8-11/12/13。
+    assert result["backfilled"] == ["2026-08-11", "2026-08-12", "2026-08-13"]
+    assert [payload["trade_date"] for payload in saved] == [
+        "2026-08-11",
+        "2026-08-12",
+        "2026-08-13",
+    ]
+    for payload in saved:
+        assert payload["snapshot_phase"] == "confirmed"
+        assert payload["status"] == "ok"
+        assert payload["score_version"] == daily_picks_service.SCORE_VERSION
+    # 因果：scan 收到的日历截断到 ≤目标日（bars 由 fake 直接返回）。
+    assert [call[0] for call in scan_calls] == [
+        date(2026, 8, 11),
+        date(2026, 8, 12),
+        date(2026, 8, 13),
+    ]
+
+
+def test_backfill_live_snapshots_continues_after_single_day_failure(
+    monkeypatch,
+) -> None:
+    """单日重算失败只跳过该日，不中断整体回填。"""
+
+    observed_at = datetime(2026, 8, 17, 16, 0, tzinfo=daily_picks_service.SHANGHAI)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (
+                observed_at.astimezone(tz)
+                if tz is not None
+                else observed_at.replace(tzinfo=None)
+            )
+
+    calendar = (date(2026, 8, 13), date(2026, 8, 14))
+    bars = pd.DataFrame({"trade_date": [date(2026, 8, 14)]})
+    inputs = SimpleNamespace(
+        market_calendar=calendar,
+        bars=bars,
+        security_status=pd.DataFrame(),
+    )
+    saved: list[dict[str, object]] = []
+
+    def flaky_scan(_bars, calendar_arg, *_args, **_kwargs):
+        if max(calendar_arg) == date(2026, 8, 13):
+            raise RuntimeError("boom")
+        return []
+
+    monkeypatch.setattr(daily_picks_service, "datetime", FrozenDateTime)
+    monkeypatch.setattr(daily_picks_service, "_live_inputs", lambda _now: inputs)
+    monkeypatch.setattr(
+        daily_picks_service, "list_live_snapshot_dates", lambda _version: []
+    )
+    monkeypatch.setattr(
+        daily_picks_service, "scan_low_suction_candidates", flaky_scan
+    )
+    monkeypatch.setattr(daily_picks_service, "_load_market_regimes", lambda _cal: {})
+    monkeypatch.setattr(daily_picks_service, "_load_stock_names", lambda _symbols: {})
+    monkeypatch.setattr(daily_picks_service, "save_live_snapshot", saved.append)
+
+    result = daily_picks_service.backfill_live_snapshots()
+
+    assert result["backfilled"] == ["2026-08-14"]
+    assert [payload["trade_date"] for payload in saved] == ["2026-08-14"]

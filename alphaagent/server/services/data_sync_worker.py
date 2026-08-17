@@ -78,11 +78,16 @@ def _start_low_suction_view_reconcile() -> None:
     def _run() -> None:
         try:
             from alphaagent.server.services.low_suction.daily_picks_service import (
+                backfill_live_snapshots,
                 reconcile_materialized_views_on_startup,
             )
 
             actions = reconcile_materialized_views_on_startup()
             LOGGER.info("low-suction materialized view reconcile: %s", actions)
+            # 版本切换后历史快照按版本隔离会整体消失，按当前版本回填最近
+            # 交易日，让推荐页日期切换器无缝衔接（幂等：已有日期跳过）。
+            backfill = backfill_live_snapshots()
+            LOGGER.info("low-suction live snapshot backfill: %s", backfill)
         except Exception:  # noqa: BLE001
             LOGGER.exception("low-suction materialized view reconcile failed")
 

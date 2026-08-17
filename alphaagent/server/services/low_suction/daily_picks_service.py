@@ -21,6 +21,7 @@ from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, session_scope
 from alphaagent.server.services.completed_session import completed_daily_bar_cutoff
 from alphaagent.server.services.low_suction.daily_factor_repository import (
+    DailyFactorInputs,
     load_daily_factor_inputs,
 )
 from alphaagent.server.services.low_suction.daily_picks_backtest import (
@@ -57,6 +58,8 @@ DEFAULT_BACKTEST_WINDOW_DAYS = 732
 LIVE_SCAN_INTERVAL_SECONDS = 60
 LIVE_LOOKBACK_CALENDAR_DAYS = 10  # 加载日历窗口；特征 warmup 由加载器另加 120 天
 LIVE_MAX_ITEMS_PER_FAMILY = 100
+# 发版后回填的历史确认快照天数（推荐页日期切换器无缝衔接）。
+LIVE_SNAPSHOT_BACKFILL_TRADING_DAYS = 10
 LIVE_PAGE_SIZE = 20
 SPOT_MERGE_START = time(9, 25)
 TAIL_FINAL_TIME = time(15, 1)
@@ -247,6 +250,86 @@ def _is_confirmed_today_payload(payload: Mapping[str, object], today: date) -> b
         _payload_trade_date(dict(payload), today) == today
         and payload.get("snapshot_phase") == SNAPSHOT_PHASE_CONFIRMED
     )
+
+
+def backfill_live_snapshots(
+    *,
+    lookback_trading_days: int = LIVE_SNAPSHOT_BACKFILL_TRADING_DAYS,
+) -> dict[str, object]:
+    """按当前评分版本回填最近已确认交易日的历史快照。
+
+    快照存储是「一交易日一行、当前版本覆盖」，推荐页又按 SCORE_VERSION
+    过滤——发版切换版本后历史日期会整体从日期切换器消失，直到新版本
+    逐日重新写入。这里在启动自检时把最近 lookback_trading_days 个历史
+    交易日按当前规则重算补齐（只看 ≤目标日的数据，因果与回测一致）。
+    当天快照仍由盘中扫描 / eod 确认链路负责，不在此处理。
+    """
+
+    now = datetime.now(SHANGHAI)
+    inputs = _live_inputs(now)
+    calendar = [value for value in inputs.market_calendar if value < now.date()]
+    targets = calendar[-lookback_trading_days:]
+    existing = set(list_live_snapshot_dates(SCORE_VERSION))
+    backfilled: list[str] = []
+    for target_date in targets:
+        if target_date.isoformat() in existing:
+            continue
+        try:
+            payload = _confirmed_snapshot_for_date(target_date, inputs, now)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "low-suction snapshot backfill failed on %s: %s",
+                target_date,
+                exc,
+            )
+            continue
+        if payload is None:
+            continue
+        save_live_snapshot(payload)
+        backfilled.append(target_date.isoformat())
+    return {
+        "score_version": SCORE_VERSION,
+        "candidate_dates": [value.isoformat() for value in targets],
+        "backfilled": backfilled,
+    }
+
+
+def _confirmed_snapshot_for_date(
+    target_date: date,
+    inputs: DailyFactorInputs,
+    now: datetime,
+) -> dict[str, object] | None:
+    """Recompute one historical confirmed snapshot from bars up to that day."""
+
+    calendar = [value for value in inputs.market_calendar if value <= target_date]
+    if not calendar or calendar[-1] != target_date:
+        return None
+    bars = inputs.bars
+    if bars.empty:
+        return None
+    bars = bars.loc[bars["trade_date"] <= target_date].copy()
+    candidates = scan_low_suction_candidates(
+        bars,
+        calendar,
+        inputs.security_status.to_dict(orient="records"),
+        target_dates={target_date},
+        market_regimes=_load_market_regimes(tuple(calendar)),
+    )
+    names = _load_stock_names({item.vt_symbol for item in candidates})
+    return {
+        "status": "ok",
+        "asof": now.isoformat(timespec="seconds"),
+        "trade_date": target_date.isoformat(),
+        "snapshot_phase": SNAPSHOT_PHASE_CONFIRMED,
+        "provisional": False,
+        "merge_note": "历史确认快照回填（发版后按当前版本重算）",
+        "refresh_interval_seconds": LIVE_SCAN_INTERVAL_SECONDS,
+        "score_version": SCORE_VERSION,
+        "backtest_version": BACKTEST_VERSION,
+        "trend": _family_payload(candidates, "trend_pullback", names),
+        "oversold": _family_payload(candidates, "oversold_rebound", names),
+        "label_convention": "raw_unadjusted 探索级 · D 日收盘买入、D+1 收盘结算 · 未扣费",
+    }
 
 
 def _is_tail_final_today_payload(payload: Mapping[str, object], today: date) -> bool:
