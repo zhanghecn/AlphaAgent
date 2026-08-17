@@ -14,6 +14,7 @@ import pytest
 import alphaagent.server.services.low_suction.daily_picks_scanner as scanner
 from alphaagent.server.services.low_suction.daily_factor_extended_discovery import (
     LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+    LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
     LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
     RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
 )
@@ -129,7 +130,6 @@ def _scan_trend(
     history,
     *,
     regime_map: dict[date, str] | None = None,
-    limit_up_counts: dict[date, int] | None = None,
     signal_date: date = date(2026, 7, 20),
 ):
     features = {
@@ -163,56 +163,58 @@ def _scan_trend(
         [],
         target_dates={signal_date},
         market_regimes=regime_map,
-        market_limit_up_counts=limit_up_counts,
     )
 
 
 class TestScannerTrendRules:
-    def test_limit_up_close_day_only_admits_reclaim_path(self, monkeypatch) -> None:
-        """涨停收盘日：B 涨停弱转强放行；A 路径（非涨停谓词）在涨停日被剔。"""
+    def test_limit_up_close_day_admits_both_limit_paths(self, monkeypatch) -> None:
+        """涨停收盘日：B 弱转强与 A 补涨涨停两条涨停路径都放行；观察层仍剔除。"""
         signal_date = date(2026, 7, 20)
         limit_history = _limit_up_history(
             streak=5, days_since_peak=1, signal_limit_up=True
         )
 
-        admitted = _scan_trend(
+        admitted_b = _scan_trend(
             monkeypatch,
             (LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,),
             limit_history,
             signal_date=signal_date,
         )
-        assert [c.rule_key for c in admitted] == [
+        assert [c.rule_key for c in admitted_b] == [
             LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY
         ]
 
-        rejected = _scan_trend(
+        admitted_a = _scan_trend(
             monkeypatch,
             (LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,),
             limit_history,
-            regime_map={signal_date: "below_ma20"},
             signal_date=signal_date,
         )
-        assert rejected == []
-
-    def test_pullback_path_has_no_regime_gate(self, monkeypatch) -> None:
-        """主人 2026-08-16 定调：命中即放行，不设大盘环境门（强市/弱市都推荐）。"""
-        signal_date = date(2026, 7, 20)
-        history = _limit_up_history(streak=6, days_since_peak=15)
-        matched = (LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,)
-
-        admitted = _scan_trend(
-            monkeypatch, matched, history,
-            regime_map={signal_date: "above_ma20"},
-            limit_up_counts={signal_date: 120},
-            signal_date=signal_date,
-        )
-        assert [c.rule_key for c in admitted] == [
+        assert [c.rule_key for c in admitted_a] == [
             LIMIT_UP_PULLBACK_REBOUND_RULE_KEY
         ]
-        mood = next(
-            c for c in admitted[0].components if c.key == "pullback_mood_temperature"
+
+        rejected_watch = _scan_trend(
+            monkeypatch,
+            (LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,),
+            limit_history,
+            signal_date=signal_date,
         )
-        assert mood.points == 10.0
+        assert rejected_watch == []
+
+    def test_pullback_paths_have_no_regime_gate(self, monkeypatch) -> None:
+        """主人定调：命中即放行，不设大盘环境门（强市/弱市都推荐）。"""
+        signal_date = date(2026, 7, 20)
+        history = _limit_up_history(streak=6, days_since_peak=15)
+
+        for rule_key in (LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+                         LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY):
+            admitted = _scan_trend(
+                monkeypatch, (rule_key,), history,
+                regime_map={signal_date: "above_ma20"},
+                signal_date=signal_date,
+            )
+            assert [c.rule_key for c in admitted] == [rule_key]
 
     def test_research_anchor_never_reaches_product_scan(self, monkeypatch) -> None:
         """锚点不在 PRODUCT_TREND_RULE_KEYS：即便谓词命中也不会被产品扫描产出。"""
@@ -224,7 +226,11 @@ class TestScannerTrendRules:
         } == {
             LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
             LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+            LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
         }
+        assert scanner.TREND_WATCHLIST_RULE_KEYS == frozenset(
+            {LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY}
+        )
 
 
 class TestTrendTiersAndRanking:

@@ -117,14 +117,14 @@ def test_trend_score_streak_and_timing_gradients() -> None:
 
 
 def test_trend_score_paths_only_award_matched_rule_components() -> None:
-    """路径组件互斥：B 命中吃低开/拉板组件，A 命中吃蓄势/情绪/地量组件。"""
+    """路径组件互斥：B 命中吃低开/拉板组件，A 命中吃平开/换手/量能恢复组件。"""
     path_keys = {
         "reclaim_open_depth",
         "reclaim_magnitude",
         "reclaim_streak_premium",
-        "pullback_ma10_sloping_up",
-        "pullback_mood_temperature",
-        "pullback_dry_volume",
+        "pullback_flat_open_direct",
+        "pullback_turnover_sweet",
+        "pullback_volume_recovery",
     }
     features = {
         "limit_up_close_streak_max_60d": 6,
@@ -133,7 +133,6 @@ def test_trend_score_paths_only_award_matched_rule_components() -> None:
         "volume_to_streak_peak_pct": 15.0,
         "turnover_rate_pct": 25.0,
         "open_to_prev_close_pct": -4.0,
-        "ma10_slope_5d_pct": 2.0,
     }
     streak = quiet_candle_streak([_bar(2.0)] * 5)
     _, comps_reclaim = score_trend_candidate(
@@ -141,14 +140,20 @@ def test_trend_score_paths_only_award_matched_rule_components() -> None:
     )
     reclaim_pts = sum(c.points for c in comps_reclaim if c.key in path_keys)
     assert reclaim_pts == 22.0  # 低开10 + 拉板12；streak 6<7 无高连板加成
+    # A 补涨涨停：平开 0.8(满10) + 换手 15(甜点满12) + 量峰 45(恢复满8)
+    pullback_features = {
+        **features,
+        "open_to_prev_close_pct": 0.8,
+        "turnover_rate_pct": 15.0,
+        "volume_to_streak_peak_pct": 45.0,
+    }
     _, comps_pullback = score_trend_candidate(
-        features,
+        pullback_features,
         streak,
-        120,
         limit_up_pullback_rule_matched=True,
     )
     pullback_pts = sum(c.points for c in comps_pullback if c.key in path_keys)
-    assert pullback_pts == 30.0  # 蓄势10 + 情绪10 + 地量10
+    assert pullback_pts == 30.0
     _, comps_none = score_trend_candidate(features, streak)
     assert sum(c.points for c in comps_none if c.key in path_keys) == 0.0
 
@@ -499,4 +504,4 @@ def test_score_version_bumped_to_v3_2() -> None:
 
     from alphaagent.server.services.low_suction import daily_picks_scoring as module
 
-    assert module.SCORE_VERSION == "low-suction-daily-score-v3.3"
+    assert module.SCORE_VERSION == "low-suction-daily-score-v3.4"

@@ -17,6 +17,7 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     DiscoveryRule,
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
     LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+    LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
     LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
     MA10_MA20_PRE_CROSS_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
@@ -1008,6 +1009,15 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
         "limit_up_history_window_sessions": 60,
         "limit_up_close_streak_max_60d": 7,
         "days_since_streak_peak_60d": 15,
+        "limit_up_close_today": True,
+        "open_to_prev_close_pct": 1.2,
+        "turnover_rate_pct": 15.0,
+        "volume_to_streak_peak_pct": 45.0,
+    }
+    pullback_watchlist = {
+        "limit_up_history_window_sessions": 60,
+        "limit_up_close_streak_max_60d": 7,
+        "days_since_streak_peak_60d": 15,
         "daily_return_pct": 1.2,
         "close_to_prev_close_pct": 0.4,
         "volume_to_ma5_ratio": 0.9,
@@ -1036,6 +1046,7 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     assert yiming_pre_cross_key in oversold_rules
     assert LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in trend_rules
     assert LIMIT_UP_PULLBACK_REBOUND_RULE_KEY in trend_rules
+    assert LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY in trend_rules
     assert RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY in trend_rules
     assert process_rule_predicates(stable_wrap_key, stable_wrap) == {
         "long_bear_alignment": True,
@@ -1132,7 +1143,14 @@ def test_explicit_personal_case_rules_expose_their_causal_requirements() -> None
     ) is False
     assert _rule_matches(
         trend_rules[LIMIT_UP_PULLBACK_REBOUND_RULE_KEY],
-        {**limit_up_pullback, "post_streak_turnover_mean_pct": 25.0},
+        {**limit_up_pullback, "open_to_prev_close_pct": 5.0},
+    ) is False
+    assert _rule_matches(
+        trend_rules[LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY], pullback_watchlist
+    ) is True
+    assert _rule_matches(
+        trend_rules[LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY],
+        {**pullback_watchlist, "post_streak_turnover_mean_pct": 25.0},
     ) is False
     assert _rule_matches(
         trend_rules[RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY], research_no_limit

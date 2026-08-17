@@ -210,7 +210,7 @@ def test_low_suction_ledger_reports_service_unavailable(monkeypatch) -> None:
 def test_low_suction_guide_cases_returns_grouped_payload(monkeypatch) -> None:
     expected = {
         "status": "ok",
-        "score_version": "low-suction-daily-score-v3.3",
+        "score_version": "low-suction-daily-score-v3.4",
         "families": [
             {
                 "key": "trend_pullback",

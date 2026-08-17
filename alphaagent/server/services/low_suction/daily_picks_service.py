@@ -379,9 +379,6 @@ def _run_daily_backtest_sync_unlocked(
         inputs.market_calendar,
         inputs.security_status.to_dict(orient="records"),
         market_regimes=market_regimes,
-        market_limit_up_counts=_load_market_limit_up_counts(
-            inputs.market_calendar
-        ),
     )
     _report_backtest_stage(
         progress,
@@ -861,7 +858,6 @@ def _compute_live_payload(
         inputs.security_status.to_dict(orient="records"),
         target_dates={target_date},
         market_regimes=_load_market_regimes(tuple(calendar)),
-        market_limit_up_counts=_load_market_limit_up_counts(tuple(calendar)),
     )
     names = _load_stock_names({item.vt_symbol for item in candidates})
     trend = _family_payload(candidates, "trend_pullback", names)
@@ -999,28 +995,6 @@ def _load_market_regimes(calendar: tuple[date, ...]) -> dict[date, str]:
     return regimes
 
 
-def _load_market_limit_up_counts(calendar: tuple[date, ...]) -> dict[date, int]:
-    """每日全市场（主板）收盘涨停家数——趋势族 A 路径的情绪温度加分。"""
-
-    if not calendar:
-        return {}
-    with session_scope() as session:
-        rows = session.execute(
-            select(
-                schema.stock_limit_up_daily.c.trade_date,
-                func.count(),
-            )
-            .where(
-                schema.stock_limit_up_daily.c.is_limit_up.is_(True),
-                schema.stock_limit_up_daily.c.trade_date >= calendar[0],
-                schema.stock_limit_up_daily.c.trade_date <= calendar[-1],
-                schema.stock_limit_up_daily.c.vt_symbol.op("~")(
-                    "^(600|601|603|605|000|001|002|003)"
-                ),
-            )
-            .group_by(schema.stock_limit_up_daily.c.trade_date)
-        ).all()
-    return {row[0]: int(row[1]) for row in rows}
 
 
 def _today_has_confirmed_daily_bar(calendar: list[date], now: datetime) -> bool:

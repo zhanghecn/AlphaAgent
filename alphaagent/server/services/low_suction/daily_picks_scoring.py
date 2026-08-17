@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
-SCORE_VERSION = "low-suction-daily-score-v3.3"
+SCORE_VERSION = "low-suction-daily-score-v3.4"
 
 SCORE_BANDS: tuple[tuple[float, float, str], ...] = (
     (0.0, 39.999, "0-39"),
@@ -65,14 +65,12 @@ TREND_TURNOVER_POINTS = (18.0, 13.0, 8.0, 3.0)  # >=20/8-20/3-8/<3
 TREND_RECLAIM_OPEN_DEPTH_POINTS = (10.0, 6.0)  # open_chg <=-3 / <=0
 TREND_RECLAIM_MAGNITUDE_POINTS = (12.0, 8.0, 4.0)  # close_off_low >=12/8/4
 TREND_RECLAIM_STREAK_PREMIUM_POINTS = 8.0  # streak >=7
-# A 弱市补涨路径组件（MA10 蓄势案例 7/8；lu>=100 桶 68.9%/+1.56 vs 池 56.8%；
-# 地量桶 51.7%/+0.29 —— 全部两年全市场桶证据）
-TREND_PULLBACK_MA10_SLOPE_POINTS = 10.0
-TREND_PULLBACK_MOOD_HOT_COUNT = 100
-TREND_PULLBACK_MOOD_WARM_COUNT = 60
-TREND_PULLBACK_MOOD_POINTS = (10.0, 5.0)
-TREND_PULLBACK_DRY_VOLUME_POINTS = 10.0
-TREND_PULLBACK_DRY_VOLUME_MAX_PCT = 20.0
+# A 补涨涨停路径组件（2026-08-17 涨停确认制定稿的桶证据：平开 0~2 最从容
+# 64.6-72%；换手 10~20 甜点 63.5% vs >=20 崩 45.3%；量能恢复段峰 30~60 健康
+# 63.5% vs >60 过热 52.9%）
+TREND_PULLBACK_FLAT_OPEN_POINTS = (10.0, 7.0, 4.0)  # open 0-1 / 1-2 / 2-3
+TREND_PULLBACK_TURNOVER_SWEET_POINTS = (12.0, 8.0)  # 10~20 / <10
+TREND_PULLBACK_VOLUME_RECOVERY_POINTS = (8.0, 4.0)  # 段峰 30~60 / >60
 
 
 @dataclass(frozen=True)
@@ -165,19 +163,17 @@ def score_band(score: float) -> str:
 def score_trend_candidate(
     features: Mapping[str, object],
     streak: QuietStreak,
-    mood_limit_up_count: int | None = None,
     *,
     weak_to_strong_reclaim_rule_matched: bool = False,
     limit_up_pullback_rule_matched: bool = False,
 ) -> tuple[float, tuple[ScoreComponent, ...]]:
     """趋势族（连板后补涨/弱转强）候选诊断排序分。
 
-    公共底盘因子（满 100 ×0.4 = 40）+ 外部组件因子（路径命中才加，≤30 直加）
+    公共底盘因子（满 100 ×0.4 = 40）+ 路径组件因子（命中才加，≤30 直加）
     = 满值约 70，与超跌族同量纲。底盘为连板妖股回落语境的通用梯度（连板
     高度 / 距顶甜点 / 收盘控制 / 量能枯竭 / 换手承接）；B 涨停弱转强组件
-    吃低开深度与拉板力度，A 弱市补涨组件吃 MA10 蓄势斜率、市场情绪温度
-    （``mood_limit_up_count`` 为信号日全市场收盘涨停家数，scanner 注入）
-    与地量枯竭。无换手硬门禁 —— 妖股 20-38% 换手是常态。
+    吃低开深度与拉板力度，A 补涨涨停组件吃平开直接性、换手甜点与量能恢复
+    度。无换手硬门禁 —— 妖股 20-38% 换手是常态。
     """
 
     streak_max = int(features.get("limit_up_close_streak_max_60d") or 0)
@@ -187,7 +183,6 @@ def score_trend_candidate(
     vol_vs_peak = _number(features.get("volume_to_streak_peak_pct"))
     turnover = _number(features.get("turnover_rate_pct"))
     open_chg = _number(features.get("open_to_prev_close_pct"))
-    ma10_slope_5d = _number(features.get("ma10_slope_5d_pct"))
 
     streak_pts = (
         TREND_STREAK_POINTS[1] if 7 <= streak_max <= 9
@@ -260,26 +255,34 @@ def score_trend_candidate(
         else 0.0
     )
 
-    # A 弱市补涨路径组件
-    pullback_slope_pts = (
-        TREND_PULLBACK_MA10_SLOPE_POINTS
+    # A 补涨涨停路径组件
+    pullback_flat_pts = 0.0
+    if limit_up_pullback_rule_matched and open_chg is not None:
+        if open_chg < 1.0:
+            pullback_flat_pts = TREND_PULLBACK_FLAT_OPEN_POINTS[0]
+        elif open_chg < 2.0:
+            pullback_flat_pts = TREND_PULLBACK_FLAT_OPEN_POINTS[1]
+        else:
+            pullback_flat_pts = TREND_PULLBACK_FLAT_OPEN_POINTS[2]
+    pullback_turnover_pts = (
+        TREND_PULLBACK_TURNOVER_SWEET_POINTS[0]
         if limit_up_pullback_rule_matched
-        and ma10_slope_5d is not None
-        and ma10_slope_5d > 0
-        else 0.0
+        and turnover is not None
+        and 10.0 <= turnover < 20.0
+        else (TREND_PULLBACK_TURNOVER_SWEET_POINTS[1]
+              if limit_up_pullback_rule_matched and turnover is not None
+              else 0.0)
     )
-    pullback_mood_pts = 0.0
-    if limit_up_pullback_rule_matched and mood_limit_up_count is not None:
-        if mood_limit_up_count >= TREND_PULLBACK_MOOD_HOT_COUNT:
-            pullback_mood_pts = TREND_PULLBACK_MOOD_POINTS[0]
-        elif mood_limit_up_count >= TREND_PULLBACK_MOOD_WARM_COUNT:
-            pullback_mood_pts = TREND_PULLBACK_MOOD_POINTS[1]
-    pullback_dry_pts = (
-        TREND_PULLBACK_DRY_VOLUME_POINTS
+    pullback_recovery_pts = (
+        TREND_PULLBACK_VOLUME_RECOVERY_POINTS[0]
         if limit_up_pullback_rule_matched
         and vol_vs_peak is not None
-        and vol_vs_peak <= TREND_PULLBACK_DRY_VOLUME_MAX_PCT
-        else 0.0
+        and 30.0 < vol_vs_peak <= 60.0
+        else (TREND_PULLBACK_VOLUME_RECOVERY_POINTS[1]
+              if limit_up_pullback_rule_matched
+              and vol_vs_peak is not None
+              and vol_vs_peak > 60.0
+              else 0.0)
     )
 
     base_components = (
@@ -368,39 +371,39 @@ def score_trend_candidate(
             ),
         ),
         _component(
-            "pullback_ma10_sloping_up",
-            "MA10 蓄势",
-            pullback_slope_pts > 0,
-            pullback_slope_pts,
-            TREND_PULLBACK_MA10_SLOPE_POINTS,
+            "pullback_flat_open_direct",
+            "平开直接性",
+            pullback_flat_pts > 0,
+            pullback_flat_pts,
+            TREND_PULLBACK_FLAT_OPEN_POINTS[0],
             (
-                f"A 路径 MA10 五日斜率 {_fmt(ma10_slope_5d, signed=True)}%"
+                f"A 路径开盘 {_fmt(open_chg, signed=True)}%（0~1% 从容平开满10）"
                 if limit_up_pullback_rule_matched
-                else "非弱市补涨路径"
+                else "非补涨涨停路径"
             ),
         ),
         _component(
-            "pullback_mood_temperature",
-            "情绪温度",
-            pullback_mood_pts > 0,
-            pullback_mood_pts,
-            TREND_PULLBACK_MOOD_POINTS[0],
+            "pullback_turnover_sweet",
+            "换手甜点",
+            pullback_turnover_pts > 0,
+            pullback_turnover_pts,
+            TREND_PULLBACK_TURNOVER_SWEET_POINTS[0],
             (
-                f"A 路径当日全市场涨停 {mood_limit_up_count} 家"
-                if limit_up_pullback_rule_matched and mood_limit_up_count is not None
-                else "非弱市补涨路径"
+                f"A 路径换手 {_fmt(turnover)}%（10~20% 甜点满12）"
+                if limit_up_pullback_rule_matched
+                else "非补涨涨停路径"
             ),
         ),
         _component(
-            "pullback_dry_volume",
-            "地量枯竭",
-            pullback_dry_pts > 0,
-            pullback_dry_pts,
-            TREND_PULLBACK_DRY_VOLUME_POINTS,
+            "pullback_volume_recovery",
+            "量能恢复",
+            pullback_recovery_pts > 0,
+            pullback_recovery_pts,
+            TREND_PULLBACK_VOLUME_RECOVERY_POINTS[0],
             (
-                f"A 路径量能为主段峰值 {_fmt(vol_vs_peak)}%"
+                f"A 路径量能为主段峰值 {_fmt(vol_vs_peak)}%（30~60% 健康恢复满8）"
                 if limit_up_pullback_rule_matched
-                else "非弱市补涨路径"
+                else "非补涨涨停路径"
             ),
         ),
     )
@@ -421,9 +424,9 @@ def score_trend_candidate(
         + reclaim_open_pts
         + reclaim_magnitude_pts
         + reclaim_streak_pts
-        + pullback_slope_pts
-        + pullback_mood_pts
-        + pullback_dry_pts
+        + pullback_flat_pts
+        + pullback_turnover_pts
+        + pullback_recovery_pts
     )
     return round(min(100.0, raw), 2), base_components
 

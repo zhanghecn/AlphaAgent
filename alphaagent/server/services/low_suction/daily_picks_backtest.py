@@ -16,6 +16,7 @@ from alphaagent.server.services.low_suction.daily_factor_research import (
 )
 from alphaagent.server.services.low_suction.daily_picks_scanner import (
     LowSuctionCandidate,
+    TREND_WATCHLIST_RULE_KEYS,
     candidate_ranking_key,
 )
 from alphaagent.server.services.low_suction.daily_picks_scoring import (
@@ -24,7 +25,7 @@ from alphaagent.server.services.low_suction.daily_picks_scoring import (
 )
 
 
-BACKTEST_VERSION = "low-suction-daily-backtest-v14"
+BACKTEST_VERSION = "low-suction-daily-backtest-v15"
 RECENT_LEDGER_DAYS = 60
 _MIN_BAND_SAMPLE = 30
 PICKS_PER_FAMILY = 5
@@ -42,7 +43,12 @@ def build_backtest_payload(
 ) -> dict[str, object]:
     """Build the materialized report from scored candidates and fixed top-five picks."""
 
-    labeled = [item for item in candidates if item.d1_close_return_pct is not None]
+    labeled = [
+        item
+        for item in candidates
+        if item.d1_close_return_pct is not None
+        and item.rule_key not in TREND_WATCHLIST_RULE_KEYS
+    ]
     split = split_market_calendar(list(calendar))
     segment_by_date: dict[date, str] = {}
     for value in split.development_dates:
@@ -169,12 +175,17 @@ def _position_simulation(
     segment_by_date: Mapping[date, str],
     market_regimes: Mapping[date, str],
 ) -> dict[str, object]:
-    """D 日先按同一决胜键取前五；D+1 标签只用于后续收益汇总。"""
+    """D 日先按同一决胜键取前五；D+1 标签只用于后续收益汇总。
+
+    观察层（连板回落低吸）候选不占回测仓位：只服务推荐页的预备窗口提示。
+    """
 
     grouped: dict[str, dict[date, list[LowSuctionCandidate]]] = {
         setup_type: defaultdict(list) for setup_type in SETUP_TYPES
     }
     for item in candidates:
+        if item.rule_key in TREND_WATCHLIST_RULE_KEYS:
+            continue
         grouped[item.setup_type][item.trade_date].append(item)
 
     selected: dict[str, dict[date, list[LowSuctionCandidate]]] = {

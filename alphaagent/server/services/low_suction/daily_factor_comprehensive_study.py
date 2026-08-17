@@ -170,54 +170,73 @@ PERSONAL_CASE_SOURCE_METADATA: dict[str, CaseSourceMetadata] = {
         ("price_first_strong_attack",),
     ),
     # 2026-08 趋势族重构：连板后补涨/弱转强 21 个案例低吸点。
-    # A 连板回落补涨（narrative_start 取主段首板前，launch 为文档启动日）
+    # A 补涨涨停（涨停确认日案例，narrative_start 取主段首板前）
+    "华电辽能 补涨涨停": CaseSourceMetadata(
+        date(2026, 3, 12),
+        date(2026, 4, 23),
+        "process_only",
+        ("limit_up_pullback_rebound",),
+    ),
+    "福达合金 补涨涨停": CaseSourceMetadata(
+        date(2026, 4, 27),
+        date(2026, 6, 16),
+        "process_only",
+        ("limit_up_pullback_rebound",),
+    ),
+    "九牧王 补涨涨停": CaseSourceMetadata(
+        date(2025, 11, 7),
+        date(2025, 12, 19),
+        "process_only",
+        ("limit_up_pullback_rebound",),
+    ),
+    # 观察层：连板回落低吸日（narrative_start 取主段首板前，launch 为文档启动日）
     "科森科技 均线蓄势收盘控制": CaseSourceMetadata(
         date(2024, 8, 22),
         date(2024, 10, 29),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     "伟时电子 五连板后转多头": CaseSourceMetadata(
         date(2024, 8, 29),
         date(2024, 10, 25),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     "国芳集团 第二波多头确认": CaseSourceMetadata(
         date(2025, 4, 1),
         date(2025, 5, 19),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     "诺德股份 低开小阳收盘控制": CaseSourceMetadata(
         date(2025, 6, 12),
         date(2025, 8, 5),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     "九牧王 承接住收盘控制": CaseSourceMetadata(
         date(2025, 11, 7),
         date(2025, 11, 28),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     "航天发展 尾盘控盘回踩": CaseSourceMetadata(
         date(2025, 11, 10),
         date(2025, 12, 24),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     "华电辽能 长横盘后小阳": CaseSourceMetadata(
         date(2026, 3, 12),
         date(2026, 4, 21),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     "福达合金 第二波首小阳": CaseSourceMetadata(
         date(2026, 4, 27),
         date(2026, 6, 5),
         "process_only",
-        ("limit_up_pullback_rebound",),
+        ("limit_up_pullback_watchlist",),
     ),
     # B 涨停弱转强（打板预备：D 日收盘涨停，产品层专门放行）
     "双成药业 水下拉起收涨停": CaseSourceMetadata(

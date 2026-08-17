@@ -14,6 +14,7 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     DISCOVERY_RULES,
     FIRST_LEG_TWO_MA_WRAP_RULE_KEY,
     LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+    LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
     LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
     POST_WRAP_UPPER_BAND_CONFIRMATION_RULE_KEY,
     PRE_CROSS_ACCELERATION_WEAK_MARKET_RULE_KEY,
@@ -69,15 +70,18 @@ PRODUCT_OVERSOLD_RULE_KEYS = frozenset(
         *THREE_MA_WRAP_CHAIN_RULE_KEYS,
     }
 )
-# 趋势族产品规则（2026-08 连板后补涨/弱转强重构）：B 涨停弱转强（P1.5，
-# 两年 n=318 胜率 60.4%/+1.69）与 A 连板回落补涨（P1，段后换手 5~20 承接门槛，
-# n=995 56.8%/+0.49）；非涨停弱转强为研究锚点（负边缘），不进推荐。
+# 趋势族产品规则（2026-08-17 涨停确认制定稿）：B 涨停弱转强（P1.5，60.4%/
+# +1.69）+ A 补涨涨停 N 字板（P1，70.7%/+3.00 强弱市双正）+ 观察层连板回落
+# 低吸（补涨涨停预备窗口）；非涨停弱转强为研究锚点（负边缘），不进推荐。
 PRODUCT_TREND_RULE_KEYS = frozenset(
     {
         LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY,
         LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
+        LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
     }
 )
+# 进推荐但不进回测仓位的观察层规则（tier 恒 0，前五组合跳过）。
+TREND_WATCHLIST_RULE_KEYS = frozenset({LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY})
 PRODUCT_DISCOVERY_RULES = {
     "oversold_rebound": tuple(
         rule
@@ -153,7 +157,6 @@ def scan_low_suction_candidates(
     *,
     target_dates: set[date] | None = None,
     market_regimes: Mapping[date, str] | None = None,
-    market_limit_up_counts: Mapping[date, int] | None = None,
 ) -> list[LowSuctionCandidate]:
     """Scan source-rule candidates and attach the current diagnostic score.
 
@@ -166,11 +169,10 @@ def scan_low_suction_candidates(
     ``market_regimes`` 缺省或当日无分类时 X 不入场（fail-closed）。
     同月研究锚点升级的三线包裹链两条（P1.5 同层，全 regime）：
     三线包裹缩量底盘（W）与包裹次日上沿确认（Z，宽口径前置）。
-    趋势族 2026-08 重构为连板后补涨/弱转强两条产品规则：B 涨停弱转强
-    （低开拉板，信号日收盘涨停由本扫描器专门放行——涨停收盘的其他
-    候选仍一律剔除）与 A 连板回落补涨（段后换手承接区，
-    fail-closed 同 X 纪律）；``market_limit_up_counts`` 为信号日全市场
-    收盘涨停家数，仅作 A 路径评分的情绪温度加分。
+    趋势族 2026-08-17 涨停确认制定稿：B 涨停弱转强（段顶 ≤4 日低开拉板）
+    与 A 补涨涨停（段顶 5-30 日平开进攻板）两条产品路径的信号日均为收盘
+    涨停、由本扫描器专门放行（涨停收盘的其他候选仍一律剔除）；观察层
+    连板回落低吸（小阳控盘日）进推荐但不占回测仓位。
     """
 
     candidates: list[LowSuctionCandidate] = []
@@ -199,10 +201,11 @@ def scan_low_suction_candidates(
             prior_features=prior_features,
             rules=PRODUCT_DISCOVERY_RULES["trend_pullback"],
         )
-        # 信号日收盘涨停只放行 B 涨停弱转强路径（打板预备）；其余
-        # （超跌/A/未命中产品规则）维持涨停剔除。
-        if signal_day_limit_up and (
-            LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY not in trend_rules
+        # 信号日收盘涨停只放行趋势族涨停路径（B 弱转强 / A 补涨涨停，
+        # 均为打板确认语义）；其余（超跌/观察层/未命中）维持涨停剔除。
+        if signal_day_limit_up and not (
+            LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in trend_rules
+            or LIMIT_UP_PULLBACK_REBOUND_RULE_KEY in trend_rules
         ):
             continue
         matched_oversold_rules = matching_discovery_rule_keys(
@@ -262,7 +265,6 @@ def scan_low_suction_candidates(
             score, components = score_trend_candidate(
                 features,
                 streak,
-                (market_limit_up_counts or {}).get(snapshot.trade_date),
                 weak_to_strong_reclaim_rule_matched=(
                     LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY in trend_rules
                 ),

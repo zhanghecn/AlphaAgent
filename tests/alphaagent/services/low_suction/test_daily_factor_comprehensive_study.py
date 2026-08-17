@@ -152,14 +152,39 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             "process_only",
             ("price_first_strong_attack",),
         ),
-        # 2026-08 趋势族重构：连板后补涨/弱转强 21 个案例低吸点。
+        # 2026-08 趋势族重构（08-17 涨停确认制定稿）：A 补涨涨停 3 个涨停日案例。
+        (
+            "华电辽能 补涨涨停",
+            "600396.SSE",
+            date(2026, 4, 22),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        (
+            "福达合金 补涨涨停",
+            "603045.SSE",
+            date(2026, 6, 15),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        (
+            "九牧王 补涨涨停",
+            "601566.SSE",
+            date(2025, 12, 18),
+            "trend_pullback",
+            "process_only",
+            ("limit_up_pullback_rebound",),
+        ),
+        # 观察层：连板回落低吸日 8 个原 A 案例（挂 watchlist 键）。
         (
             "科森科技 均线蓄势收盘控制",
             "603626.SSE",
             date(2024, 10, 28),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "伟时电子 五连板后转多头",
@@ -167,7 +192,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2024, 10, 24),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "国芳集团 第二波多头确认",
@@ -175,7 +200,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2025, 5, 16),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "诺德股份 低开小阳收盘控制",
@@ -183,7 +208,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2025, 8, 4),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "九牧王 承接住收盘控制",
@@ -191,7 +216,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2025, 11, 27),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "航天发展 尾盘控盘回踩",
@@ -199,7 +224,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2025, 12, 23),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "华电辽能 长横盘后小阳",
@@ -207,7 +232,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 4, 20),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "福达合金 第二波首小阳",
@@ -215,7 +240,7 @@ def test_personal_case_manifest_covers_every_named_source_observation() -> None:
             date(2026, 6, 4),
             "trend_pullback",
             "process_only",
-            ("limit_up_pullback_rebound",),
+            ("limit_up_pullback_watchlist",),
         ),
         (
             "双成药业 水下拉起收涨停",

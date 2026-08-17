@@ -240,7 +240,7 @@ function OrphanCasesGroup({ cases }: { cases: GuideCase[] }) {
       </p>
       <p className="mb-1.5 text-[10px] leading-relaxed text-muted-foreground/80">
         这是复盘时觉得有意思、但还没总结出明确条件的走势个案——条件定不下来就写不成规则，所以它不属于上面
-        12 条规则，也不会出现在实时推荐里。留在说明书中是给后续研究留参照：未来验证这类形态有效，才会补上条件升级成正式规则（立新能源/京投发展/传智教育/百花医药已在两轮升级中转正）。
+        13 条规则，也不会出现在实时推荐里。留在说明书中是给后续研究留参照：未来验证这类形态有效，才会补上条件升级成正式规则（立新能源/京投发展/传智教育/百花医药已在两轮升级中转正）。
       </p>
       <div className="grid gap-1.5 xl:grid-cols-2">
         {cases.map((caseItem) => (

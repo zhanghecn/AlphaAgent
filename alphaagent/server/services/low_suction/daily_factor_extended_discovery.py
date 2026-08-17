@@ -83,16 +83,20 @@ MAX_MARKDOWN_WORST_ROWS = 30
 POST_LIMIT_UP_HOLDING_SESSIONS = (1, 2, 3)
 DEVELOPMENT_SELECTION_MODE = "development_window"
 FROZEN_SELECTION_MODE = "frozen_recent_half_year"
-# 2026-08 趋势族重构（主人需求：连板后补涨/弱转强）三条规则：
+# 2026-08 趋势族重构（主人需求：连板后补涨/弱转强，2026-08-17 涨停确认制定稿）：
 # B 涨停弱转强（产品 P1.5）：连板段顶后 ≤4 日低开拉板收盘涨停——两年
-#   n=318 胜率 60.4%/+1.69，前五模拟两年 +173.1%/半年 +38.9%（回撤 −2.0%）。
-# A 连板回落补涨（产品 P1）：≥5 板主段回落 5-30 日小阳企稳 + 段后日均换手
-#   5~20 的承接区（主人指引「资金不在那里才没有承接」的正面量化；不设外部门，
-#   命中即可推荐）——两年 n=1851 胜率 50.8%/+0.23，案例 7/8 放行。
-# 锚点 非涨停弱转强（研究）：主人案例形态本身，全市场两年 37~42%/−1.3~−2.0
-#   负边缘，诚实留研究锚点不进推荐。
+#   n=318 胜率 60.4%/+1.69；信号日盘中低开拉板可预知，直接打板买入优于
+#   次日竞价买（53.0%/+0.62）。
+# A 补涨涨停（产品 P1，N 字板稳定版）：≥5 板主段段顶 5-30 日后 D 日收盘
+#   涨停 + 平开 0~3% 直接进攻 + 换手 <20% + 量能恢复到主段峰值 >30%——
+#   两年 n=157 胜率 70.7%/+3.00，强市 66.3%/弱市 79.2% 双正（跨行情通用）。
+#   打板价买入优于次日竞价（57.9%/+1.02；竞价 gap 2~5% 是备用入场窗）。
+# 观察层 连板回落低吸观察：同窗口的小阳控盘日（主人 8 个 A 案例本体），
+#   预告未来数日可能出现补涨涨停——进推荐页展示但不占回测仓位。
+# 锚点 非涨停弱转强（研究）：全市场两年 37~42%/−1.3~−2.0 负边缘，不进推荐。
 LIMIT_UP_WEAK_TO_STRONG_RECLAIM_RULE_KEY = "limit_up_weak_to_strong_reclaim"
 LIMIT_UP_PULLBACK_REBOUND_RULE_KEY = "limit_up_pullback_rebound"
+LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY = "limit_up_pullback_watchlist"
 RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY = (
     "research_weak_to_strong_turnover_no_limit"
 )
@@ -102,16 +106,23 @@ LIMIT_UP_HISTORY_WINDOW_SESSIONS = 60
 LIMIT_UP_RECLAIM_MIN_STREAK = 4
 LIMIT_UP_RECLAIM_MAX_DAYS_SINCE_PEAK = 4
 LIMIT_UP_RECLAIM_MAX_OPEN_CHG_PCT = 0.0
-# A 连板回落补涨阈值（2026-08-16 二次研究定稿：去外部门、改票本身的承接门槛——
-# 段顶后日均换手 5~20 为「资金还在且未出货」区间；<5 无人承接、>20 巨量换手
-# 是撤离中，两年池 50.8%/+0.227 vs 宽池 49.1%，案例 7/8 覆盖）
+# A 补涨涨停阈值（2026-08-17 涨停确认制定稿，N 字板稳定版：
+# 平开直接进攻 + 换手 <20（10~20 最甜）+ 量能恢复到主段峰值 >30——
+# 两年 n=157 胜率 70.7%/+3.00，强/弱市双正）
 LIMIT_UP_PULLBACK_MIN_STREAK = 5
 LIMIT_UP_PULLBACK_MIN_DAYS_SINCE_PEAK = 5
 LIMIT_UP_PULLBACK_MAX_DAYS_SINCE_PEAK = 30
-LIMIT_UP_PULLBACK_MIN_CLOSE_TO_PREV_PCT = -2.5
-LIMIT_UP_PULLBACK_MAX_VOLUME_MA5_RATIO = 1.15
-LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MIN_PCT = 5.0
-LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MAX_PCT = 20.0
+LIMIT_UP_PULLBACK_MAX_OPEN_CHG_PCT = 3.0
+LIMIT_UP_PULLBACK_MAX_TURNOVER_PCT = 20.0
+LIMIT_UP_PULLBACK_MIN_VOLUME_TO_PEAK_PCT = 30.0
+# 观察层：补涨涨停的预备窗口（小阳控盘日，原 A 低吸形态；进推荐不占仓位）
+LIMIT_UP_WATCHLIST_MIN_STREAK = 5
+LIMIT_UP_WATCHLIST_MIN_DAYS_SINCE_PEAK = 5
+LIMIT_UP_WATCHLIST_MAX_DAYS_SINCE_PEAK = 30
+LIMIT_UP_WATCHLIST_MIN_CLOSE_TO_PREV_PCT = -2.5
+LIMIT_UP_WATCHLIST_MAX_VOLUME_MA5_RATIO = 1.15
+LIMIT_UP_WATCHLIST_POST_STREAK_TURNOVER_MIN_PCT = 5.0
+LIMIT_UP_WATCHLIST_POST_STREAK_TURNOVER_MAX_PCT = 20.0
 # 锚点：非涨停弱转强（形态展示口径，不进推荐）
 RESEARCH_WEAK_TO_STRONG_MIN_STREAK = 4
 RESEARCH_WEAK_TO_STRONG_MAX_DAYS_SINCE_PEAK = 3
@@ -268,7 +279,12 @@ EXPLICIT_CASE_TREND_RULES = (
     DiscoveryRule(
         LIMIT_UP_PULLBACK_REBOUND_RULE_KEY,
         "trend_pullback",
-        "连板回落补涨：≥5 板主段回落 5-30 日后小阳企稳、量能温和，段后日均换手 5-20%（资金还在且未出货的承接区）",
+        "补涨涨停（N 字板）：≥5 板主段回落 5-30 日后 D 日平开 0~3% 直接进攻收盘涨停，换手 <20%、量能恢复到主段峰值 >30%——二波启动确认",
+    ),
+    DiscoveryRule(
+        LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY,
+        "trend_pullback",
+        "连板回落低吸观察：≥5 板主段回落 5-30 日的小阳控盘日（段后换手 5-20 承接区）——补涨涨停的预备窗口，进推荐展示但不占回测仓位",
     ),
     DiscoveryRule(
         RESEARCH_WEAK_TO_STRONG_NO_LIMIT_RULE_KEY,
@@ -4174,33 +4190,72 @@ def process_rule_predicates(
                 <= pullback_days
                 <= LIMIT_UP_PULLBACK_MAX_DAYS_SINCE_PEAK
             ),
-            "small_positive_candle": (
-                (body := _number_or_none(features.get("daily_return_pct")))
+            "close_limit_up_rebound": bool(features.get("limit_up_close_today")),
+            "flat_open_0_to_3pct": (
+                (open_chg := _number_or_none(
+                    features.get("open_to_prev_close_pct")
+                ))
                 is not None
-                and body >= 0
+                and 0.0 <= open_chg <= LIMIT_UP_PULLBACK_MAX_OPEN_CHG_PCT
+            ),
+            "turnover_below_20pct": (
+                (turnover := _number_or_none(features.get("turnover_rate_pct")))
+                is not None
+                and turnover < LIMIT_UP_PULLBACK_MAX_TURNOVER_PCT
+            ),
+            "volume_recovered_over_30pct_of_peak": (
+                (vol_peak := _number_or_none(
+                    features.get("volume_to_streak_peak_pct")
+                ))
+                is not None
+                and vol_peak > LIMIT_UP_PULLBACK_MIN_VOLUME_TO_PEAK_PCT
+            ),
+        },
+        LIMIT_UP_PULLBACK_WATCHLIST_RULE_KEY: {
+            **_limit_up_streak_base_predicates(features),
+            "streak_at_least_5": (
+                (watch_streak := _integer_or_none(
+                    features.get("limit_up_close_streak_max_60d")
+                ))
+                is not None
+                and watch_streak >= LIMIT_UP_WATCHLIST_MIN_STREAK
+            ),
+            "pullback_5_to_30_sessions_since_peak": (
+                (watch_days := _integer_or_none(
+                    features.get("days_since_streak_peak_60d")
+                ))
+                is not None
+                and LIMIT_UP_WATCHLIST_MIN_DAYS_SINCE_PEAK
+                <= watch_days
+                <= LIMIT_UP_WATCHLIST_MAX_DAYS_SINCE_PEAK
+            ),
+            "small_positive_candle": (
+                (watch_body := _number_or_none(features.get("daily_return_pct")))
+                is not None
+                and watch_body >= 0
             ),
             "close_to_prev_at_least_minus_2_5pct": (
-                (close_prev := _number_or_none(
+                (watch_close_prev := _number_or_none(
                     features.get("close_to_prev_close_pct")
                 ))
                 is not None
-                and close_prev >= LIMIT_UP_PULLBACK_MIN_CLOSE_TO_PREV_PCT
+                and watch_close_prev >= LIMIT_UP_WATCHLIST_MIN_CLOSE_TO_PREV_PCT
             ),
             "volume_to_ma5_ratio_at_most_1_15": (
-                (volume_ratio := _number_or_none(
+                (watch_volume_ratio := _number_or_none(
                     features.get("volume_to_ma5_ratio")
                 ))
                 is not None
-                and volume_ratio <= LIMIT_UP_PULLBACK_MAX_VOLUME_MA5_RATIO
+                and watch_volume_ratio <= LIMIT_UP_WATCHLIST_MAX_VOLUME_MA5_RATIO
             ),
             "post_streak_turnover_5_to_20_pct": (
-                (post_turnover := _number_or_none(
+                (watch_post_turnover := _number_or_none(
                     features.get("post_streak_turnover_mean_pct")
                 ))
                 is not None
-                and LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MIN_PCT
-                <= post_turnover
-                < LIMIT_UP_PULLBACK_POST_STREAK_TURNOVER_MAX_PCT
+                and LIMIT_UP_WATCHLIST_POST_STREAK_TURNOVER_MIN_PCT
+                <= watch_post_turnover
+                < LIMIT_UP_WATCHLIST_POST_STREAK_TURNOVER_MAX_PCT
             ),
             "signal_day_not_limit_up_closed": bool(
                 features.get("signal_day_not_limit_up_closed")

@@ -16,6 +16,7 @@ const BACKEND_RULE_KEYS = {
   trend_pullback: [
     "limit_up_weak_to_strong_reclaim",
     "limit_up_pullback_rebound",
+    "limit_up_pullback_watchlist",
     "research_weak_to_strong_turnover_no_limit",
   ],
   oversold_rebound: [
@@ -34,7 +35,7 @@ const BACKEND_RULE_KEYS = {
 function fakePayload(): GuideCasesPayload {
   return {
     status: "ok",
-    score_version: "low-suction-daily-score-v3.3",
+    score_version: "low-suction-daily-score-v3.4",
     families: [
       {
         key: "trend_pullback",
@@ -110,7 +111,7 @@ describe("buildGuideStages", () => {
 });
 
 describe("buildRuleNodes", () => {
-  it("覆盖后端全部 12 条规则且 ruleKey 唯一", () => {
+  it("覆盖后端全部 13 条规则且 ruleKey 唯一", () => {
     const nodes = buildRuleNodes();
     const keys = nodes.map((n) => n.ruleKey);
     expect(new Set(keys).size).toBe(keys.length);
@@ -123,12 +124,13 @@ describe("buildRuleNodes", () => {
     const nodes = buildRuleNodes();
     const trend = nodes.filter((n) => n.family === "trend_pullback");
     const oversold = nodes.filter((n) => n.family === "oversold_rebound");
-    expect(trend).toHaveLength(3);
+    expect(trend).toHaveLength(4);
     expect(oversold).toHaveLength(9);
-    // 趋势 2 条产品（P1.5 涨停弱转强带打板预备徽章 + P1 弱市补涨）+ 1 条研究锚点
+    // 趋势 3 条产品（P1.5 涨停弱转强 + P1 补涨涨停 + 观察层）+ 1 条研究锚点
     expect(trend.filter((n) => n.tier === "product").map((n) => n.ruleKey).sort())
       .toEqual([
         "limit_up_pullback_rebound",
+        "limit_up_pullback_watchlist",
         "limit_up_weak_to_strong_reclaim",
       ]);
     expect(
