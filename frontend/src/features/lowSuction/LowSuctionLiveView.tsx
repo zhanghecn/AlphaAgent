@@ -317,8 +317,14 @@ function CandidateCard({ item }: { item: LowSuctionCandidate }) {
           {item.score.toFixed(0)}
         </span>
         {item.rank != null && <span className="font-mono text-[11px] text-muted-foreground">#{item.rank}</span>}
-        <StockIdentityLink vtSymbol={item.vt_symbol} name={item.stock_name ?? item.symbol} />
-        <span className="ml-auto text-xs text-muted-foreground">{item.rule_label}</span>
+        <StockIdentityLink
+          vtSymbol={item.vt_symbol}
+          name={item.stock_name ?? item.symbol}
+          className="shrink-0"
+        />
+        <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground">
+          {item.rule_label}
+        </span>
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs tabular-nums text-muted-foreground">
         <span>{item.streak.label}</span>
