@@ -643,7 +643,7 @@ export function buildScoreTable(family: GuideFamilyKey): GuideScoreTable {
       components: TREND_SCORE_COMPONENTS,
       maxScoreText: "≈70",
       formula:
-        "总分 = 公共底盘 5 分量之和 ×0.4（连板高度/距顶甜点/收盘控制/量能枯竭/换手承接）+ 路径组件直加（B 低开深度/拉板力度/高连板，或 A MA10 蓄势/情绪温度/地量，≤30）→ 满值约 70，与超跌族同量纲；无换手门禁",
+        "总分 = 公共底盘 5 分量之和 ×0.4（连板高度/距顶甜点/收盘控制/量能枯竭/换手承接）+ 路径组件直加（B 低开深度/拉板力度/高连板，或 A 平开直接性/换手甜点/量能恢复，≤30）→ 满值约 70，与超跌族同量纲；无换手门禁",
     };
   }
   return {

@@ -28,7 +28,6 @@ from alphaagent.server.services.low_suction.daily_factor_extended_discovery impo
     STAGED_MA10_SUPPORT_RULE_KEY,
     _ma10_ma20_next_close_required_return_pct,
     _ma10_ma30_next_close_required_return_pct,
-    _has_initial_short_trend_shape,
     _is_score_candidate,
     _limit_up_streak_features,
     _research_answers,
@@ -1721,23 +1720,6 @@ def test_source_rule_snapshots_do_not_apply_a_generic_prescreen(
     assert [snapshot.trade_date for snapshot in snapshots] == [signal_date]
 
 
-def test_d1_initial_trend_shape_keeps_ma5_and_ma60_out_of_the_outcome_label() -> None:
-    d1_features = {
-        "ma5": 9.5,
-        "ma10": 10.3,
-        "ma20": 10.2,
-        "ma30": 10.1,
-        "ma60": 10.8,
-        "ma10_slope_5d_pct": 0.8,
-        "ma20_slope_5d_pct": 0.2,
-    }
-
-    assert _has_initial_short_trend_shape(d1_features) is True
-    assert _has_initial_short_trend_shape(
-        {**d1_features, "ma20_slope_5d_pct": 0.0}
-    ) is False
-
-
 def test_extended_score_reserves_the_top_band_for_a_complete_source_process() -> None:
     generic_oversold = {
         "long_bear_alignment": True,
@@ -1854,95 +1836,6 @@ def test_rule_selection_uses_development_not_validation_or_holdout() -> None:
     report = summarize_rule_observations(observations, calendar, rule_manifest=rules)
 
     assert report["families"]["oversold_rebound"]["selected_rule"]["key"] == "development_winner"
-
-
-def test_rule_summary_reports_d1_short_trend_as_an_outcome_label() -> None:
-    calendar = _calendar(days=70)
-    rules = {
-        "oversold_rebound": (),
-        "trend_pullback": (DiscoveryRule("transition", "trend_pullback", "test"),),
-    }
-    observations = [
-        {
-            "setup_type": "trend_pullback",
-            "rule_key": "transition",
-            "vt_symbol": f"600{index:03d}.SSE",
-            "trade_date": trade_date,
-            "d1_close_return_pct": 1.0,
-            "d1_label_status": "available",
-            "d1_initial_short_trend_formed": index % 2 == 0,
-        }
-        for index, trade_date in enumerate(calendar)
-    ]
-
-    report = summarize_rule_observations(observations, calendar, rule_manifest=rules)
-    summary = report["families"]["trend_pullback"]["rules"][0]["overall"]
-
-    assert summary["d1_initial_short_trend_formed_available_count"] == 70
-    assert summary["d1_initial_short_trend_formed_count"] == 35
-    assert summary["d1_initial_short_trend_formed_rate_pct"] == 50.0
-
-
-def test_transition_rule_splits_the_optional_volume_confirmation() -> None:
-    calendar = _calendar(days=70)
-    transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
-    rules = {
-        "oversold_rebound": (),
-        "trend_pullback": (DiscoveryRule(transition_key, "trend_pullback", "test"),),
-    }
-    observations = [
-        {
-            "setup_type": "trend_pullback",
-            "rule_key": transition_key,
-            "vt_symbol": f"600{index:03d}.SSE",
-            "trade_date": trade_date,
-            "d1_close_return_pct": 1.0 if index % 2 == 0 else -1.0,
-            "d1_label_status": "available",
-            "transition_volume_expand_then_shrink": index % 2 == 0,
-        }
-        for index, trade_date in enumerate(calendar)
-    ]
-
-    report = summarize_rule_observations(observations, calendar, rule_manifest=rules)
-    comparison = report["families"]["trend_pullback"]["rules"][0]["overall"][
-        "transition_volume_comparison"
-    ]
-
-    assert comparison["expand_then_shrink"]["sample_count"] == 35
-    assert comparison["expand_then_shrink"]["d1_mean_return_pct"] == 1.0
-    assert comparison["other_volume_pattern"]["sample_count"] == 35
-    assert comparison["other_volume_pattern"]["d1_mean_return_pct"] == -1.0
-
-
-def test_transition_rule_splits_d1_initial_trend_outcome_by_return() -> None:
-    calendar = _calendar(days=70)
-    transition_key = "oversold_to_trend_after_ma10_dual_cross_near_ma20_ma30"
-    rules = {
-        "oversold_rebound": (),
-        "trend_pullback": (DiscoveryRule(transition_key, "trend_pullback", "test"),),
-    }
-    observations = [
-        {
-            "setup_type": "trend_pullback",
-            "rule_key": transition_key,
-            "vt_symbol": f"600{index:03d}.SSE",
-            "trade_date": trade_date,
-            "d1_close_return_pct": 1.0 if index % 2 == 0 else -1.0,
-            "d1_label_status": "available",
-            "d1_initial_short_trend_formed": index % 2 == 0,
-        }
-        for index, trade_date in enumerate(calendar)
-    ]
-
-    report = summarize_rule_observations(observations, calendar, rule_manifest=rules)
-    comparison = report["families"]["trend_pullback"]["rules"][0]["overall"][
-        "d1_initial_short_trend_comparison"
-    ]
-
-    assert comparison["formed"]["sample_count"] == 35
-    assert comparison["formed"]["d1_mean_return_pct"] == 1.0
-    assert comparison["not_formed"]["sample_count"] == 35
-    assert comparison["not_formed"]["d1_mean_return_pct"] == -1.0
 
 
 def test_rule_report_keeps_detailed_failures_only_for_the_selected_rule() -> None:

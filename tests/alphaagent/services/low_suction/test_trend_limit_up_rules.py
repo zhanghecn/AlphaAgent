@@ -142,7 +142,6 @@ def _scan_trend(
         "close_off_low_pct": 9.0,
         "volume_to_streak_peak_pct": 30.0,
         "open_to_prev_close_pct": -4.0,
-        "ma10_slope_5d_pct": 2.0,
     }
     snapshot = _trend_snapshot(features, history, signal_date)
     monkeypatch.setattr(

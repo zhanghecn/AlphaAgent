@@ -315,7 +315,6 @@ class _CandidateSnapshot:
     prior_features: Mapping[str, object] | None
     d1_close_return_pct: float | None
     d1_label_status: str
-    d1_initial_short_trend_formed: bool | None
 
 
 @dataclass
@@ -324,25 +323,14 @@ class _ReturnAccumulator:
     label_unavailable_count: int = 0
     dates: set[date] = field(default_factory=set)
     values: list[float] = field(default_factory=list)
-    d1_initial_short_trend_outcomes: list[bool] = field(default_factory=list)
 
-    def add(
-        self,
-        trade_date: date,
-        value: float | None,
-        *,
-        d1_initial_short_trend_formed: bool | None = None,
-    ) -> None:
+    def add(self, trade_date: date, value: float | None) -> None:
         self.candidate_count += 1
         self.dates.add(trade_date)
         if value is None:
             self.label_unavailable_count += 1
             return
         self.values.append(value)
-        if isinstance(d1_initial_short_trend_formed, bool):
-            self.d1_initial_short_trend_outcomes.append(
-                d1_initial_short_trend_formed
-            )
 
     def summary(self) -> dict[str, object]:
         negative = [value for value in self.values if value < 0]
@@ -360,16 +348,6 @@ class _ReturnAccumulator:
             "d1_mean_return_pct": _round_pct(fmean(self.values)) if self.values else None,
             "d1_median_return_pct": _round_pct(median(self.values)) if self.values else None,
             "negative_mean_return_pct": _round_pct(fmean(negative)) if negative else None,
-            "d1_initial_short_trend_formed_available_count": len(
-                self.d1_initial_short_trend_outcomes
-            ),
-            "d1_initial_short_trend_formed_count": sum(
-                self.d1_initial_short_trend_outcomes
-            ),
-            "d1_initial_short_trend_formed_rate_pct": _rate_pct(
-                sum(self.d1_initial_short_trend_outcomes),
-                len(self.d1_initial_short_trend_outcomes),
-            ),
             "daily_candidate_average": _round_pct(
                 self.candidate_count / len(self.dates)
             )
@@ -390,18 +368,6 @@ class _RuleAccumulator:
     worst_heap: list[tuple[float, int, dict[str, object]]] = field(default_factory=list)
     label_excluded_main_board_price_limit_count: int = 0
     observation_index: int = 0
-    transition_volume_expand_then_shrink: _ReturnAccumulator = field(
-        default_factory=_ReturnAccumulator
-    )
-    transition_volume_other_pattern: _ReturnAccumulator = field(
-        default_factory=_ReturnAccumulator
-    )
-    d1_initial_short_trend_formed_group: _ReturnAccumulator = field(
-        default_factory=_ReturnAccumulator
-    )
-    d1_initial_short_trend_not_formed_group: _ReturnAccumulator = field(
-        default_factory=_ReturnAccumulator
-    )
 
     def add(self, observation: Mapping[str, object]) -> None:
         label_status = str(observation.get("d1_label_status") or "available")
@@ -411,53 +377,11 @@ class _RuleAccumulator:
 
         trade_date = _required_date(observation.get("trade_date"))
         value = _number_or_none(observation.get("d1_close_return_pct"))
-        d1_initial_short_trend_outcome = observation.get(
-            "d1_initial_short_trend_formed"
-        )
-        if not isinstance(d1_initial_short_trend_outcome, bool):
-            d1_initial_short_trend_outcome = None
         symbol = str(observation.get("vt_symbol") or "").strip().upper()
-        self.overall.add(
-            trade_date,
-            value,
-            d1_initial_short_trend_formed=d1_initial_short_trend_outcome,
-        )
-        self.daily[trade_date].add(
-            trade_date,
-            value,
-            d1_initial_short_trend_formed=d1_initial_short_trend_outcome,
-        )
+        self.overall.add(trade_date, value)
+        self.daily[trade_date].add(trade_date, value)
         if symbol:
-            self.stocks[symbol].add(
-                trade_date,
-                value,
-                d1_initial_short_trend_formed=d1_initial_short_trend_outcome,
-            )
-        transition_volume_confirmation = observation.get(
-            "transition_volume_expand_then_shrink"
-        )
-        if isinstance(transition_volume_confirmation, bool):
-            volume_accumulator = (
-                self.transition_volume_expand_then_shrink
-                if transition_volume_confirmation
-                else self.transition_volume_other_pattern
-            )
-            volume_accumulator.add(
-                trade_date,
-                value,
-                d1_initial_short_trend_formed=d1_initial_short_trend_outcome,
-            )
-        if d1_initial_short_trend_outcome is not None:
-            trend_outcome_accumulator = (
-                self.d1_initial_short_trend_formed_group
-                if d1_initial_short_trend_outcome
-                else self.d1_initial_short_trend_not_formed_group
-            )
-            trend_outcome_accumulator.add(
-                trade_date,
-                value,
-                d1_initial_short_trend_formed=d1_initial_short_trend_outcome,
-            )
+            self.stocks[symbol].add(trade_date, value)
         if value is not None:
             self._record_worst(observation, value)
 
@@ -467,9 +391,6 @@ class _RuleAccumulator:
             "vt_symbol": str(observation.get("vt_symbol") or ""),
             "trade_date": _required_date(observation.get("trade_date")).isoformat(),
             "d1_close_return_pct": value,
-            "d1_initial_short_trend_formed": observation.get(
-                "d1_initial_short_trend_formed"
-            ),
             "feature_snapshot": dict(observation.get("feature_snapshot") or {}),
         }
         item = (-value, self.observation_index, row)
@@ -528,55 +449,18 @@ class _RuleAccumulator:
                 )
             ],
         }
-        if (
-            self.transition_volume_expand_then_shrink.candidate_count
-            or self.transition_volume_other_pattern.candidate_count
-        ):
-            result["transition_volume_comparison"] = {
-                "expand_then_shrink": self.transition_volume_expand_then_shrink.summary(),
-                "other_volume_pattern": self.transition_volume_other_pattern.summary(),
-            }
-        if (
-            self.d1_initial_short_trend_formed_group.candidate_count
-            or self.d1_initial_short_trend_not_formed_group.candidate_count
-        ):
-            result["d1_initial_short_trend_comparison"] = {
-                "formed": self.d1_initial_short_trend_formed_group.summary(),
-                "not_formed": self.d1_initial_short_trend_not_formed_group.summary(),
-            }
         return result
 
 
 def _render_rule_aggregate(accumulator: _RuleAccumulator) -> dict[str, object]:
     """Render only the aggregate needed to rank a rule or score band."""
 
-    result = {
+    return {
         **accumulator.overall.summary(),
         "label_excluded_main_board_price_limit_count": (
             accumulator.label_excluded_main_board_price_limit_count
         ),
     }
-    if (
-        accumulator.transition_volume_expand_then_shrink.candidate_count
-        or accumulator.transition_volume_other_pattern.candidate_count
-    ):
-        result["transition_volume_comparison"] = {
-            "expand_then_shrink": (
-                accumulator.transition_volume_expand_then_shrink.summary()
-            ),
-            "other_volume_pattern": (
-                accumulator.transition_volume_other_pattern.summary()
-            ),
-        }
-    if (
-        accumulator.d1_initial_short_trend_formed_group.candidate_count
-        or accumulator.d1_initial_short_trend_not_formed_group.candidate_count
-    ):
-        result["d1_initial_short_trend_comparison"] = {
-            "formed": accumulator.d1_initial_short_trend_formed_group.summary(),
-            "not_formed": accumulator.d1_initial_short_trend_not_formed_group.summary(),
-        }
-    return result
 
 
 @dataclass
@@ -1328,7 +1212,6 @@ def build_extended_daily_features(
         and recent_pullback_from_high_pct <= OVERSOLD_PROCESS_PULLBACK_MIN_PCT
     )
     ma10_slope_2d = _series_slope_pct(ma_series[10], lookback=2)
-    ma10_slope_5d = _series_slope_pct(ma_series[10], lookback=5)
     prior_ma10_slope_2d = _series_slope_pct(
         ma_series[10],
         lookback=2,
@@ -1649,7 +1532,6 @@ def build_extended_daily_features(
         "m10_dual_cross_before_m20_m30": m10_dual_cross_before_m20_m30,
         "ma10_ma20_slopes_up": ma10_ma20_slopes_up,
         "ma10_slope_2d_pct": ma10_slope_2d,
-        "ma10_slope_5d_pct": ma10_slope_5d,
         "ma10_slope_improvement_2d_pct": ma10_slope_improvement_2d,
         "ma10_ma20_gap_narrowing_3d_pct": ma10_ma20_gap_narrowing_3d,
         "ma10_ma20_gap_narrowing": bool(
@@ -2693,8 +2575,8 @@ def render_extended_daily_factor_markdown(report: Mapping[str, object]) -> str:
         )
 
     lines.extend(["", "## 预登记候选规则", ""])
-    lines.append("| 类型 | 规则 | 描述 | 总样本 | 总 D+1 均值 | D+1 初始趋势率 | 验证 D+1 均值 | 留出 D+1 均值 | 严格排除 |")
-    lines.append("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    lines.append("| 类型 | 规则 | 描述 | 总样本 | 总 D+1 均值 | 验证 D+1 均值 | 留出 D+1 均值 | 严格排除 |")
+    lines.append("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |")
     families = report.get("families")
     if isinstance(families, Mapping):
         for setup_type in SETUP_TYPES:
@@ -2709,15 +2591,12 @@ def render_extended_daily_factor_markdown(report: Mapping[str, object]) -> str:
                 validation = segments.get("validation") if isinstance(segments.get("validation"), Mapping) else {}
                 holdout = segments.get("holdout") if isinstance(segments.get("holdout"), Mapping) else {}
                 lines.append(
-                    "| {setup} | {key} | {description} | {samples} | {overall_mean} | {trend_rate} | {validation_mean} | {holdout_mean} | {excluded} |".format(
+                    "| {setup} | {key} | {description} | {samples} | {overall_mean} | {validation_mean} | {holdout_mean} | {excluded} |".format(
                         setup=setup_type,
                         key=rule.get("key", "-"),
                         description=rule.get("description", "-"),
                         samples=overall.get("sample_count", 0),
                         overall_mean=_number_text(overall.get("d1_mean_return_pct")),
-                        trend_rate=_number_text(
-                            overall.get("d1_initial_short_trend_formed_rate_pct")
-                        ),
                         validation_mean=_number_text(validation.get("d1_mean_return_pct")),
                         holdout_mean=_number_text(holdout.get("d1_mean_return_pct")),
                         excluded=overall.get("label_excluded_main_board_price_limit_count", 0),
@@ -3152,7 +3031,6 @@ def _iter_rule_observations(
         bars,
         calendar,
         security_status,
-        include_d1_initial_short_trend_outcome=True,
         include_pre_attack_base_features=True,
     ):
         for setup_type, rules in DISCOVERY_RULES.items():
@@ -3205,9 +3083,6 @@ def _iter_score_observations(
                     "trade_date": snapshot.trade_date,
                     "d1_close_return_pct": snapshot.d1_close_return_pct,
                     "d1_label_status": snapshot.d1_label_status,
-                    "d1_initial_short_trend_formed": (
-                        snapshot.d1_initial_short_trend_formed
-                    ),
                     "feature_snapshot": _feature_snapshot(snapshot.features),
                 }
 
@@ -3484,7 +3359,6 @@ def _iter_candidate_snapshots(
     *,
     require_rule_match: bool = True,
     rule_manifest: Mapping[str, Sequence[DiscoveryRule]] = DISCOVERY_RULES,
-    include_d1_initial_short_trend_outcome: bool = False,
     include_pre_attack_base_features: bool = False,
     target_dates: set[date] | None = None,
 ) -> Iterable[_CandidateSnapshot]:
@@ -3547,29 +3421,6 @@ def _iter_candidate_snapshots(
                 trade_date,
                 eligible_pairs,
             )
-            calendar_position = calendar_positions.get(trade_date)
-            d1_trade_date = (
-                calendar_tuple[calendar_position + 1]
-                if calendar_position is not None
-                and calendar_position + 1 < len(calendar_tuple)
-                else None
-            )
-            d1_initial_short_trend_formed = (
-                _d1_initial_short_trend_shape(
-                    history,
-                    position=position_by_date.get(d1_trade_date)
-                    if d1_label_status == "available"
-                    else None,
-                )
-                if (
-                    include_d1_initial_short_trend_outcome
-                    and bool(
-                        features.get("trend_transition_preparation_eligible")
-                        or features.get("trend_transition_eligible")
-                    )
-                )
-                else None
-            )
             yield _CandidateSnapshot(
                 symbol=symbol,
                 trade_date=trade_date,
@@ -3580,7 +3431,6 @@ def _iter_candidate_snapshots(
                 prior_features=prior_features,
                 d1_close_return_pct=d1_close_return_pct,
                 d1_label_status=d1_label_status,
-                d1_initial_short_trend_formed=d1_initial_short_trend_formed,
             )
 
 
@@ -4825,41 +4675,6 @@ def _causal_d1_label(
     if eligible_pairs and (symbol, calendar[position + 1]) not in eligible_pairs:
         return None, "label_unavailable_security"
     return d1_close_label_status(closes, calendar, trade_date)
-
-
-def _d1_initial_short_trend_shape(
-    history: Sequence[Mapping[str, object]],
-    *,
-    position: int | None,
-) -> bool | None:
-    """Label D+1 only; this outcome never participates in D-day selection."""
-
-    if position is None:
-        return None
-    d1_features = build_extended_daily_features(
-        history[max(0, position - 79) : position + 1]
-    )
-    return _has_initial_short_trend_shape(d1_features)
-
-
-def _has_initial_short_trend_shape(features: Mapping[str, object]) -> bool:
-    """Recognize the first MA10/20/30 trend form without MA5 or MA60 gates."""
-
-    ma10 = _number_or_none(features.get("ma10"))
-    ma20 = _number_or_none(features.get("ma20"))
-    ma30 = _number_or_none(features.get("ma30"))
-    ma10_slope = _number_or_none(features.get("ma10_slope_5d_pct"))
-    ma20_slope = _number_or_none(features.get("ma20_slope_5d_pct"))
-    return bool(
-        ma10 is not None
-        and ma20 is not None
-        and ma30 is not None
-        and ma10_slope is not None
-        and ma20_slope is not None
-        and ma10 > ma20 > ma30
-        and ma10_slope > 0
-        and ma20_slope > 0
-    )
 
 
 def _eligible_security_pairs(
