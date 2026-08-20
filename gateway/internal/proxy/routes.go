@@ -44,9 +44,9 @@ func Mount(r chi.Router, cfg *config.Config, authSvc *auth.Service) {
 	r.Get("/sitemap.xml", handler.Sitemap(!cfg.AuthRequired))
 
 	// 公开路由别名直接重定向，避免搜索引擎将 SPA 内部跳转视为重复内容。
-	r.Get("/explore", handler.PermanentRedirect("/mainline"))
-	r.Get("/chain", handler.PermanentRedirect("/mainline"))
-	r.Get("/data-sync", handler.PermanentRedirect("/data"))
+	mountPermanentRedirect(r, "/explore", "/mainline")
+	mountPermanentRedirect(r, "/chain", "/mainline")
+	mountPermanentRedirect(r, "/data-sync", "/data")
 
 	// 2. 认证端点（公开）
 	r.Route("/api/auth", func(r chi.Router) {
@@ -85,4 +85,10 @@ func Mount(r chi.Router, cfg *config.Config, authSvc *auth.Service) {
 	r.Handle("/stocks/*", privateWebHandler)
 	r.Handle("/indices/*", privateWebHandler)
 	r.Handle("/*", webHandler)
+}
+
+func mountPermanentRedirect(r chi.Router, path string, target string) {
+	redirect := handler.PermanentRedirect(target)
+	r.Get(path, redirect)
+	r.Head(path, redirect)
 }

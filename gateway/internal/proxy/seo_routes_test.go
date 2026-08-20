@@ -69,15 +69,18 @@ func TestMountAddsNoIndexToPrivateAndParameterizedPages(t *testing.T) {
 
 func TestMountPermanentlyRedirectsLegacyAliases(t *testing.T) {
 	router := mountSEOTestRouter(t, http.NotFoundHandler())
-	request := httptest.NewRequest(http.MethodGet, "/explore?sector=ai", nil)
-	response := httptest.NewRecorder()
 
-	router.ServeHTTP(response, request)
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		request := httptest.NewRequest(method, "/explore?sector=ai", nil)
+		response := httptest.NewRecorder()
 
-	if response.Code != http.StatusMovedPermanently {
-		t.Fatalf("status = %d, want 301", response.Code)
-	}
-	if got := response.Header().Get("Location"); got != "/mainline?sector=ai" {
-		t.Fatalf("Location = %q", got)
+		router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusMovedPermanently {
+			t.Errorf("%s: status = %d, want 301", method, response.Code)
+		}
+		if got := response.Header().Get("Location"); got != "/mainline?sector=ai" {
+			t.Errorf("%s: Location = %q", method, got)
+		}
 	}
 }
