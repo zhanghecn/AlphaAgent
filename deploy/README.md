@@ -8,20 +8,20 @@
 ## 一、架构（30 秒看懂）
 
 ```
-浏览器 → gateway:8080（唯一入口，登录 + 反向代理）
+浏览器 → gateway:8080（唯一入口，匿名读取 + 管理员写操作 + 反向代理）
          ├─ /api/auth/*   → 网关自己处理（登录/登出/当前用户）
-         ├─ /api/*        → 鉴权后转发到 alphaagent-api:8000
+         ├─ /api/*        → 默认匿名读取；写操作校验管理员 JWT 后转发到 alphaagent-api:8000
          └─ /*            → 转发到 alphaagent-web:80（前端 nginx）
 ```
 
 | 服务 | 作用 | 端口 |
 |---|---|---|
-| `alphaagent-gateway` | Go 网关：管理员登录 + 反向代理 + 登录态过滤 | **8080（对外唯一）** |
+| `alphaagent-gateway` | Go 网关：匿名读取、管理员写操作、反向代理 | **8080（对外唯一）** |
 | `alphaagent-api` | FastAPI 后端 | 8000（仅内部） |
 | `alphaagent-web` | 前端（nginx serve dist） | 80（仅内部） |
 | `postgres` / `redis` | 数据 + 缓存 | 仅内部 |
 
-api/web 不对外，必须经网关登录后访问。
+api/web 不对外，所有访问都经网关。默认读取功能无需登录；管理员写操作才需要登录。
 
 ---
 
@@ -30,10 +30,10 @@ api/web 不对外，必须经网关登录后访问。
 ### 首次启动
 ```bash
 cp .env.example .env
-# 编辑 .env，设好（见第四节）：ADMIN_PASSWORD / JWT_SECRET / POSTGRES_PASSWORD
+# 编辑 .env，至少设置 POSTGRES_PASSWORD；管理员写操作凭证见第四节
 docker compose up -d --build
 ```
-打开 http://localhost:8080 ，用 `.env` 里的账号密码登录。
+打开 http://localhost:8080 直接使用。需要手动同步、回测、升级等写操作时，再访问 `/login`。
 
 ### 🤖 你的开发循环（AI 写代码 → 你测试）
 
@@ -61,11 +61,11 @@ docker compose up -d --build
 git clone https://github.com/zhanghecn/AlphaAgent.git
 cd AlphaAgent
 cp .env.example .env
-vi .env            # 设好 ADMIN_PASSWORD / JWT_SECRET / POSTGRES_PASSWORD（见第四节）
+vi .env            # 至少设好 POSTGRES_PASSWORD；管理员写操作凭证见第四节
 docker compose up -d --build    # 首次较慢（装 Python 依赖），之后就快
 docker compose logs -f alphaagent-gateway   # 看网关日志确认起来
 ```
-浏览器打开 `http://<服务器IP>:8080`，用 `.env` 账号密码登录。
+浏览器打开 `http://<服务器IP>:8080`，无需登录即可使用读取功能。
 
 > 防火墙开 **8080**（或改 `.env` 的 `GATEWAY_PORT=80` 用标准 80 端口）。
 
@@ -77,22 +77,29 @@ git pull && docker compose up -d --build
 
 ---
 
-## 四、账号密码配置（`.env`）
+## 四、访问与管理员权限（`.env`）
 
 在项目根目录 `.env` 文件里配（服务器和本地都一样）：
 
 ```bash
+AUTH_REQUIRED=false                           # 默认：读取接口无需登录
 ADMIN_USERNAME=admin                          # 管理员账号（可改）
-ADMIN_PASSWORD=你的强密码                       # 必填，登录用
-JWT_SECRET=（openssl rand -hex 32 生成）        # 必填，≥32字节，JWT 签名
+ADMIN_PASSWORD=你的强密码                       # 可选；与 JWT_SECRET 成对设置
+JWT_SECRET=openssl-rand-hex-32-的输出          # 可选；至少 32 字节
 POSTGRES_PASSWORD=你的数据库密码                 # 必填
 GATEWAY_PORT=8080                             # 网关端口
 ```
 
-**生成 JWT_SECRET**：终端跑 `openssl rand -hex 32`，输出粘到 `.env`。
+`AUTH_REQUIRED=false` 时：
+
+- `ADMIN_PASSWORD` 和 `JWT_SECRET` 都留空：页面和读取接口可直接使用；网关会拒绝同步、回测、升级等写操作。
+- 两项都设置：页面和读取接口仍无需登录；管理员访问 `/login` 获得 JWT 后可执行写操作。
+- `AUTH_REQUIRED=true`：恢复旧行为，所有 API 都要求 JWT 登录。
+
+管理员凭证必须成对设置，`JWT_SECRET` 至少 32 字节。可用 `openssl rand -hex 32` 生成签名密钥。
 
 - **改管理员密码**：改 `.env` 的 `ADMIN_PASSWORD` → `docker compose up -d`
-- **让所有人立即下线**：改 `.env` 的 `JWT_SECRET` → `docker compose up -d`（所有 token 失效）
+- **让管理员 token 立即失效**：改 `.env` 的 `JWT_SECRET` → `docker compose up -d`
 
 ---
 
@@ -132,7 +139,7 @@ docker compose -f docker-compose.local.yml up -d   # pull_policy:always 自动�
 | 看后端日志 | `docker compose logs -f alphaagent-api` |
 | 改前端后生效 | `docker compose up -d --build alphaagent-web` |
 | 改后端后生效 | `docker compose up -d --build alphaagent-api` |
-| 改密码 | 改 `.env` → `docker compose up -d` |
+| 改访问模式或管理员凭证 | 改 `.env` → `docker compose up -d` |
 | 停止全部 | `docker compose down` |
 | 停止并清数据（⚠️慎用） | `docker compose down -v` |
 | 进后端容器排错 | `docker compose exec alphaagent-api bash` |
@@ -153,16 +160,29 @@ docker compose -f docker-compose.local.yml up -d   # pull_policy:always 自动�
 
 ---
 
-## 八、首次部署 .env 最小配置
+## 八、并发与首次部署配置
+
+默认 Compose 使用两个 API worker，读取数据优先来自 PostgreSQL 快照和 Redis 共享缓存：
 
 ```bash
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=改成你自己的强密码
-JWT_SECRET=粘贴 openssl rand -hex 32 的输出
+ALPHAAGENT_API_WORKERS=2
+ALPHAAGENT_API_CPUS=1.0
+ALPHAAGENT_SCHEDULER_CPUS=0.5
+ALPHAAGENT_POSTGRES_CPUS=1.0
+DATABASE_POOL_SIZE=8
+DATABASE_MAX_OVERFLOW=8
+```
+
+这组默认值会让两个 API worker 最多打开 32 条数据库连接。上线前应按实际查询负载压测；需要继续扩容时，将 API 容器横向扩展，并让所有实例共用同一个 PostgreSQL、Redis 与负载均衡入口。
+
+首次部署最小配置：
+
+```bash
+AUTH_REQUIRED=false
 POSTGRES_USER=alphaagent
 POSTGRES_DB=alphaagent
 POSTGRES_PASSWORD=改成你自己的数据库密码
 GATEWAY_PORT=8080
 ```
 
-填好就能跑。有问题随时让 AI 对照这份文档排查。
+需要管理员写操作时，再补充 `ADMIN_PASSWORD` 与 `JWT_SECRET`。

@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import is_database_configured, session_scope
+from alphaagent.server.services import market_dashboard
 
 router = APIRouter(prefix="/research/sectors", tags=["research-sectors"])
 
@@ -26,11 +27,20 @@ def sector_ranking(
     sort_by: str = Query("change_pct", description="change_pct|fund_flow|stock_count"),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
-    """Return composite sector/concept ranking from live AkShare data.
+    """Return a stored sector ranking, then bootstrap from live AkShare data.
 
-    Combines board listing with fund flow data to produce a ranked view
-    usable by the Theme Explorer and Market Pulse pages.
+    The worker materializes the intraday sector-fund-flow snapshot every five
+    minutes. A live request is only used before the first background snapshot
+    exists, so opening a page does not normally fan out to the data provider.
     """
+    stored = market_dashboard.load_sector_ranking_snapshot(
+        sector_type=sector_type,
+        sort_by=sort_by,
+        limit=limit,
+    )
+    if stored is not None:
+        return stored
+
     from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 
     adapter = AkShareAdapter()
@@ -56,6 +66,9 @@ def sector_ranking(
             "status": "unavailable",
             "message": "No board data available",
             "updated_at": now_iso,
+            "data_origin": "live_api",
+            "storage_table": None,
+            "fallback_used": True,
         }
 
     # 2) Enrich with fund flow data (best-effort)
@@ -128,6 +141,9 @@ def sector_ranking(
         "sort_by": sort_by,
         "status": "ready",
         "updated_at": now_iso,
+        "data_origin": "live_api",
+        "storage_table": None,
+        "fallback_used": True,
     }
 
 

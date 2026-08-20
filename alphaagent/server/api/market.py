@@ -12,6 +12,7 @@ from alphaagent.data_sources.akshare_adapter import AkShareAdapter
 from alphaagent.market.providers import RealMarketDataClient
 from alphaagent.server.core.config import get_settings
 from alphaagent.server.core.responses import fail, ok
+from alphaagent.server.services import market_dashboard
 
 router = APIRouter(prefix="/market", tags=["market"])
 
@@ -33,7 +34,14 @@ def market_fund_flow(
     sector_type: str = Query("concept", description="concept|industry"),
     top_n: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
-    """Return sector-level fund flow ranking from live AkShare."""
+    """Return a stored sector-fund-flow snapshot, then bootstrap from AkShare."""
+    stored = market_dashboard.load_fund_flow_snapshot(
+        sector_type=sector_type,
+        top_n=top_n,
+    )
+    if stored is not None:
+        return stored
+
     adapter = AkShareAdapter()
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -66,6 +74,9 @@ def market_fund_flow(
             "sector_type": sector_type,
             "status": "ready",
             "updated_at": now_iso,
+            "data_origin": "live_api",
+            "storage_table": None,
+            "fallback_used": True,
         }
     except Exception as exc:
         return {
@@ -73,8 +84,11 @@ def market_fund_flow(
             "total": 0,
             "sector_type": sector_type,
             "status": "unavailable",
-            "message": str(exc),
+            "message": exc.__class__.__name__,
             "updated_at": now_iso,
+            "data_origin": "live_api",
+            "storage_table": None,
+            "fallback_used": True,
         }
 
 
@@ -82,7 +96,11 @@ def market_fund_flow(
 def market_hot_ranks(
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
-    """Return stock hot rank (东方财富人气榜) from live AkShare."""
+    """Return a stored popularity ranking, then bootstrap from AkShare."""
+    stored = market_dashboard.load_hot_rank_snapshot(limit=limit)
+    if stored is not None:
+        return stored
+
     adapter = AkShareAdapter()
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -93,14 +111,20 @@ def market_hot_ranks(
             "total": len(items),
             "status": "ready",
             "updated_at": now_iso,
+            "data_origin": "live_api",
+            "storage_table": None,
+            "fallback_used": True,
         }
     except Exception as exc:
         return {
             "items": [],
             "total": 0,
             "status": "unavailable",
-            "message": str(exc),
+            "message": exc.__class__.__name__,
             "updated_at": now_iso,
+            "data_origin": "live_api",
+            "storage_table": None,
+            "fallback_used": True,
         }
 
 
@@ -108,7 +132,11 @@ def market_hot_ranks(
 def market_limit_pools(
     trade_date: str | None = Query(None, description="YYYYMMDD, defaults to today"),
 ) -> dict[str, Any]:
-    """Return limit-up/down/strong pools from live AkShare."""
+    """Return a stored five-pool snapshot, then bootstrap from AkShare."""
+    stored = market_dashboard.load_limit_pool_snapshot(trade_date=trade_date)
+    if stored is not None:
+        return stored
+
     adapter = AkShareAdapter()
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -117,12 +145,18 @@ def market_limit_pools(
             **data,
             "status": "ready",
             "updated_at": now_iso,
+            "data_origin": "live_api",
+            "storage_table": None,
+            "fallback_used": True,
         }
     except Exception as exc:
         return {
             "trade_date": trade_date or date.today().strftime("%Y%m%d"),
             "pools": {},
             "status": "unavailable",
-            "message": str(exc),
+            "message": exc.__class__.__name__,
             "updated_at": now_iso,
+            "data_origin": "live_api",
+            "storage_table": None,
+            "fallback_used": True,
         }

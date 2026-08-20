@@ -3,7 +3,7 @@
  */
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { lazy, Suspense, useMemo } from "react";
 import {
   fetchStockBusiness,
   fetchStockDetail,
@@ -11,15 +11,13 @@ import {
   fetchStockSnapshot,
   type LeaderIdentity,
 } from "@/api/stocks";
-import { fetchLimitPools } from "@/api/market";
+import { fetchLimitPools, marketQueryKeys } from "@/api/market";
 import { fetchConceptCards } from "@/api/research";
 import { Badge } from "@/components/ui/badge";
 import { ConceptTag } from "@/components/ConceptTag";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
-import { StockFinanceChart } from "@/features/stocks/StockFinanceChart";
 import { StockIndicatorPanel } from "@/features/stocks/StockIndicatorPanel";
-import { StockKlineChart } from "@/features/stocks/StockKlineChart";
 import { StockQuoteHeader } from "@/features/stocks/StockQuoteHeader";
 import { cn, formatPct, priceColorClass } from "@/lib/utils";
 import type {
@@ -43,6 +41,13 @@ import {
   ShieldCheck,
   TrendingUp,
 } from "lucide-react";
+
+const StockKlineChart = lazy(() =>
+  import("@/features/stocks/StockKlineChart").then((module) => ({ default: module.StockKlineChart })),
+);
+const StockFinanceChart = lazy(() =>
+  import("@/features/stocks/StockFinanceChart").then((module) => ({ default: module.StockFinanceChart })),
+);
 
 export function StockDetailPage() {
   const { vtSymbol } = useParams<{ vtSymbol: string }>();
@@ -82,7 +87,7 @@ export function StockDetailPage() {
   });
 
   const limitPoolQuery = useQuery({
-    queryKey: ["limit-pools-seal", vtSymbol],
+    queryKey: marketQueryKeys.limitPools(),
     queryFn: () => fetchLimitPools(),
     staleTime: 60_000,
     enabled: Boolean(vtSymbol && !replayDate),
@@ -156,7 +161,9 @@ export function StockDetailPage() {
       />
 
       <div className="rounded-lg border p-3 sm:p-4">
-        <StockKlineChart vtSymbol={vtSymbol} />
+        <Suspense fallback={<ChartLoading heightClassName="h-[360px]" />}>
+          <StockKlineChart vtSymbol={vtSymbol} />
+        </Suspense>
       </div>
 
       <section className="rounded-lg border p-3 sm:p-4">
@@ -199,10 +206,16 @@ export function StockDetailPage() {
           <TrendingUp size={14} />
           历史财报
         </h3>
-        <StockFinanceChart vtSymbol={vtSymbol} />
+        <Suspense fallback={<ChartLoading heightClassName="h-[420px]" />}>
+          <StockFinanceChart vtSymbol={vtSymbol} />
+        </Suspense>
       </section>
     </div>
   );
+}
+
+function ChartLoading({ heightClassName }: { heightClassName: string }) {
+  return <div className={`animate-pulse rounded-md bg-muted ${heightClassName}`} />;
 }
 
 // ── Identity Card (core innovation) ──

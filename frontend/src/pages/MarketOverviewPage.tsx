@@ -11,7 +11,12 @@ import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { fetchSectorRanking } from "@/api/research";
-import { fetchFundFlow, fetchHotRanks, fetchLimitPools } from "@/api/market";
+import {
+  fetchFundFlow,
+  fetchHotRanks,
+  fetchLimitPools,
+  marketQueryKeys,
+} from "@/api/market";
 import { formatPct, formatAmount, cn } from "@/lib/utils";
 import type {
   SectorRankingItem,
@@ -67,7 +72,8 @@ function MainlineRankingPanel() {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["sectorRanking", "all"],
     queryFn: () => fetchSectorRanking({ sector_type: "all", sort_by: "change_pct", limit: 15 }),
-    staleTime: 30_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
   });
 
   if (isLoading) return <LoadingState rows={6} />;
@@ -176,21 +182,24 @@ function MainlineRankRow({ item, rank }: { item: SectorRankingItem; rank: number
 
 function MarketThermometerPanel() {
   const limitQuery = useQuery({
-    queryKey: ["limitPools"],
+    queryKey: marketQueryKeys.limitPools(),
     queryFn: () => fetchLimitPools(),
-    staleTime: 30_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
   });
 
   const hotQuery = useQuery({
-    queryKey: ["hotRanks", 5],
+    queryKey: marketQueryKeys.hotRanks(5),
     queryFn: () => fetchHotRanks(5),
-    staleTime: 30_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
   });
 
   const fundQuery = useQuery({
-    queryKey: ["fundFlow", "concept", 5],
+    queryKey: marketQueryKeys.fundFlow("concept", 5),
     queryFn: () => fetchFundFlow("concept", 5),
-    staleTime: 30_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
   });
 
   return (

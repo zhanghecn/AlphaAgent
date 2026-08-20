@@ -159,7 +159,7 @@ export interface MarketTimingPanel {
   sample_range: [string, string];
 }
 
-/** 全套面板数据(概览+K线+信号+准确率)。首次约 1 分钟, 之后命中缓存秒回。 */
-export function fetchMarketTimingPanel(force = false): Promise<MarketTimingPanel> {
-  return apiClient.get<MarketTimingPanel>(`/market-timing/panel${force ? "?force=true" : ""}`);
+/** 读取后台已物化的概览、K 线、信号和准确率，不在页面请求中计算。 */
+export function fetchMarketTimingPanel(): Promise<MarketTimingPanel> {
+  return apiClient.get<MarketTimingPanel>("/market-timing/panel");
 }

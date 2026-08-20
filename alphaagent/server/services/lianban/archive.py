@@ -109,7 +109,11 @@ def pool_row(
 
 
 def archive_daily_pools(
-    session, trade_date: date, *, adapter: Any = None
+    session,
+    trade_date: date,
+    *,
+    adapter: Any = None,
+    include_news: bool = True,
 ) -> dict[str, Any]:
     """归档 trade_date 当日五池到 limit_up_pool_snapshots。
 
@@ -165,11 +169,12 @@ def archive_daily_pools(
         "unavailable": unavailable,
         "truncated": truncated,
     }
-    # 驱动新闻抓取(题材分配增强): 失败不阻塞归档主流程。
-    try:
-        from alphaagent.server.services.lianban.news_driver import sync_zt_news
+    # 驱动新闻抓取逐股访问外部源，盘中快照只更新五池本身，盘后才执行。
+    if include_news:
+        try:
+            from alphaagent.server.services.lianban.news_driver import sync_zt_news
 
-        result["news"] = sync_zt_news(session, trade_date, adapter=adapter)
-    except Exception as exc:  # noqa: BLE001 - 增强路径降级
-        result["news"] = {"error": exc.__class__.__name__}
+            result["news"] = sync_zt_news(session, trade_date, adapter=adapter)
+        except Exception as exc:  # noqa: BLE001 - 增强路径降级
+            result["news"] = {"error": exc.__class__.__name__}
     return result

@@ -6,6 +6,7 @@ import (
 )
 
 func TestLoadRequiresAdminPassword(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
 	t.Setenv("ADMIN_PASSWORD", "")
 	t.Setenv("JWT_SECRET", "long-enough-secret-32-bytes-padding!!!")
 	if _, err := Load(); err == nil {
@@ -14,6 +15,7 @@ func TestLoadRequiresAdminPassword(t *testing.T) {
 }
 
 func TestLoadRequiresJWTSecretLength(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
 	t.Setenv("ADMIN_PASSWORD", "pw")
 	t.Setenv("JWT_SECRET", "short")
 	if _, err := Load(); err == nil {
@@ -22,6 +24,7 @@ func TestLoadRequiresJWTSecretLength(t *testing.T) {
 }
 
 func TestLoadValid(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "true")
 	t.Setenv("ADMIN_PASSWORD", "pw")
 	t.Setenv("JWT_SECRET", "long-enough-secret-32-bytes-padding!!!")
 	t.Setenv("GATEWAY_PORT", "9090")
@@ -37,6 +40,49 @@ func TestLoadValid(t *testing.T) {
 	}
 	if cfg.AdminUsername != "admin" {
 		t.Errorf("username = %q, want admin", cfg.AdminUsername)
+	}
+	if !cfg.OperatorAuthEnabled {
+		t.Error("OperatorAuthEnabled = false, want true")
+	}
+}
+
+func TestLoadAllowsAnonymousModeWithoutCredentials(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "false")
+	t.Setenv("ADMIN_PASSWORD", "")
+	t.Setenv("JWT_SECRET", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("anonymous mode should not require credentials: %v", err)
+	}
+	if cfg.AuthRequired {
+		t.Error("AuthRequired = true, want false")
+	}
+	if cfg.OperatorAuthEnabled {
+		t.Error("OperatorAuthEnabled = true, want false")
+	}
+}
+
+func TestLoadAnonymousModeEnablesOperatorWritesWhenCredentialsConfigured(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "false")
+	t.Setenv("ADMIN_PASSWORD", "pw")
+	t.Setenv("JWT_SECRET", "long-enough-secret-32-bytes-padding!!!")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.OperatorAuthEnabled {
+		t.Error("OperatorAuthEnabled = false, want true")
+	}
+}
+
+func TestLoadRejectsPartialOperatorCredentials(t *testing.T) {
+	t.Setenv("AUTH_REQUIRED", "false")
+	t.Setenv("ADMIN_PASSWORD", "pw")
+	t.Setenv("JWT_SECRET", "")
+	if _, err := Load(); err == nil {
+		t.Error("expected error for partial operator credentials")
 	}
 }
 

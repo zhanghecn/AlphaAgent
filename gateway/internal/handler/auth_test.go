@@ -14,10 +14,11 @@ import (
 
 func newAuthHandler() (*AuthHandler, *auth.Service) {
 	cfg := &config.Config{
-		AdminUsername: "admin",
-		AdminPassword: "s3cret-pw",
-		JWTSecret:     []byte("test-secret-at-least-32-bytes-long-padding!!"),
-		TokenTTL:      time.Hour,
+		OperatorAuthEnabled: true,
+		AdminUsername:       "admin",
+		AdminPassword:       "s3cret-pw",
+		JWTSecret:           []byte("test-secret-at-least-32-bytes-long-padding!!"),
+		TokenTTL:            time.Hour,
 	}
 	return NewAuthHandler(cfg, auth.New(cfg)), auth.New(cfg)
 }
@@ -110,5 +111,14 @@ func TestLogout(t *testing.T) {
 	h.Logout(rec, httptest.NewRequest("POST", "/api/auth/logout", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestLoginDisabledWithoutOperatorCredentials(t *testing.T) {
+	cfg := &config.Config{AdminUsername: "admin"}
+	h := NewAuthHandler(cfg, auth.New(cfg))
+	rec := doLogin(h, `{"username":"admin","password":"pw"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
 	}
 }

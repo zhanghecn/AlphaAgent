@@ -30,6 +30,10 @@ type loginRequest struct {
 // Login: POST /api/auth/login
 // 校验用户名密码（都用常量时间比较，统一 401 不区分错误项），通过则签发 JWT。
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	if !h.cfg.OperatorAuthEnabled {
+		httputil.WriteError(w, http.StatusForbidden, "OPERATOR_AUTH_DISABLED", "未配置管理员写入权限")
+		return
+	}
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体格式错误")

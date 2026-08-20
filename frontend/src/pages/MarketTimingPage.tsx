@@ -32,7 +32,7 @@ export function MarketTimingPage() {
           className="gap-1.5"
         >
           <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} />
-          {isFetching ? "计算中" : "刷新"}
+          {isFetching ? "刷新中" : "刷新"}
         </Button>
       </header>
 

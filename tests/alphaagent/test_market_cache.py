@@ -10,6 +10,25 @@ class DeepCopyGuard:
         raise AssertionError("nested report values must not be deep-copied")
 
 
+class SharedBackend:
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {}
+
+    def get(self, key: str) -> object | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: object, _ttl_seconds: float) -> None:
+        self.values[key] = value
+
+    def discard_prefix(self, prefix: str) -> None:
+        for key in list(self.values):
+            if key.startswith(prefix):
+                self.values.pop(key)
+
+    def clear(self) -> None:
+        self.values.clear()
+
+
 def test_ttl_cache_deeply_isolates_values_by_default() -> None:
     cache = TTLCache()
     first = cache.get_or_set("default", 60, lambda: {"rows": []})
@@ -80,3 +99,18 @@ def test_ttl_cache_discard_prefix_drops_only_matching_keys() -> None:
     assert reloaded_v2 == {"rows": [5]}
     assert reloads == ["v1", "v2"]
     assert kept == {"rows": [3]}
+
+
+def test_ttl_cache_reads_values_populated_by_another_process_cache() -> None:
+    backend = SharedBackend()
+    writer = TTLCache(backend=backend)
+    reader = TTLCache(backend=backend)
+
+    writer.get_or_set("market:overview", 60, lambda: {"source": "worker"})
+    payload = reader.get_or_set(
+        "market:overview",
+        60,
+        lambda: pytest.fail("shared cache value unexpectedly reloaded"),
+    )
+
+    assert payload == {"source": "worker"}

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchMarketOverview } from "@/api/market";
+import { fetchMarketOverview, marketQueryKeys } from "@/api/market";
 import type { IndexQuote } from "@/api/types";
 import { cn } from "@/lib/utils";
 
@@ -45,7 +45,7 @@ function formatPrice(price: number | null): string {
  */
 export function MarketPulse() {
   const { data } = useQuery({
-    queryKey: ["market-overview"],
+    queryKey: marketQueryKeys.overview,
     queryFn: fetchMarketOverview,
     refetchInterval: 60_000,
   });

@@ -102,7 +102,7 @@ main() {
         print_success "Generated ADMIN_PASSWORD."
         ADMIN_USERNAME=$(grep "^ADMIN_USERNAME=" .env 2>/dev/null | cut -d= -f2-)
         ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-        print_warning "Admin login  ->  username: ${ADMIN_USERNAME}  password: ${ADMIN_PASSWORD}"
+        print_warning "管理员写操作登录  ->  username: ${ADMIN_USERNAME}  password: ${ADMIN_PASSWORD}"
         print_warning "请立即保存此密码（.env 已 chmod 600）。"
     else
         print_info "ADMIN_PASSWORD already set."
@@ -117,7 +117,7 @@ main() {
     echo "  docker compose -f docker-compose.local.yml up -d"
     echo "  docker compose -f docker-compose.local.yml logs -f alphaagent-gateway"
     echo "  open http://localhost  (or http://<server-ip>)"
-    echo "  login with ADMIN_USERNAME / ADMIN_PASSWORD from .env"
+    echo "  read-only pages are available without login; use /login only for administrator writes"
     echo ""
 }
 

@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { LoadingState } from "@/components/LoadingState";
-import { authToken } from "@/api/client";
+import { authRequired, authToken } from "@/api/client";
 
 // 路由懒加载：每个页面拆成独立 chunk，首屏只加载当前页，显著减小初始 bundle。
 const LoginPage = lazy(() => import("@/pages/LoginPage").then((m) => ({ default: m.LoginPage })));
@@ -20,11 +20,10 @@ const LadderHistoryPage = lazy(() => import("@/pages/LadderHistoryPage").then((m
 const DataManagementPage = lazy(() => import("@/pages/DataManagementPage"));
 
 /**
- * 登录守卫：纯前端检查 token 是否存在。
- * token 过期由后端 401 兜底——client.ts 会清 token 并跳 /login。
+ * AUTH_REQUIRED=true 时才检查 token；默认直接进入工作台。
  */
 function RequireAuth({ children }: { children: ReactNode }) {
-  if (!authToken.get()) return <Navigate to="/login" replace />;
+  if (authRequired && !authToken.get()) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
 
@@ -32,9 +31,9 @@ export default function App() {
   return (
     <Suspense fallback={<LoadingState rows={6} />}>
       <Routes>
-        {/* 登录页独立于 AppShell（无侧栏） */}
+        {/* 匿名用户直接进入工作台；/login 仅保留给管理员执行写操作。 */}
         <Route path="/login" element={<LoginPage />} />
-        {/* 其余路由需登录后访问 */}
+        {/* 认证开关关闭时 RequireAuth 直接透传。 */}
         <Route
           path="*"
           element={

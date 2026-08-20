@@ -17,7 +17,7 @@ AlphaAgent 是基于 VeighNa/vn.py 二次开发的 A 股量化交易与 Agent �
 docker compose up --build
 ```
 
-统一入口是 Go 网关，本地默认监听 `http://localhost:8080`（需先登录）：浏览器打开后用 `ADMIN_USERNAME`/`ADMIN_PASSWORD` 登录，所有页面和 `/api/*` 都经网关。`alphaagent-api` 和 `alphaagent-web` 只在 Compose 内部网络暴露，不再对外。根目录 Compose 会同时启动 Gateway、PostgreSQL、Redis、API 和 Web；AlphaAgent 数据落在 Docker 命名卷，vn.py 运行目录落在 `alphaagent_vntrader` 卷，不再依赖宿主机 PostgreSQL/Redis。**本地开发与正式版同架构**（runtime nginx + 网关 + 登录），改前端后用 `docker compose up -d --build alphaagent-web` 重建 web 容器生效。
+统一入口是 Go 网关，本地默认监听 `http://localhost:8080`。默认可直接浏览和使用读取功能，所有页面和 `/api/*` 都经网关；配置管理员凭证后，`/login` 只用于同步、回测、升级等写操作。设置 `AUTH_REQUIRED=true` 可恢复全站 JWT 登录。`alphaagent-api` 和 `alphaagent-web` 只在 Compose 内部网络暴露，不再对外。根目录 Compose 会同时启动 Gateway、PostgreSQL、Redis、API 和 Web；AlphaAgent 数据落在 Docker 命名卷，vn.py 运行目录落在 `alphaagent_vntrader` 卷，不再依赖宿主机 PostgreSQL/Redis。默认两个 API worker 共享 PostgreSQL 与 Redis；改前端后用 `docker compose up -d --build alphaagent-web` 重建 web 容器生效。
 
 服务器部署文件在 `deploy/`，按 `sub2api` 的本地目录持久化方式维护：
 

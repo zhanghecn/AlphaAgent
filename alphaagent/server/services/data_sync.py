@@ -400,6 +400,14 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={"periods": ["20d"], "sector_limit": 0},
     ),
     JobDefinition(
+        id="refresh_market_timing_panel",
+        name="大盘择时物化面板",
+        description="预计算大盘择时的全市场广度、信号和回测面板。",
+        source_id="akshare",
+        target_table="market_timing_panel",
+        default_params={},
+    ),
+    JobDefinition(
         id="sync_stock_fund_flows",
         name="个股资金流",
         description="同步个股资金流向数据。",
@@ -530,6 +538,7 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_stock_lhb_records": JobCadence(CADENCE_LHB, CATEGORY_EVENTS, 1, "stock_lhb_records", "trade_date"),
     "sync_stock_notices": JobCadence(CADENCE_EOD_DAILY, CATEGORY_EVENTS, 2, "stock_events", "updated_at"),
     "sync_sector_period_scores": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "sector_period_scores", "updated_at"),
+    "refresh_market_timing_panel": JobCadence(CADENCE_INTRADAY, CATEGORY_SECTOR_RESEARCH, 1, "market_timing_panel", "computed_at"),
     "sync_sector_list": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "sectors", "updated_at"),
     "sync_sector_members": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BASIC, 7, "sector_memberships", "updated_at"),
     "sync_stock_sector_memberships": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BASIC, 1, "stock_sector_memberships", "updated_at"),
@@ -556,6 +565,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_stock_fund_flows", "sync_sector_fund_flows",
     "sync_stock_hot_ranks",
     "sync_sector_period_scores",
+    "refresh_market_timing_panel",
     "sync_stock_financial_quarterly", "sync_stock_financial_indicators",
     "sync_stock_business_segments_history",
     "sync_stock_lhb_records", "sync_stock_notices",
@@ -638,6 +648,20 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": [],
     },
     {
+        "id": "intraday_market_snapshot",
+        "name": "盘中看板快照（每 5 分钟）",
+        "cron": "*/5 9-11,13-14 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": [
+            "sync_sector_fund_flows",
+            "sync_stock_hot_ranks",
+            "sync_limit_up_pool_snapshots",
+            "refresh_market_timing_panel",
+        ],
+    },
+    {
         "id": "intraday_hourly",
         "name": "盘中低频同步（每小时）",
         "cron": "30 9,10,11,13,14 * * 1-5",
@@ -667,6 +691,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
+            "refresh_market_timing_panel",
             "sync_mainline_sentiment_history",
             "sync_sector_list",
             "sync_sector_daily_bars",
@@ -1411,7 +1436,7 @@ class DataSyncRunner:
         return result
 
     def _run_sync_limit_up_pool_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Archive the five EastMoney limit-up pools after the close."""
+        """Archive the five EastMoney limit-up pools for dashboard and review reads."""
         from alphaagent.server.services.lianban.archive import archive_daily_pools
         from alphaagent.server.services.lianban.review_cache import (
             invalidate_lianban_cache,
@@ -1424,8 +1449,17 @@ class DataSyncRunner:
             raise DataSyncError(f"Invalid trade_date for limit-up pool archive: {raw_date!r}")
         target = target or _now_china().date()
         self._report_progress("归档涨停池五池", current=0, total=1)
+        include_news = bool(params.get("include_news", True))
         with session_scope() as session:
-            result = archive_daily_pools(session, target, adapter=self.adapter)
+            if include_news:
+                result = archive_daily_pools(session, target, adapter=self.adapter)
+            else:
+                result = archive_daily_pools(
+                    session,
+                    target,
+                    adapter=self.adapter,
+                    include_news=False,
+                )
         # 复盘页进程缓存失效(归档改写了 limit_up_pool_snapshots)。
         invalidate_lianban_cache()
         pools = result.get("pools") or {}
@@ -2136,6 +2170,25 @@ class DataSyncRunner:
         rows_written = _upsert_stock_lhb_records(items)
         return {"rows_read": len(items), "rows_written": rows_written}
 
+    def _run_refresh_market_timing_panel(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Materialize the expensive timing panel in the scheduler worker."""
+
+        from alphaagent.server.services.market_timing.panel import refresh_market_timing_panel
+
+        self._report_progress("预计算大盘择时", current=0, total=1)
+        with session_scope() as session:
+            panel = refresh_market_timing_panel(
+                session,
+                schema,
+                force_refresh=bool(params.get("force_refresh", False)),
+            )
+        self._report_progress("预计算大盘择时", current=1, total=1)
+        return {
+            "rows_read": 0,
+            "rows_written": 1,
+            "message": f"sample_range={panel.get('sample_range')}",
+        }
+
     def _run_sync_sector_period_scores(self, params: dict[str, Any]) -> dict[str, Any]:
         raw_periods = params.get("periods", ["20d"])
         periods = [raw_periods] if isinstance(raw_periods, str) else list(raw_periods)
@@ -2436,6 +2489,7 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_sector_daily_bars": "_run_sync_sector_daily_bars",
     "sync_sector_fund_flows": "_run_sync_sector_fund_flows",
     "sync_sector_period_scores": "_run_sync_sector_period_scores",
+    "refresh_market_timing_panel": "_run_refresh_market_timing_panel",
     "sync_stock_fund_flows": "_run_sync_stock_fund_flows",
     "sync_stock_hot_ranks": "_run_sync_stock_hot_ranks",
     "sync_stock_lhb_records": "_run_sync_stock_lhb_records",
@@ -3075,6 +3129,14 @@ def _start_sync_schedule(row: dict[str, Any], *, source: str) -> dict[str, Any]:
 def _schedule_batch_params(row: dict[str, Any], action: str, job_ids: list[str]) -> dict[str, Any]:
     """Return explicit per-job parameters for a scheduled batch."""
 
+    if action == "sync" and str(row.get("id") or "") == "intraday_market_snapshot":
+        return {
+            "jobs": {
+                "sync_sector_fund_flows": {"periods": ["即时"]},
+                "sync_limit_up_pool_snapshots": {"include_news": False},
+            }
+        }
+
     is_eod_schedule = (
         action == "sync"
         and str(row.get("id") or "")
@@ -3101,6 +3163,8 @@ def _schedule_batch_params(row: dict[str, Any], action: str, job_ids: list[str])
             "sector_types": ["concept", "theme"],
             "skip_complete_session": True,
         }
+    if is_eod_schedule and "refresh_market_timing_panel" in job_ids:
+        job_params["refresh_market_timing_panel"] = {"force_refresh": True}
     for job_id in (
         "sync_sector_period_scores",
         "sync_sector_members",

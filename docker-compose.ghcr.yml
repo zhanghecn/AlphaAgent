@@ -1,13 +1,14 @@
 services:
   alphaagent-gateway:
-    # ghcr 镜像模式：统一入口 + 管理员登录 + 反向代理
+    # ghcr 镜像模式：统一入口 + 匿名读取 + 管理员写操作 + 反向代理
     image: ghcr.io/zhanghecn/alphaagent-gateway:latest
     pull_policy: always
     restart: unless-stopped
     environment:
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:-}
       JWT_TOKEN_TTL: ${JWT_TOKEN_TTL:-24h}
       GATEWAY_PORT: "80"
       API_UPSTREAM: http://alphaagent-api:8000
@@ -32,7 +33,7 @@ services:
   alphaagent-api:
     image: ghcr.io/zhanghecn/alphaagent-api:latest
     pull_policy: always
-    cpus: ${ALPHAAGENT_API_CPUS:-0.25}
+    cpus: ${ALPHAAGENT_API_CPUS:-1.0}
     restart: unless-stopped
     command:
       - python
@@ -43,6 +44,8 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
+      - --workers
+      - "${ALPHAAGENT_API_WORKERS:-2}"
     environment:
       ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-production}
       ALPHAAGENT_API_HOST: ${ALPHAAGENT_API_HOST:-0.0.0.0}
@@ -54,8 +57,8 @@ services:
       ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP: ${ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP:-false}
       ALPHAAGENT_STARTUP_INTRADAY_REFRESHER: ${ALPHAAGENT_STARTUP_INTRADAY_REFRESHER:-false}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:-alphaagent-local}@postgres:5432/${POSTGRES_DB:-alphaagent}
-      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-20}
-      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-20}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-8}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-8}
       DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-60}
       PGOPTIONS: >-
         -c application_name=alphaagent-api
@@ -96,7 +99,7 @@ services:
   alphaagent-data-sync-worker:
     extends:
       service: alphaagent-api
-    cpus: ${ALPHAAGENT_SCHEDULER_CPUS:-0.25}
+    cpus: ${ALPHAAGENT_SCHEDULER_CPUS:-0.5}
     command:
       - python
       - -m
@@ -131,6 +134,7 @@ services:
     environment:
       # 同源经网关访问，前端用相对 /api；docker-entrypoint.sh 据此生成 config.js。
       VITE_API_BASE_URL: /api
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
       TZ: ${TZ:-Asia/Shanghai}
     expose:
       - "80"
@@ -142,7 +146,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    cpus: ${ALPHAAGENT_POSTGRES_CPUS:-0.25}
+    cpus: ${ALPHAAGENT_POSTGRES_CPUS:-1.0}
     restart: unless-stopped
     environment:
       PGDATA: /var/lib/postgresql/data

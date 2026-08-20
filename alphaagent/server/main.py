@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from alphaagent.server.api.router import api_router
 from alphaagent.server.core.config import get_settings
 from alphaagent.server.services.data_sync import ensure_sync_schema, start_data_sync_scheduler
+from alphaagent.market.cache import configure_market_cache
 from alphaagent.market.warmup import start_market_cache_warmup
 from alphaagent.server.services.market_timing.panel import start_intraday_refresher
 
@@ -18,6 +19,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         del app
+        configure_market_cache(getattr(settings, "redis_url", ""))
         try:
             owns_scheduler = settings.startup_data_sync_scheduler
             ensure_sync_schema(recover_interrupted=owns_scheduler)

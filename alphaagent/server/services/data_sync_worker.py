@@ -56,6 +56,7 @@ def run_forever(*, stop_event: Event | None = None) -> None:
     """Own scheduler recovery and keep its daemon loop alive."""
 
     stop = stop_event or Event()
+    _configure_market_cache()
     ensure_sync_schema(recover_interrupted=True)
     start_data_sync_scheduler()
     _start_low_suction_view_reconcile()
@@ -70,6 +71,15 @@ def run_forever(*, stop_event: Event | None = None) -> None:
             health_server.server_close()
         stop_data_sync_scheduler()
         LOGGER.info("data sync scheduler worker stopped")
+
+
+def _configure_market_cache() -> None:
+    """Share AkShare read-through cache entries with API workers via Redis."""
+
+    from alphaagent.market.cache import configure_market_cache
+    from alphaagent.server.core.config import get_settings
+
+    configure_market_cache(get_settings().redis_url)
 
 
 def _start_low_suction_view_reconcile() -> None:

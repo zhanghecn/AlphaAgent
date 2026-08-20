@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme/useTheme";
-import { apiClient, authToken } from "@/api/client";
+import { apiClient, authRequired, authToken } from "@/api/client";
 import { VersionBadge } from "@/components/VersionBadge";
 import { MarketPulse } from "@/components/MarketPulse";
 
@@ -39,6 +39,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const { theme, toggle } = useTheme();
+  const canLogout = authRequired || Boolean(authToken.get());
 
   const handleLogout = async () => {
     try {
@@ -66,15 +67,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             >
               {theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
             </button>
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
-              title="退出登录"
-              aria-label="退出登录"
-            >
-              <LogOut size={20} />
-            </button>
+            {canLogout && (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+                title="退出登录"
+                aria-label="退出登录"
+              >
+                <LogOut size={20} />
+              </button>
+            )}
           </div>
         </div>
         <nav className="grid grid-cols-4 gap-1 px-2 pb-2">
@@ -160,15 +163,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <span>{theme === "dark" ? "浅色模式" : "深色模式"}</span>
             )}
           </button>
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
-            title="退出登录"
-          >
-            <LogOut size={18} />
-            {!collapsed && <span>退出登录</span>}
-          </button>
+          {canLogout && (
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+              title="退出登录"
+            >
+              <LogOut size={18} />
+              {!collapsed && <span>退出登录</span>}
+            </button>
+          )}
         </div>
       </aside>
 

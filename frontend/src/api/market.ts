@@ -2,6 +2,15 @@ import { apiClient, plainGet } from "./client";
 import type { MarketOverview } from "./types";
 import type { FundFlowResponse, HotRanksResponse, LimitPoolsData } from "@/types/research";
 
+export const marketQueryKeys = {
+  overview: ["market", "overview"] as const,
+  fundFlow: (sectorType: "concept" | "industry", topN: number) =>
+    ["market", "fund-flow", sectorType, topN] as const,
+  hotRanks: (limit: number) => ["market", "hot-ranks", limit] as const,
+  limitPools: (tradeDate?: string) =>
+    ["market", "limit-pools", tradeDate ?? "latest"] as const,
+};
+
 // ── Market Overview (wrapped response) ──
 
 export function fetchMarketOverview() {

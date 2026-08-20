@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { fetchMarketOverview } from "@/api/market";
+import { fetchMarketOverview, marketQueryKeys } from "@/api/market";
 import { CardSkeleton } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
@@ -121,7 +121,7 @@ function ActiveStockTable({ items }: { items: StockQuote[] }) {
 
 export function IndexStrip() {
   const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ["market", "overview"],
+    queryKey: marketQueryKeys.overview,
     queryFn: fetchMarketOverview,
   });
 

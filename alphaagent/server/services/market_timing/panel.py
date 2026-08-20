@@ -1,8 +1,8 @@
-"""大盘择时面板数据 service(进程内缓存)。
+"""大盘择时面板数据 service。
 
 为前端「大盘分析」页提供全套数据: 概览 + 上证 K 线 + 信号事件 + 准确率矩阵。
-全量计算一次(约 1 分钟, 含全市场广度), 进程内缓存 30 分钟, 后续请求秒回。
-并发请求用锁避免重复计算。
+计算由后台同步 worker 负责，页面读取 PostgreSQL 物化面板，不在 GET 请求里
+执行全市场广度计算。刷新过程仍用进程锁避免后台任务重复重算。
 """
 
 from __future__ import annotations
@@ -54,6 +54,22 @@ def _load_panel_row(session: Any, schema: Any) -> Any:
         select(schema.market_timing_panel.c.panel, schema.market_timing_panel.c.computed_at)
         .where(schema.market_timing_panel.c.id == 1)
     ).first()
+
+
+def load_stored_market_timing_panel(session: Any, schema: Any) -> dict[str, Any] | None:
+    """Read the materialized panel without calculating or calling a live source."""
+
+    row = _load_panel_row(session, schema)
+    if row is None or not isinstance(row.panel, dict):
+        return None
+    computed_at = row.computed_at
+    return {
+        **row.panel,
+        "computed_at": computed_at.isoformat() if hasattr(computed_at, "isoformat") else str(computed_at or ""),
+        "data_origin": "local_db",
+        "storage_table": "market_timing_panel",
+        "stale": not _is_panel_fresh(computed_at),
+    }
 
 
 def _is_panel_fresh(computed_at: Any) -> bool:
@@ -554,6 +570,17 @@ def get_market_timing_panel(session: Any, schema: Any, force_refresh: bool = Fal
     盘中交易时段再 overlay 今天实时点位到 chart 最新K线 + overview。
     """
     return _overlay_intraday(_base_panel(session, schema, force_refresh))
+
+
+def refresh_market_timing_panel(
+    session: Any,
+    schema: Any,
+    *,
+    force_refresh: bool = True,
+) -> dict:
+    """Rebuild the panel from the dedicated worker or an authenticated POST."""
+
+    return get_market_timing_panel(session, schema, force_refresh=force_refresh)
 
 
 def start_intraday_refresher() -> None:

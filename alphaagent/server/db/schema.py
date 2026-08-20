@@ -1580,6 +1580,12 @@ Index(
     sector_fund_flow_snapshots.c.sector_id,
     sector_fund_flow_snapshots.c.captured_at,
 )
+Index(
+    "ix_sector_fund_flow_snapshots_type_period_capture",
+    sector_fund_flow_snapshots.c.sector_type,
+    sector_fund_flow_snapshots.c.period,
+    sector_fund_flow_snapshots.c.captured_at,
+)
 
 stock_auction_snapshots = Table(
     "stock_auction_snapshots",
@@ -1837,6 +1843,8 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ON stock_sector_memberships (updated_at)",
         "CREATE INDEX IF NOT EXISTS ix_stock_sector_membership_snapshots_updated_at "
         "ON stock_sector_membership_snapshots (updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_sector_fund_flow_snapshots_type_period_capture "
+        "ON sector_fund_flow_snapshots (sector_type, period, captured_at)",
     )
     for sql in patches:
         try:

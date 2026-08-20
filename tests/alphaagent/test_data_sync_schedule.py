@@ -231,11 +231,27 @@ def test_default_batch_schedules_defined():
     assert ids == {
         "auction_0926",
         "low_suction_live_scan",
+        "intraday_market_snapshot",
         "intraday_hourly",
         "eod_1900",
         "eod_finalize_2130",
         "low_suction_backtest_2230",
     }
+
+
+def test_intraday_market_snapshot_schedule_materializes_dashboard_sources():
+    schedule = next(
+        item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == "intraday_market_snapshot"
+    )
+
+    assert schedule["cron"] == "*/5 9-11,13-14 * * 1-5"
+    assert schedule["concurrency"] == 1
+    assert schedule["job_ids"] == [
+        "sync_sector_fund_flows",
+        "sync_stock_hot_ranks",
+        "sync_limit_up_pool_snapshots",
+        "refresh_market_timing_panel",
+    ]
 
 
 
@@ -855,6 +871,7 @@ def test_eod_schedule_runs_market_data_and_low_suction_confirmation():
         svc.LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
         svc.ADJUSTED_DAILY_SYNC_JOB_ID,
         "sync_index_daily_bars",
+        "refresh_market_timing_panel",
         "sync_mainline_sentiment_history",
         "sync_sector_list",
         "sync_sector_daily_bars",
@@ -1173,6 +1190,9 @@ def test_eod_schedule_passes_incremental_concept_index_params() -> None:
             svc.ADJUSTED_DAILY_SYNC_JOB_ID: {
                 "max_symbols": 50,
                 "max_workers": 4,
+            },
+            "refresh_market_timing_panel": {
+                "force_refresh": True,
             },
             "sync_sector_daily_bars": {
                 "limit": 30,

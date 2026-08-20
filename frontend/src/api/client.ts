@@ -5,6 +5,8 @@ declare global {
     __ALPHAAGENT_CONFIG__?: {
       API_BASE_URL?: string;
       VITE_API_BASE_URL?: string;
+      AUTH_REQUIRED?: boolean | string;
+      VITE_AUTH_REQUIRED?: boolean | string;
     };
   }
 }
@@ -16,6 +18,17 @@ const BASE_URL =
   runtimeConfig?.VITE_API_BASE_URL ||
   import.meta.env.VITE_API_BASE_URL ||
   "/api";
+
+function isTruthy(value: unknown): boolean {
+  return value === true || value === "true" || value === "1";
+}
+
+// 默认匿名访问；部署环境可通过运行时 config.js 切回 JWT 登录。
+export const authRequired = isTruthy(
+  runtimeConfig?.AUTH_REQUIRED
+  ?? runtimeConfig?.VITE_AUTH_REQUIRED
+  ?? import.meta.env.VITE_AUTH_REQUIRED,
+);
 
 export function apiUrl(path: string): string {
   return `${BASE_URL}${path}`;
@@ -62,7 +75,7 @@ function buildHeaders(extra?: HeadersInit): Record<string, string> {
   return headers;
 }
 
-// 收到 401 且非公开端点：清除本地 token 并跳转登录页。
+// 启用认证时，收到 401 且非公开端点：清除本地 token 并跳转登录页。
 function handleUnauthorized(url: string): never {
   authToken.clear();
   if (typeof window !== "undefined" && window.location.pathname !== "/login") {
@@ -78,7 +91,7 @@ async function request<T>(path: string, options?: RequestInit, requestOptions?: 
     headers: buildHeaders(options?.headers),
   });
 
-  if (res.status === 401 && !isPublicApiPath(path)) {
+  if (authRequired && res.status === 401 && !isPublicApiPath(path)) {
     handleUnauthorized(url);
   }
 
@@ -144,7 +157,7 @@ export const apiClient = {
 export async function plainGet<T>(path: string): Promise<T> {
   const url = `${BASE_URL}${path}`;
   const res = await fetch(url, { headers: buildHeaders({ Accept: "application/json" }) });
-  if (res.status === 401 && !isPublicApiPath(path)) {
+  if (authRequired && res.status === 401 && !isPublicApiPath(path)) {
     handleUnauthorized(url);
   }
   if (!res.ok) {
@@ -170,7 +183,7 @@ export async function authFetch(path: string, init?: RequestInit): Promise<Respo
     ...init,
     headers: buildHeaders(init?.headers),
   });
-  if (res.status === 401 && !isPublicApiPath(path)) {
+  if (authRequired && res.status === 401 && !isPublicApiPath(path)) {
     handleUnauthorized(url);
   }
   return res;

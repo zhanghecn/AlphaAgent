@@ -1,23 +1,25 @@
 """大盘择时(金手指/银手指)端点。
 
-GET /api/market-timing/panel  返回全套(概览+K线+信号+准确率), 前端一次拿。
-首次请求触发全量计算(约1分钟, 含全市场广度), 之后命中进程缓存(~30分钟)秒回。
-?force=true 强制刷新。
+GET /api/market-timing/panel 只读后端已物化的概览、K线、信号和准确率。
+全市场计算由同步 worker 或管理员 POST /refresh 执行，避免页面打开时占满 CPU。
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from alphaagent.server.core.responses import fail, ok
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import is_database_configured, session_scope
-from alphaagent.server.services.market_timing.panel import get_market_timing_panel
+from alphaagent.server.services.market_timing.panel import (
+    load_stored_market_timing_panel,
+    refresh_market_timing_panel,
+)
 
 router = APIRouter(prefix="/market-timing", tags=["market-timing"])
 
 
 @router.get("/panel", response_model=None)
-def get_panel(force: bool = Query(default=False)):
+def get_panel():
     if not is_database_configured():
         return JSONResponse(
             status_code=503,
@@ -25,7 +27,15 @@ def get_panel(force: bool = Query(default=False)):
         )
     try:
         with session_scope() as session:
-            panel = get_market_timing_panel(session, schema, force_refresh=force)
+            panel = load_stored_market_timing_panel(session, schema)
+        if panel is None:
+            return JSONResponse(
+                status_code=503,
+                content=fail(
+                    "MARKET_TIMING_INITIALIZING",
+                    "大盘择时面板正在由后台初始化，请稍后刷新。",
+                ),
+            )
         return ok(panel)
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(
@@ -48,7 +58,7 @@ def refresh_panel():
         )
     try:
         with session_scope() as session:
-            panel = get_market_timing_panel(session, schema, force_refresh=True)
+            panel = refresh_market_timing_panel(session, schema)
         return ok(
             {
                 "computed_at": panel.get("generated_at"),

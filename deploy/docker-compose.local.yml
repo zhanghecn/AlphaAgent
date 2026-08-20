@@ -5,12 +5,12 @@
 # volumes, making server migration a directory copy operation.
 #
 # 流量入口是 alphaagent-gateway（唯一对外端口，默认 80）。
-# api / web 仅在内部网络暴露，必须经网关登录后才能访问。
+# api / web 仅在内部网络暴露，所有请求都经网关；默认读取接口无需登录。
 #
 # Quick Start:
-#   1. ./docker-deploy.sh          # 生成 .env（含 JWT_SECRET / ADMIN_PASSWORD）
+#   1. ./docker-deploy.sh          # 生成 .env（含可选的管理员写操作凭证）
 #   2. docker compose -f docker-compose.local.yml up -d
-#   3. 打开 http://<server>，用 ADMIN_USERNAME / ADMIN_PASSWORD 登录
+#   3. 打开 http://<server> 直接使用；/login 仅用于管理员写操作
 #
 # 后续迭代发版（一条命令，自动拉最新镜像）:
 #   docker compose -f docker-compose.local.yml up -d
@@ -27,9 +27,10 @@ services:
         soft: 100000
         hard: 100000
     environment:
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:-}
       JWT_TOKEN_TTL: ${JWT_TOKEN_TTL:-24h}
       GATEWAY_PORT: "80"
       API_UPSTREAM: http://alphaagent-api:8000
@@ -54,7 +55,7 @@ services:
   alphaagent-api:
     image: ${ALPHAAGENT_IMAGE:-ghcr.io/zhanghecn/alphaagent-api:latest}
     container_name: alphaagent-api
-    cpus: ${ALPHAAGENT_API_CPUS:-0.25}
+    cpus: ${ALPHAAGENT_API_CPUS:-1.0}
     restart: unless-stopped
     pull_policy: always
     ulimits:
@@ -70,6 +71,8 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
+      - --workers
+      - "${ALPHAAGENT_API_WORKERS:-2}"
     environment:
       ALPHAAGENT_ENV: ${ALPHAAGENT_ENV:-production}
       ALPHAAGENT_API_HOST: 0.0.0.0
@@ -81,8 +84,8 @@ services:
       ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP: ${ALPHAAGENT_STARTUP_MARKET_CACHE_WARMUP:-false}
       ALPHAAGENT_STARTUP_INTRADAY_REFRESHER: ${ALPHAAGENT_STARTUP_INTRADAY_REFRESHER:-false}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-alphaagent}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-alphaagent}
-      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-20}
-      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-20}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-8}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-8}
       DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-60}
       PGOPTIONS: >-
         -c application_name=alphaagent-api
@@ -119,7 +122,7 @@ services:
     extends:
       service: alphaagent-api
     container_name: alphaagent-data-sync-worker
-    cpus: ${ALPHAAGENT_SCHEDULER_CPUS:-0.25}
+    cpus: ${ALPHAAGENT_SCHEDULER_CPUS:-0.5}
     command:
       - python
       - -m
@@ -159,6 +162,7 @@ services:
     environment:
       # 同源经网关访问，前端用相对 /api。
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
       TZ: ${TZ:-Asia/Shanghai}
     expose:
       - "80"
@@ -171,7 +175,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: alphaagent-postgres
-    cpus: ${ALPHAAGENT_POSTGRES_CPUS:-0.25}
+    cpus: ${ALPHAAGENT_POSTGRES_CPUS:-1.0}
     restart: unless-stopped
     ulimits:
       nofile:
