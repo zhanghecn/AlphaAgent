@@ -15,6 +15,8 @@ import {
   LogOut,
   Flame,
   Layers,
+  Copy,
+  MessageCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme/useTheme";
@@ -26,6 +28,9 @@ import {
 } from "@/api/client";
 import { VersionBadge } from "@/components/VersionBadge";
 import { MarketPulse } from "@/components/MarketPulse";
+import { useToast } from "@/components/ui/toast";
+
+const WECHAT_ID = "ZH2258670606";
 
 const NAV_ITEMS = [
   { to: "/", label: "今日市场", icon: LayoutDashboard },
@@ -41,12 +46,35 @@ function isActive(pathname: string, to: string): boolean {
   return pathname === to || (to !== "/" && pathname.startsWith(to));
 }
 
+async function copyText(value: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      // HTTP 环境或浏览器权限拒绝时，继续使用兼容复制方案。
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  return copied;
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [collapsed, setCollapsed] = useState(false);
   const { theme, toggle } = useTheme();
+  const toast = useToast();
   const { data: adminSession } = useQuery({
     queryKey: ADMIN_SESSION_QUERY_KEY,
     queryFn: getAdminSession,
@@ -65,6 +93,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     navigate("/login", { replace: true });
   };
 
+  const handleWeChatCopy = async () => {
+    try {
+      const copied = await copyText(WECHAT_ID);
+      if (!copied) throw new Error("copy failed");
+      toast({
+        title: "微信号已复制",
+        description: WECHAT_ID,
+        variant: "success",
+      });
+    } catch {
+      toast({
+        title: "微信号",
+        description: `请添加 ${WECHAT_ID}`,
+        duration: 6_000,
+      });
+    }
+  };
+
   return (
     <div className="flex min-h-screen bg-background md:h-screen md:overflow-hidden">
       {/* Mobile top nav —— 玻璃质感 + 极光顶光晕（视觉保留，无动画） */}
@@ -80,6 +126,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               aria-label="切换深浅色主题"
             >
               {theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
+            </button>
+            <button
+              type="button"
+              onClick={handleWeChatCopy}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title="复制微信号"
+              aria-label={`复制微信号 ${WECHAT_ID}`}
+            >
+              <MessageCircle size={20} />
             </button>
             {isAdmin ? (
               <button
@@ -175,6 +230,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
         <div className="border-t p-2">
+          <button
+            type="button"
+            onClick={handleWeChatCopy}
+            className="mb-2 flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-muted"
+            title={`复制微信号 ${WECHAT_ID}`}
+            aria-label={`复制微信号 ${WECHAT_ID}`}
+          >
+            <MessageCircle size={18} className="shrink-0 text-primary" />
+            {!collapsed && (
+              <>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs font-medium text-foreground">微信号</span>
+                  <span className="block truncate font-mono text-xs text-muted-foreground">{WECHAT_ID}</span>
+                </span>
+                <Copy size={15} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+              </>
+            )}
+          </button>
           <button
             type="button"
             onClick={toggle}

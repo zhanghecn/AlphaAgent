@@ -31,4 +31,22 @@ describe("AppShell login access", () => {
     expect(html).toContain("登录");
     expect(html).not.toContain("退出登录");
   });
+
+  it("shows a WeChat contact action in the application shell", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(ADMIN_SESSION_QUERY_KEY, { authenticated: false });
+
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <AppShell>
+            <div />
+          </AppShell>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain("ZH2258670606");
+    expect(html).toContain('aria-label="复制微信号 ZH2258670606"');
+  });
 });
