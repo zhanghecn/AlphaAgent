@@ -1,9 +1,15 @@
 import { lazy, Suspense } from "react";
 import type { ReactNode } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
 import { LoadingState } from "@/components/LoadingState";
-import { authRequired, authToken } from "@/api/client";
+import {
+  ADMIN_SESSION_QUERY_KEY,
+  authRequired,
+  authToken,
+  getAdminSession,
+} from "@/api/client";
 
 // 路由懒加载：每个页面拆成独立 chunk，首屏只加载当前页，显著减小初始 bundle。
 const LoginPage = lazy(() => import("@/pages/LoginPage").then((m) => ({ default: m.LoginPage })));
@@ -24,6 +30,24 @@ const DataManagementPage = lazy(() => import("@/pages/DataManagementPage"));
  */
 function RequireAuth({ children }: { children: ReactNode }) {
   if (authRequired && !authToken.get()) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+/** 数据管理始终要求管理员会话，匿名工作台模式不影响该规则。 */
+function RequireAdmin({ children }: { children: ReactNode }) {
+  const hasAdminToken = Boolean(authToken.get());
+  const { data: adminSession, isFetching } = useQuery({
+    queryKey: ADMIN_SESSION_QUERY_KEY,
+    queryFn: getAdminSession,
+    enabled: hasAdminToken,
+    staleTime: 0,
+    retry: false,
+    refetchOnMount: "always",
+  });
+
+  if (!hasAdminToken || isFetching || !adminSession?.authenticated) {
+    return hasAdminToken && isFetching ? <LoadingState rows={6} /> : <Navigate to="/login" replace />;
+  }
   return <>{children}</>;
 }
 
@@ -52,10 +76,24 @@ export default function App() {
                     <Route path="/short-term" element={<ShortTermResearchPage />} />
                     <Route path="/lianban" element={<LianbanReviewPage />} />
                     <Route path="/lianban/ladder" element={<LadderHistoryPage />} />
-                    <Route path="/data" element={<DataManagementPage />} />
+                    <Route
+                      path="/data"
+                      element={
+                        <RequireAdmin>
+                          <DataManagementPage />
+                        </RequireAdmin>
+                      }
+                    />
                     {/* Legacy routes */}
                     <Route path="/sectors" element={<SectorsPage />} />
-                    <Route path="/data-sync" element={<DataManagementPage />} />
+                    <Route
+                      path="/data-sync"
+                      element={
+                        <RequireAdmin>
+                          <DataManagementPage />
+                        </RequireAdmin>
+                      }
+                    />
                   </Routes>
                 </Suspense>
               </AppShell>

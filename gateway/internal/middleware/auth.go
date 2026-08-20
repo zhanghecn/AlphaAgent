@@ -44,6 +44,23 @@ func PublicReadOrAuth(cfg *config.Config, authSvc *auth.Service) func(http.Handl
 	}
 }
 
+// AdministratorOnly 限制管理员专属功能。即使系统处于匿名读取模式，数据同步和
+// 数据源状态也不能被匿名用户读取，避免暴露运行状态或消耗同步服务资源。
+func AdministratorOnly(cfg *config.Config, authSvc *auth.Service) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !cfg.OperatorAuthEnabled {
+				httputil.WriteError(w, http.StatusForbidden, "OPERATOR_AUTH_DISABLED", "未配置管理员访问权限")
+				return
+			}
+			if !authenticated(w, r, authSvc) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func isReadOnlyMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
 }

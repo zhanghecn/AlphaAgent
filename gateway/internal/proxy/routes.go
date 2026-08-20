@@ -14,8 +14,9 @@ import (
 // Mount 在 router 上装配全部网关路由：
 //  1. /healthz、/readyz —— 网关自身健康（不鉴权）；
 //  2. /api/auth/*       —— 登录/登出/当前用户（不鉴权）；
-//  3. /api/*            —— 可按 AUTH_REQUIRED 选择鉴权后转发到 alphaagent-api；
-//  4. /*                —— 转发到 alphaagent-web（SPA fallback 由 nginx 处理）。
+//  3. 数据管理接口       —— 始终要求管理员 JWT；
+//  4. /api/*            —— 可按 AUTH_REQUIRED 选择鉴权后转发到 alphaagent-api；
+//  5. /*                —— 转发到 alphaagent-web（SPA fallback 由 nginx 处理）。
 func Mount(r chi.Router, cfg *config.Config, authSvc *auth.Service) {
 	apiURL, err := url.Parse(cfg.APIUpstream)
 	if err != nil {
@@ -41,7 +42,16 @@ func Mount(r chi.Router, cfg *config.Config, authSvc *auth.Service) {
 		r.Get("/me", authHandler.Me)
 	})
 
-	// 3. 其余 /api/* —— 全站鉴权或匿名读取 + 管理员写入，转发到后端。
+	// 3. 数据管理读取和写入均为管理员专属；匿名模式不能绕过此规则。
+	r.Group(func(r chi.Router) {
+		r.Use(mw.AdministratorOnly(cfg, authSvc))
+		r.Handle("/api/data-sync", apiProxy)
+		r.Handle("/api/data-sync/*", apiProxy)
+		r.Handle("/api/data/status", apiProxy)
+		r.Handle("/api/data/status/*", apiProxy)
+	})
+
+	// 4. 其余 /api/* —— 全站鉴权或匿名读取 + 管理员写入，转发到后端。
 	if cfg.AuthRequired {
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Auth(cfg, authSvc))
@@ -54,6 +64,6 @@ func Mount(r chi.Router, cfg *config.Config, authSvc *auth.Service) {
 		})
 	}
 
-	// 4. 前端静态资源与 SPA 路由 —— 转发到 nginx
+	// 5. 前端静态资源与 SPA 路由 —— 转发到 nginx
 	r.Handle("/*", webProxy)
 }

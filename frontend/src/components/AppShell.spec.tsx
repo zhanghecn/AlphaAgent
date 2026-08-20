@@ -30,6 +30,26 @@ describe("AppShell login access", () => {
     expect(html).toContain('aria-label="登录"');
     expect(html).toContain("登录");
     expect(html).not.toContain("退出登录");
+    expect(html).not.toContain('href="/data"');
+    expect(html).not.toContain("数据管理");
+  });
+
+  it("shows data management only to an administrator", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(ADMIN_SESSION_QUERY_KEY, { authenticated: true, username: "admin" });
+
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <AppShell>
+            <div />
+          </AppShell>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain('href="/data"');
+    expect(html).toContain("数据管理");
   });
 
   it("shows a WeChat contact action in the application shell", () => {

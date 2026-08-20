@@ -39,6 +39,9 @@ const NAV_ITEMS = [
   { to: "/short-term", label: "短线研究", icon: Flame },
   { to: "/lianban", label: "连板复盘", icon: Layers },
   { to: "/stocks", label: "全 A 股票", icon: TrendingUp },
+];
+
+const ADMIN_NAV_ITEMS = [
   { to: "/data", label: "数据管理", icon: Database },
 ];
 
@@ -81,6 +84,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     staleTime: 60_000,
   });
   const isAdmin = adminSession?.authenticated === true;
+  const navigationItems = isAdmin ? [...NAV_ITEMS, ...ADMIN_NAV_ITEMS] : NAV_ITEMS;
 
   const handleLogout = async () => {
     try {
@@ -159,7 +163,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
         <nav className="grid grid-cols-4 gap-1 px-2 pb-2">
-          {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
+          {navigationItems.map(({ to, label, icon: Icon }) => {
             const active = isActive(location.pathname, to);
             return (
               <Link
@@ -209,7 +213,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
         <nav className="flex-1 space-y-1 p-2">
-          {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
+          {navigationItems.map(({ to, label, icon: Icon }) => {
             const active = isActive(location.pathname, to);
             return (
               <Link

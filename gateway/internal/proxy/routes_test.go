@@ -72,6 +72,81 @@ func TestAnonymousModeRejectsWritesWithoutOperatorCredentials(t *testing.T) {
 	}
 }
 
+func TestAnonymousModeRejectsDataManagementReadsWithoutAdministratorToken(t *testing.T) {
+	called := false
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+	web := httptest.NewServer(http.NotFoundHandler())
+	defer web.Close()
+
+	cfg := &config.Config{
+		AuthRequired:        false,
+		OperatorAuthEnabled: true,
+		AdminUsername:       "admin",
+		AdminPassword:       "pw",
+		JWTSecret:           []byte("test-secret-at-least-32-bytes-long-padding!!"),
+		TokenTTL:            time.Hour,
+		APIUpstream:         api.URL,
+		WebUpstream:         web.URL,
+	}
+	r := chi.NewRouter()
+	Mount(r, cfg, auth.New(cfg))
+
+	for _, path := range []string{"/api/data-sync/sources", "/api/data/status"} {
+		response := httptest.NewRecorder()
+		r.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: status = %d, want 401; body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	if called {
+		t.Error("data management read unexpectedly reached API upstream")
+	}
+}
+
+func TestAnonymousModeAllowsAdministratorDataManagementReads(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/data-sync/health" {
+			t.Fatalf("path = %q, want /api/data-sync/health", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+	web := httptest.NewServer(http.NotFoundHandler())
+	defer web.Close()
+
+	cfg := &config.Config{
+		AuthRequired:        false,
+		OperatorAuthEnabled: true,
+		AdminUsername:       "admin",
+		AdminPassword:       "pw",
+		JWTSecret:           []byte("test-secret-at-least-32-bytes-long-padding!!"),
+		TokenTTL:            time.Hour,
+		APIUpstream:         api.URL,
+		WebUpstream:         web.URL,
+	}
+	authSvc := auth.New(cfg)
+	token, _, err := authSvc.Issue("admin")
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	r := chi.NewRouter()
+	Mount(r, cfg, authSvc)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/data-sync/health", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestAnonymousModeAllowsAdministratorWrites(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
