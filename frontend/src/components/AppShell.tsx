@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Database,
   LayoutDashboard,
@@ -10,13 +11,19 @@ import {
   ChevronRight,
   Sun,
   Moon,
+  LogIn,
   LogOut,
   Flame,
   Layers,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme/useTheme";
-import { apiClient, authRequired, authToken } from "@/api/client";
+import {
+  ADMIN_SESSION_QUERY_KEY,
+  apiClient,
+  authToken,
+  getAdminSession,
+} from "@/api/client";
 import { VersionBadge } from "@/components/VersionBadge";
 import { MarketPulse } from "@/components/MarketPulse";
 
@@ -37,9 +44,15 @@ function isActive(pathname: string, to: string): boolean {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [collapsed, setCollapsed] = useState(false);
   const { theme, toggle } = useTheme();
-  const canLogout = authRequired || Boolean(authToken.get());
+  const { data: adminSession } = useQuery({
+    queryKey: ADMIN_SESSION_QUERY_KEY,
+    queryFn: getAdminSession,
+    staleTime: 60_000,
+  });
+  const isAdmin = adminSession?.authenticated === true;
 
   const handleLogout = async () => {
     try {
@@ -48,6 +61,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       // 忽略：前端清除 token 即可完成登出。
     }
     authToken.clear();
+    queryClient.setQueryData(ADMIN_SESSION_QUERY_KEY, { authenticated: false });
     navigate("/login", { replace: true });
   };
 
@@ -67,7 +81,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             >
               {theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
             </button>
-            {canLogout && (
+            {isAdmin ? (
               <button
                 type="button"
                 onClick={handleLogout}
@@ -77,6 +91,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               >
                 <LogOut size={20} />
               </button>
+            ) : (
+              <Link
+                to="/login"
+                className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="管理员登录"
+                aria-label="管理员登录"
+              >
+                <LogIn size={20} />
+              </Link>
             )}
           </div>
         </div>
@@ -113,10 +136,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {!collapsed ? (
             <div className="flex flex-col leading-none">
               <span className="font-display text-lg font-bold tracking-tight">AlphaAgent</span>
-              <VersionBadge />
+              <VersionBadge isAdmin={isAdmin} />
             </div>
           ) : (
-            <VersionBadge />
+            <VersionBadge isAdmin={isAdmin} />
           )}
           <button
             type="button"
@@ -163,7 +186,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <span>{theme === "dark" ? "浅色模式" : "深色模式"}</span>
             )}
           </button>
-          {canLogout && (
+          {isAdmin ? (
             <button
               type="button"
               onClick={handleLogout}
@@ -173,6 +196,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <LogOut size={18} />
               {!collapsed && <span>退出登录</span>}
             </button>
+          ) : (
+            <Link
+              to="/login"
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title="管理员登录"
+            >
+              <LogIn size={18} />
+              {!collapsed && <span>管理员登录</span>}
+            </Link>
           )}
         </div>
       </aside>

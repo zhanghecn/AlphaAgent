@@ -150,6 +150,17 @@ export const apiClient = {
   },
 };
 
+export interface AdminSession {
+  authenticated: boolean;
+  username?: string;
+}
+
+export const ADMIN_SESSION_QUERY_KEY = ["admin-session"] as const;
+
+export function getAdminSession(): Promise<AdminSession> {
+  return apiClient.get<AdminSession>("/auth/me");
+}
+
 /**
  * Plain JSON fetch — for endpoints that return raw JSON
  * (not wrapped in {success, data}).

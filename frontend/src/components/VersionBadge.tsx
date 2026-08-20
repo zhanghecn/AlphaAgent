@@ -5,11 +5,15 @@ import { checkUpdates, performUpdate, restartService } from "@/api/system";
 import { cn } from "@/lib/utils";
 
 /**
- * 左上角版本徽章：显示当前版本，有新版黄点高亮；点击下拉
+ * 管理员版本菜单：显示当前版本，有新版黄点高亮；点击下拉
  * 重新检查 / 立即更新 / 重启 / 查看发布说明。
  * 触发更新或重启后，api 容器会被重建，进入 busy 态轮询恢复。
  */
-export function VersionBadge() {
+export function canManageSystem(isAdmin: boolean, isRelease: boolean): boolean {
+  return isAdmin && isRelease;
+}
+
+export function VersionBadge({ isAdmin }: { isAdmin: boolean }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -19,6 +23,7 @@ export function VersionBadge() {
   const { data, isFetching, refetch } = useQuery({
     queryKey: ["systemVersion"],
     queryFn: () => checkUpdates(),
+    enabled: isAdmin,
     staleTime: 4 * 60_000,
     refetchInterval: 5 * 60_000,
   });
@@ -27,6 +32,7 @@ export function VersionBadge() {
   const hasUpdate = data?.has_update ?? false;
   const isRelease = data?.build_type === "release";
   const releaseUrl = data?.release_info?.html_url;
+  const canManage = canManageSystem(isAdmin, isRelease);
 
   // 点击外部关闭菜单
   useEffect(() => {
@@ -78,6 +84,8 @@ export function VersionBadge() {
     },
   });
 
+  if (!isAdmin) return null;
+
   if (busy) {
     return (
       <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -128,7 +136,7 @@ export function VersionBadge() {
           >
             <RefreshCw size={12} className={isFetching ? "animate-spin" : ""} /> 重新检查
           </button>
-          {isRelease && (
+          {canManage && (
             <button
               type="button"
               onClick={() => updateMut.mutate()}
@@ -138,7 +146,7 @@ export function VersionBadge() {
               <Download size={12} /> 立即更新
             </button>
           )}
-          {isRelease && (
+          {canManage && (
             <button
               type="button"
               onClick={() => restartMut.mutate()}

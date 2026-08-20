@@ -1,11 +1,12 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
-import { apiClient, authToken } from "@/api/client";
+import { ADMIN_SESSION_QUERY_KEY, apiClient, authToken } from "@/api/client";
 
 /**
  * 管理员登录页。
@@ -18,14 +19,19 @@ export function LoginPage() {
   const [loading, setLoading] = useState(false);
   const toast = useToast();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (loading) return;
     setLoading(true);
     try {
-      const data = await apiClient.post<{ token: string }>("/auth/login", { username, password });
+      const data = await apiClient.post<{ token: string; username: string }>("/auth/login", { username, password });
       authToken.set(data.token);
+      queryClient.setQueryData(ADMIN_SESSION_QUERY_KEY, {
+        authenticated: true,
+        username: data.username,
+      });
       toast({ title: "已登录", variant: "success" });
       navigate("/", { replace: true });
     } catch (err) {
