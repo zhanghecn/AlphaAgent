@@ -95,8 +95,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Link
                 to="/login"
                 className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                title="管理员登录"
-                aria-label="管理员登录"
+                title="登录"
+                aria-label="登录"
               >
                 <LogIn size={20} />
               </Link>
@@ -200,10 +200,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Link
               to="/login"
               className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              title="管理员登录"
+              title="登录"
+              aria-label="登录"
             >
               <LogIn size={18} />
-              {!collapsed && <span>管理员登录</span>}
+              {!collapsed && <span>登录</span>}
             </Link>
           )}
         </div>

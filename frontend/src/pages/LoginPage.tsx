@@ -9,7 +9,7 @@ import { useToast } from "@/components/ui/toast";
 import { ADMIN_SESSION_QUERY_KEY, apiClient, authToken } from "@/api/client";
 
 /**
- * 管理员登录页。
+ * 登录页。
  * 视觉延续 AppShell 的「玻璃 + 极光」语言：glass.aurora 卡片 + 金色氛围光晕。
  * 签名元素是标题上方的迷你走势线 mark——量化研究终端独有的视觉记号。
  */

@@ -11,8 +11,8 @@ vi.mock("@/theme/useTheme", () => ({
   useTheme: () => ({ theme: "light", toggle: () => undefined }),
 }));
 
-describe("AppShell administrator access", () => {
-  it("shows the administrator login action to an anonymous visitor", () => {
+describe("AppShell login access", () => {
+  it("shows the login action to an anonymous visitor", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(ADMIN_SESSION_QUERY_KEY, { authenticated: false });
 
@@ -27,7 +27,8 @@ describe("AppShell administrator access", () => {
     );
 
     expect(html).toContain('href="/login"');
-    expect(html).toContain("管理员登录");
+    expect(html).toContain('aria-label="登录"');
+    expect(html).toContain("登录");
     expect(html).not.toContain("退出登录");
   });
 });
