@@ -1,0 +1,19 @@
+{
+  "name": "AlphaAgent A股量化投研",
+  "short_name": "AlphaAgent",
+  "description": "A股量化投研与市场分析平台",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

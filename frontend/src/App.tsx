@@ -4,6 +4,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
 import { LoadingState } from "@/components/LoadingState";
+import { SeoHead } from "@/components/SeoHead";
 import {
   ADMIN_SESSION_QUERY_KEY,
   authRequired,
@@ -53,54 +54,57 @@ function RequireAdmin({ children }: { children: ReactNode }) {
 
 export default function App() {
   return (
-    <Suspense fallback={<LoadingState rows={6} />}>
-      <Routes>
-        {/* 匿名用户直接进入工作台；/login 仅保留给管理员执行写操作。 */}
-        <Route path="/login" element={<LoginPage />} />
-        {/* 认证开关关闭时 RequireAuth 直接透传。 */}
-        <Route
-          path="*"
-          element={
-            <RequireAuth>
-              <AppShell>
-                <Suspense fallback={<LoadingState rows={6} />}>
-                  <Routes>
-                    <Route path="/" element={<MarketOverviewPage />} />
-                    <Route path="/explore" element={<Navigate to="/mainline" replace />} />
-                    <Route path="/stocks" element={<StocksPage />} />
-                    <Route path="/stocks/:vtSymbol" element={<StockDetailPage />} />
-                    <Route path="/indices/:key" element={<IndexDetailPage />} />
-                    <Route path="/market" element={<MarketTimingPage />} />
-                    <Route path="/chain" element={<Navigate to="/mainline" replace />} />
-                    <Route path="/mainline" element={<MainlineReplayPage />} />
-                    <Route path="/short-term" element={<ShortTermResearchPage />} />
-                    <Route path="/lianban" element={<LianbanReviewPage />} />
-                    <Route path="/lianban/ladder" element={<LadderHistoryPage />} />
-                    <Route
-                      path="/data"
-                      element={
-                        <RequireAdmin>
-                          <DataManagementPage />
-                        </RequireAdmin>
-                      }
-                    />
-                    {/* Legacy routes */}
-                    <Route path="/sectors" element={<SectorsPage />} />
-                    <Route
-                      path="/data-sync"
-                      element={
-                        <RequireAdmin>
-                          <DataManagementPage />
-                        </RequireAdmin>
-                      }
-                    />
-                  </Routes>
-                </Suspense>
-              </AppShell>
-            </RequireAuth>
-          }
-        />
-      </Routes>
-    </Suspense>
+    <>
+      <SeoHead forceNoIndex={authRequired} />
+      <Suspense fallback={<LoadingState rows={6} />}>
+        <Routes>
+          {/* 匿名用户直接进入工作台；/login 仅保留给管理员执行写操作。 */}
+          <Route path="/login" element={<LoginPage />} />
+          {/* 认证开关关闭时 RequireAuth 直接透传。 */}
+          <Route
+            path="*"
+            element={
+              <RequireAuth>
+                <AppShell>
+                  <Suspense fallback={<LoadingState rows={6} />}>
+                    <Routes>
+                      <Route path="/" element={<MarketOverviewPage />} />
+                      <Route path="/explore" element={<Navigate to="/mainline" replace />} />
+                      <Route path="/stocks" element={<StocksPage />} />
+                      <Route path="/stocks/:vtSymbol" element={<StockDetailPage />} />
+                      <Route path="/indices/:key" element={<IndexDetailPage />} />
+                      <Route path="/market" element={<MarketTimingPage />} />
+                      <Route path="/chain" element={<Navigate to="/mainline" replace />} />
+                      <Route path="/mainline" element={<MainlineReplayPage />} />
+                      <Route path="/short-term" element={<ShortTermResearchPage />} />
+                      <Route path="/lianban" element={<LianbanReviewPage />} />
+                      <Route path="/lianban/ladder" element={<LadderHistoryPage />} />
+                      <Route
+                        path="/data"
+                        element={
+                          <RequireAdmin>
+                            <DataManagementPage />
+                          </RequireAdmin>
+                        }
+                      />
+                      {/* Legacy routes */}
+                      <Route path="/sectors" element={<SectorsPage />} />
+                      <Route
+                        path="/data-sync"
+                        element={
+                          <RequireAdmin>
+                            <DataManagementPage />
+                          </RequireAdmin>
+                        }
+                      />
+                    </Routes>
+                  </Suspense>
+                </AppShell>
+              </RequireAuth>
+            }
+          />
+        </Routes>
+      </Suspense>
+    </>
   );
 }

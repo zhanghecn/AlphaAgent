@@ -26,6 +26,9 @@ read this file and verify against the local code/docs when needed.
   `deploy/` for deployment) and put build/release complexity into Dockerfile,
   Compose, deploy scripts, and CI instead of asking users to remember special
   build target commands.
+- Use Docker Compose for all frontend and full-stack runs. Do not start a
+  standalone Vite/Node development server or expose port 5173; verify the web
+  application through the Compose gateway instead.
 - Docker release shape: root `docker-compose.yml` is for local development;
   `deploy/docker-compose.local.yml` is for server deployment with local data
   directories; `.github/workflows/docker-release.yml` publishes

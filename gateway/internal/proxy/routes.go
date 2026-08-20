@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"net/url"
 
 	"github.com/go-chi/chi/v5"
@@ -30,10 +31,22 @@ func Mount(r chi.Router, cfg *config.Config, authSvc *auth.Service) {
 	apiProxy := New(apiURL, "alphaagent-api")
 	webProxy := New(webURL, "alphaagent-web")
 	authHandler := handler.NewAuthHandler(cfg, authSvc)
+	privateWebHandler := handler.NoIndex(webProxy)
+	webHandler := http.Handler(webProxy)
+	if cfg.AuthRequired {
+		webHandler = privateWebHandler
+	}
 
 	// 1. 健康检查
 	r.Get("/healthz", handler.Healthz)
 	r.Get("/readyz", handler.Ready(apiURL, webURL))
+	r.Get("/robots.txt", handler.Robots(!cfg.AuthRequired))
+	r.Get("/sitemap.xml", handler.Sitemap(!cfg.AuthRequired))
+
+	// 公开路由别名直接重定向，避免搜索引擎将 SPA 内部跳转视为重复内容。
+	r.Get("/explore", handler.PermanentRedirect("/mainline"))
+	r.Get("/chain", handler.PermanentRedirect("/mainline"))
+	r.Get("/data-sync", handler.PermanentRedirect("/data"))
 
 	// 2. 认证端点（公开）
 	r.Route("/api/auth", func(r chi.Router) {
@@ -64,6 +77,12 @@ func Mount(r chi.Router, cfg *config.Config, authSvc *auth.Service) {
 		})
 	}
 
-	// 5. 前端静态资源与 SPA 路由 —— 转发到 nginx
-	r.Handle("/*", webProxy)
+	// 5. 管理入口不允许收录；其余前端静态资源与 SPA 路由转发到 nginx。
+	r.Handle("/login", privateWebHandler)
+	r.Handle("/login/*", privateWebHandler)
+	r.Handle("/data", privateWebHandler)
+	r.Handle("/data/*", privateWebHandler)
+	r.Handle("/stocks/*", privateWebHandler)
+	r.Handle("/indices/*", privateWebHandler)
+	r.Handle("/*", webHandler)
 }
