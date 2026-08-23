@@ -236,6 +236,10 @@ def test_default_batch_schedules_defined():
         "eod_1900",
         "eod_finalize_2130",
         "low_suction_backtest_2230",
+        "qianlong_live_scan",
+        "qianlong_backtest_2235",
+        "w2s_live_scan",
+        "w2s_backtest_2250",
     }
 
 
@@ -885,6 +889,8 @@ def test_eod_schedule_runs_market_data_and_low_suction_confirmation():
         "sync_stock_financial_indicators",
         "sync_stock_business_segments_history",
         "sync_margin_balance",
+        "qianlong_eod_finalize",
+        "w2s_eod_finalize",
     ]
 
 
@@ -911,6 +917,8 @@ def test_eod_finalize_schedule_retries_daily_bars_late_without_slow_jobs():
         "sync_stock_sector_memberships",
         "sync_low_suction_security_snapshot",
         "sync_margin_balance",
+        "qianlong_eod_finalize",
+        "w2s_eod_finalize",
     ]
     assert "sync_stock_financial_quarterly" not in jobs
     assert "sync_stock_lhb_records" not in jobs

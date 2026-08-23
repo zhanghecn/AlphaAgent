@@ -1,14 +1,16 @@
-import { FlaskConical, Rocket } from "lucide-react";
+import { FlaskConical, Rocket, Zap } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
-import { FirstBoardLeaderPage } from "@/pages/FirstBoardLeaderPage";
 import { LowSuctionPage } from "@/pages/LowSuctionPage";
+import { QianlongPage } from "@/pages/QianlongPage";
+import { WeakToStrongPage } from "@/pages/WeakToStrongPage";
 
-type ResearchTab = "first-board" | "low-suction";
+type ResearchTab = "first-board" | "low-suction" | "weak-to-strong";
 
 const RESEARCH_TABS = [
   { value: "first-board", label: "潜龙首板", icon: Rocket },
+  { value: "weak-to-strong", label: "趋势弱转强", icon: Zap },
   { value: "low-suction", label: "低吸", icon: FlaskConical },
 ] as const;
 
@@ -16,9 +18,12 @@ export function ShortTermResearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const raw = searchParams.get("research");
   // 旧书签（reverse-wrap / pullback-study）统一归入低吸
-  const activeTab: ResearchTab = raw === "low-suction" || raw === "reverse-wrap" || raw === "pullback-study"
+  const activeTab: ResearchTab =
+    raw === "low-suction" || raw === "reverse-wrap" || raw === "pullback-study"
       ? "low-suction"
-      : "first-board";
+      : raw === "weak-to-strong"
+        ? "weak-to-strong"
+        : "first-board";
 
   const selectTab = (tab: ResearchTab) => {
     const next = new URLSearchParams(searchParams);
@@ -27,7 +32,14 @@ export function ShortTermResearchPage() {
     setSearchParams(next, { replace: true });
   };
 
-  const panel = activeTab === "first-board" ? <FirstBoardLeaderPage /> : <LowSuctionPage />;
+  const panel =
+    activeTab === "first-board" ? (
+      <QianlongPage />
+    ) : activeTab === "weak-to-strong" ? (
+      <WeakToStrongPage />
+    ) : (
+      <LowSuctionPage />
+    );
 
   return (
     <div className="min-w-0">

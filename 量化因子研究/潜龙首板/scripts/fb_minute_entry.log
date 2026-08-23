@@ -1,0 +1,28 @@
+/tmp/fb/fb_minute_entry.py:29: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  stocks = pd.read_sql("SELECT vt_symbol, symbol, name FROM stocks", conn)
+/tmp/fb/fb_minute_entry.py:30: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  bars = pd.read_sql(
+/tmp/fb/fb_minute_entry.py:34: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  lu = pd.read_sql(
+[1m] 候选对 7,041 涉及股票 2057
+/tmp/fb/fb_minute_entry.py:122: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  mb = pd.read_sql(
+[1m] 2026-06: 覆盖 3043/3082 对, 729,705行
+[1m] 2026-06: 分钟/日量单位比中位数 = 100.000
+/tmp/fb/fb_minute_entry.py:122: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  mb = pd.read_sql(
+[1m] 2026-07: 覆盖 2995/3025 对, 718,542行
+[1m] 2026-07: 分钟/日量单位比中位数 = 100.000
+/tmp/fb/fb_minute_entry.py:122: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  mb = pd.read_sql(
+[1m] 2026-08: 覆盖 807/934 对, 193,680行
+[1m] 2026-08: 分钟/日量单位比中位数 = 100.000
+[5m] 候选对 4,361 涉及股票 1730
+/tmp/fb/fb_minute_entry.py:122: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  mb = pd.read_sql(
+[5m] 2026-04: 覆盖 929/2129 对, 44,592行
+[5m] 2026-04: 分钟/日量单位比中位数 = 100.000
+/tmp/fb/fb_minute_entry.py:122: UserWarning: pandas only supports SQLAlchemy connectable (engine/connection) or database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 objects are not tested. Please consider using SQLAlchemy.
+  mb = pd.read_sql(
+[5m] 2026-05: 覆盖 2211/2232 对, 106,128行
+[5m] 2026-05: 分钟/日量单位比中位数 = 100.000

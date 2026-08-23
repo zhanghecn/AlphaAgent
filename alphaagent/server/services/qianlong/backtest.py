@@ -1,0 +1,342 @@
+"""潜龙首板回测引擎(v6 纯底盘版):日线口径全量回放 + 三槽模拟仓 + 物化报告。
+
+口径 = 量化因子研究/潜龙首板/scripts/fb_chassis_pool.py 研究管线(J 池,41 个月,含 0.5% 滑点):
+- 池 = 底盘形态 A|B(全新急建仓/小阳建仓), 无市值/价门槛
+- 触发:当日最高价 ≥ 昨收×1.08(日线无法回放分钟收住,标注口径)
+- 量比:首板全日量比 < 1.5(收盘定型,含前视上限;盘中实盘用触及量比<1.0)
+- 高开 ≥ +8% 不做(直接从宇宙剔除)
+- 进场:触发价 × 1.005;卖出:未封板/未连板 → 次日开盘;连板 → 断板日开盘
+- 除权污染:|隔夜缺口|>11% 剔除
+模拟仓:3 槽位(每槽入场时净值的 1/3),B 类(小阳建仓)优先,退出日确认盈亏;
+熔断层:当月已实现亏损达 -5% 后当月停止开仓。
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from datetime import date, datetime, timezone
+
+import numpy as np
+import pandas as pd
+from sqlalchemy import select
+
+from alphaagent.server.db import schema
+from alphaagent.server.db.session import get_engine
+from alphaagent.server.services.a_share_universe import is_eligible_main_board
+from alphaagent.server.services.qianlong import contracts
+
+logger = logging.getLogger(__name__)
+TRAIN_END = pd.Timestamp("2025-07-01")
+REPLAY_START = "2023-01-01"
+
+
+def run_backtest() -> dict[str, object]:
+    """全量回放并返回物化 payload(不写库,由调用方持久化)。"""
+    engine = get_engine()
+    stocks = pd.read_sql(
+        select(schema.stocks.c.vt_symbol, schema.stocks.c.symbol,
+               schema.stocks.c.name, schema.stocks.c.market_cap), engine)
+    bars = pd.read_sql(
+        select(schema.stock_daily_bars.c.vt_symbol,
+               schema.stock_daily_bars.c.trade_date,
+               schema.stock_daily_bars.c.open_price, schema.stock_daily_bars.c.close_price,
+               schema.stock_daily_bars.c.high_price, schema.stock_daily_bars.c.low_price,
+               schema.stock_daily_bars.c.volume,
+               schema.stock_daily_bars.c.turnover_rate, schema.stock_daily_bars.c.change_pct)
+        .where(schema.stock_daily_bars.c.trade_date >= date(2022, 1, 1)), engine)
+    lu = pd.read_sql(
+        select(schema.stock_limit_up_daily.c.vt_symbol,
+               schema.stock_limit_up_daily.c.trade_date,
+               schema.stock_limit_up_daily.c.is_limit_up,
+               schema.stock_limit_up_daily.c.limit_up_count)
+        .where(schema.stock_limit_up_daily.c.is_limit_up.is_(True)), engine)
+
+    stocks["eligible"] = stocks.apply(
+        lambda r: is_eligible_main_board(str(r["vt_symbol"]), str(r["name"])), axis=1)
+    main = stocks[stocks["eligible"]]
+    main_syms = set(main["vt_symbol"])
+    cap_map = (main.set_index("vt_symbol")["market_cap"] / 1e8).to_dict()
+    name_map = main.set_index("vt_symbol")["name"].to_dict()
+
+    bars = bars[bars.vt_symbol.isin(main_syms)].copy()
+    bars["trade_date"] = pd.to_datetime(bars["trade_date"])
+    bars.sort_values(["vt_symbol", "trade_date"], inplace=True)
+    lu = lu[lu.vt_symbol.isin(main_syms)].copy()
+    lu["trade_date"] = pd.to_datetime(lu["trade_date"])
+    lu_key = lu.set_index(["vt_symbol", "trade_date"])
+    g = bars.groupby("vt_symbol", sort=False)
+    bars["ma5"] = g["close_price"].transform(lambda s: s.rolling(5).mean())
+    bars["ma10"] = g["close_price"].transform(lambda s: s.rolling(10).mean())
+    bars["ma20"] = g["close_price"].transform(lambda s: s.rolling(20).mean())
+    bars["ret10"] = g["close_price"].transform(lambda s: s / s.shift(10) - 1)
+    bars["vol_ma5_prev"] = g["volume"].transform(lambda s: s.rolling(5).mean().shift(1))
+    bars["yang"] = bars["close_price"] > bars["open_price"]
+    bars["yang10"] = g["yang"].transform(lambda s: s.rolling(10, min_periods=5).sum())
+    # 连续多头排列天数(收>MA5>MA10>MA20)
+    bull = ((bars["close_price"] > bars["ma5"]) & (bars["ma5"] > bars["ma10"])
+            & (bars["ma10"] > bars["ma20"])).fillna(False)
+    run = bull.astype(int)
+    bars["trend_days"] = run * run.groupby([bars["vt_symbol"], (~bull).cumsum()]).cumsum()
+    # change_pct 列存在约 20 个交易日的历史缺口;用收盘对收盘推导值回填。
+    derived_chg = g["close_price"].transform(lambda s: (s / s.shift(1) - 1) * 100)
+    bars["change_pct"] = bars["change_pct"].fillna(derived_chg)
+    bars["open_p1"] = g["open_price"].shift(-1)
+    bars["close_p1"] = g["close_price"].shift(-1)
+    bars["date_p1"] = g["trade_date"].shift(-1)
+    for k in (2, 3, 4, 5, 6):
+        bars[f"open_p{k}"] = g["open_price"].shift(-k)
+        bars[f"close_p{k}"] = g["close_price"].shift(-k)
+        bars[f"date_p{k}"] = g["trade_date"].shift(-k)
+    for col in ["close_price", "low_price", "turnover_rate", "change_pct", "ma20",
+                "trend_days", "yang10", "ret10"]:
+        bars[col + "_tm1"] = g[col].shift(1)
+    idx = pd.MultiIndex.from_frame(bars[["vt_symbol", "trade_date"]])
+    bars["lu_T"] = idx.map(lu_key["is_limit_up"]).fillna(False).astype(bool).values
+    tm1_date = g["trade_date"].shift(1)
+    idx_tm1 = pd.MultiIndex.from_arrays([bars["vt_symbol"], tm1_date])
+    bars["lu_tm1"] = idx_tm1.map(lu_key["is_limit_up"]).fillna(False).astype(bool).values
+    lu_prev = g["lu_T"].shift(1)
+    bars["lu_cnt20"] = lu_prev.groupby(bars.vt_symbol).transform(
+        lambda s: s.rolling(20, min_periods=1).sum())
+    bars["lu_cnt60"] = lu_prev.groupby(bars.vt_symbol).transform(
+        lambda s: s.rolling(60, min_periods=1).sum())
+
+    lu_all = lu.sort_values(["vt_symbol", "trade_date"]).copy()
+    lu_all["gap"] = lu_all.groupby("vt_symbol")["trade_date"].diff().dt.days
+    lu_all["new_seg"] = (lu_all["gap"].isna()) | (lu_all["gap"] > 7) | (lu_all["limit_up_count"] == 1)
+    lu_all["seg"] = lu_all.groupby("vt_symbol")["new_seg"].cumsum()
+    segmax = lu_all.groupby(["vt_symbol", "seg"])["limit_up_count"].max().rename("streak_h")
+    lu_all = lu_all.join(segmax, on=["vt_symbol", "seg"])
+    first = (lu_all[lu_all.limit_up_count == 1][["vt_symbol", "trade_date", "streak_h"]]
+             .set_index(["vt_symbol", "trade_date"]))
+    bars = bars.join(first, on=["vt_symbol", "trade_date"])
+
+    c = contracts
+    bars["trigger_price"] = bars["close_price_tm1"] * (1 + c.TRIGGER_PCT)
+    bars["triggered"] = bars["high_price"] >= bars["trigger_price"] - 1e-9
+    bars["entry"] = np.where(bars["open_price"] > bars["trigger_price"],
+                             bars["open_price"], bars["trigger_price"]) * (1 + c.ENTRY_SLIPPAGE)
+    bars["sealed"] = bars["lu_T"]
+    bars["cap_yi"] = bars.vt_symbol.map(cap_map)
+    bars["gap_open"] = bars["open_price"] / bars["close_price_tm1"] - 1
+    bars["dist_ma20"] = bars["close_price_tm1"] / bars["ma20_tm1"] - 1
+    limit_px = (bars["close_price_tm1"] * 1.1 + 1e-9).round(2)
+    bars["oneword_strict"] = bars["low_price"] >= limit_px * 0.999
+
+    # v6 底盘池: A 全新急建仓(近60日无涨停 且 多头排列≤10天)
+    #            B 小阳建仓(近10日≥7阳 且 10日涨幅<15% 且 近20日无涨停)
+    cond_a = ((bars["lu_cnt60"] <= c.CHASSIS_A_LU60_MAX)
+              & (bars["trend_days_tm1"] <= c.CHASSIS_A_TREND_DAYS_MAX))
+    cond_b = ((bars["yang10_tm1"] >= c.CHASSIS_B_YANG10_MIN)
+              & (bars["ret10_tm1"] < c.CHASSIS_B_RET10_MAX)
+              & (bars["lu_cnt20"] <= c.CHASSIS_B_LU20_MAX))
+    bars["chassis_tag"] = ""
+    bars.loc[cond_a & cond_b, "chassis_tag"] = "AB"
+    bars.loc[cond_a & ~cond_b, "chassis_tag"] = "A"
+    bars.loc[~cond_a & cond_b, "chassis_tag"] = "B"
+    bars["vol_ratio"] = bars["volume"] / bars["vol_ma5_prev"]
+    pool = ((~bars["lu_tm1"]) & (cond_a | cond_b)
+            & (bars["vol_ratio"] < c.BACKTEST_VOL_RATIO_MAX))
+    ev = bars[(bars.trade_date >= REPLAY_START) & bars["triggered"] & pool
+              & ~bars["oneword_strict"]
+              & (bars["gap_open"] < c.GAP_SKIP)].copy()
+    k = ev["streak_h"].fillna(0).astype(int).clip(0, 6)
+    eo = np.full(len(ev), np.nan)
+    for kk in range(2, 7):
+        eo = np.where((k == kk).values, ev[f"open_p{kk}"].values, eo)
+    eo = np.where(~ev["sealed"] | (k < 2), ev["open_p1"].values, eo)
+    ev["exit_px"] = pd.Series(eo, index=ev.index)
+    ev["ret"] = pd.Series(eo / ev["entry"].values - 1, index=ev.index)
+    ev["streak_k"] = k.values
+    exit_date = ev["date_p1"].values.copy()
+    for kk in range(2, 7):
+        exit_date = np.where((k == kk).values, ev[f"date_p{kk}"].values, exit_date)
+    exit_date = np.where(~ev["sealed"] | (k < 2), ev["date_p1"].values, exit_date)
+    ev["exit_date"] = pd.to_datetime(pd.Series(exit_date, index=ev.index))
+    disc = (ev["open_p1"] / ev["close_price"] - 1).abs() > 0.11
+    for kk in range(2, 7):
+        disc |= (pd.Series(ev[f"open_p{kk}"].values / ev[f"close_p{kk-1}"].values - 1,
+                           index=ev.index).abs() > 0.11)
+    ev = ev[~disc.fillna(False)]
+    ev["month"] = ev["trade_date"].dt.to_period("M").astype(str)
+    ev["is_train"] = ev.trade_date < TRAIN_END
+    ev["name"] = ev.vt_symbol.map(name_map)
+    ev["priority"] = ev["chassis_tag"].isin(["B", "AB"])  # 小阳建仓(B类)优先
+    ev = ev.dropna(subset=["ret"])
+
+    payload = {
+        "rules_version": c.QIANLONG_RULES_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "coverage": {
+            "from": ev.trade_date.min().date().isoformat(),
+            "to": ev.trade_date.max().date().isoformat(),
+            "months": int(ev["month"].nunique()),
+        },
+        "caliber": ("日线口径:最高价触及+8%即算触发(无法回放分钟收住);"
+                    "首板全日量比<1.5为收盘定型口径(含前视上限,盘中实盘用触及量比<1.0);"
+                    "高开≥8%不做;含0.5%滑点;剔除真一字与除权伪触发(|隔夜缺口|>11%)"),
+        "summary": _stats(ev),
+        "chassis_b_subset": _stats(ev[ev["priority"]]),
+        "segments": {
+            "train_202301_202506": _stats(ev[ev["is_train"]]),
+            "valid_202507_now": _stats(ev[~ev["is_train"]]),
+            "ex_202409": _stats(ev[ev.month != "2024-09"]),
+        },
+        "monthly": [
+            {"month": m, **_stats(g_)} for m, g_ in ev.groupby("month")
+        ],
+        "anchors": c.BACKTEST_ANCHORS,
+        "anchor_check": _anchor_check(ev),
+    }
+    sim = _slot_simulation(ev)
+    payload["ledger_days"] = _ledger_days(ev)
+    payload["simulation"] = sim
+    return payload
+
+
+def _stats(df: pd.DataFrame) -> dict[str, object]:
+    r = df["ret"].dropna()
+    if len(r) < 5:
+        return {"n": int(len(r))}
+    return {
+        "n": int(len(r)),
+        "avg_pct": round(float(r.mean()) * 100, 2),
+        "median_pct": round(float(r.median()) * 100, 2),
+        "win": round(float((r > 0).mean()), 3),
+        "seal": round(float(df["sealed"].mean()), 3),
+        "streak2": round(float((df["streak_k"] >= 2).mean()), 3),
+    }
+
+
+def _anchor_check(ev: pd.DataFrame) -> dict[str, object]:
+    """与定稿锚点自校对(容差来自新增交易日与主板口径微调)。"""
+    a = contracts.BACKTEST_ANCHORS
+    s = _stats(ev)
+    va = _stats(ev[~ev["is_train"]])
+    return {
+        "pool_n_diff": int(s.get("n", 0)) - a["pool_n"],
+        "pool_avg_diff": round(float(s.get("avg_pct", 0)) - a["pool_avg_pct"], 2),
+        "valid_n_diff": int(va.get("n", 0)) - a["valid_n"],
+        "valid_avg_diff": round(float(va.get("avg_pct", 0)) - a["valid_avg_pct"], 2),
+        "note": "差异应仅来自锚点之后的新增交易日;若同口径回溯期数值漂移即口径被破坏",
+    }
+
+
+def _slot_simulation(ev: pd.DataFrame) -> dict[str, object]:
+    """三槽模拟仓:每日最多 3 笔,高开 2~6% 优先;退出日实现盈亏。"""
+    usable = ev.dropna(subset=["exit_date"]).copy()
+    picks = usable.sort_values(
+        ["trade_date", "priority", "gap_open"],
+        ascending=[True, False, True],
+    )
+    all_days = sorted(set(usable.trade_date.dt.date) | set(usable.exit_date.dt.date))
+    day_index = {d: i for i, d in enumerate(all_days)}
+    by_day = {d: g_ for d, g_ in picks.groupby(picks.trade_date.dt.date)}
+
+    def run(with_breaker: bool) -> dict[str, object]:
+        equity = 1.0
+        slots: list[dict[str, object]] = []
+        curve: list[dict[str, object]] = []
+        trades: list[dict[str, object]] = []
+        month_start_equity = equity
+        month_halted: str | None = None
+        prev_month = ""
+        for i, day in enumerate(all_days):
+            for slot in list(slots):
+                if int(slot["exit_i"]) <= i:
+                    equity += float(slot["invest"]) * float(slot["ret"])
+                    trades.append(slot["row"])
+                    slots.remove(slot)
+            month = day.isoformat()[:7]
+            if month != prev_month:
+                month_start_equity = equity
+                month_halted = None
+                prev_month = month
+            halted = month_halted == month
+            for row in (by_day.get(day).itertuples() if day in by_day else ()):
+                if len(slots) >= 3 or halted:
+                    continue
+                exit_i = day_index.get(row.exit_date.date())
+                if exit_i is None:
+                    continue
+                slots.append({"invest": equity / 3.0, "ret": float(row.ret),
+                              "exit_i": exit_i, "row": _trade_row(row)})
+            if with_breaker and month_halted != month and month_start_equity > 0:
+                if (equity - month_start_equity) / month_start_equity * 100 \
+                        <= contracts.MONTHLY_CIRCUIT_BREAKER_PCT:
+                    month_halted = month
+            curve.append({"date": day.isoformat(), "equity": round(equity, 4)})
+        rets = [float(t["ret_pct"]) for t in trades if t.get("ret_pct") is not None]
+        wins = [r for r in rets if r > 0]
+        peak = 1.0
+        max_dd = 0.0
+        for p in curve:
+            peak = max(peak, float(p["equity"]))
+            max_dd = min(max_dd, float(p["equity"]) / peak - 1)
+        return {
+            "trades": len(trades),
+            "final_equity": round(equity, 4),
+            "total_return_pct": round((equity - 1) * 100, 1),
+            "win_rate_pct": round(len(wins) / len(rets) * 100, 1) if rets else None,
+            "max_drawdown_pct": round(max_dd * 100, 1),
+            "curve": curve,
+        }
+
+    plain = run(False)
+    breaker = run(True)
+    return {
+        "note": contracts.SIM_DAILY_STOP_NOTE + ";槽位占用期间信号跳过;退出日确认盈亏",
+        "plain": {k2: v for k2, v in plain.items() if k2 != "trades_detail"},
+        "with_circuit_breaker": {k2: v for k2, v in breaker.items() if k2 != "trades_detail"},
+    }
+
+
+def _trade_row(row) -> dict[str, object]:
+    return {
+        "vt_symbol": str(row.vt_symbol),
+        "name": str(row.name),
+        "entry_date": row.trade_date.date().isoformat(),
+        "entry_price": _sr(row.entry, 3),
+        "gap_open_pct": _sr(float(row.gap_open) * 100 if row.gap_open is not None else None, 2),
+        "priority": bool(row.priority),
+        "sealed": bool(row.sealed),
+        "streak_h": int(row.streak_k),
+        "exit_price": _sr(getattr(row, "exit_px", None), 3),
+        "exit_date": row.exit_date.date().isoformat(),
+        "ret_pct": _sr(float(row.ret) * 100, 2),
+        "exit_reason": ("break_open" if row.streak_k >= 2
+                        else ("next_open_nostreak" if row.sealed else "next_open_fail")),
+    }
+
+
+def _sr(value: object, ndigits: int) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return round(number, ndigits) if math.isfinite(number) else None
+
+
+def _ledger_days(ev: pd.DataFrame) -> list[dict[str, object]]:
+    """全历史模拟交割单(全部触发信号,不限仓位不限天数;月份筛选由 API 层切片)。
+
+    此前取三槽模拟仓成交(每日≤3笔),超出槽位的信号不进交割单;
+    改为全样本 ev 逐笔——仓位约束只影响模拟仓净值曲线,不影响交割单口径。
+    """
+    usable = ev.dropna(subset=["exit_date"])
+    days: dict[str, list[dict[str, object]]] = {}
+    for row in usable.itertuples():
+        days.setdefault(row.trade_date.date().isoformat(), []).append(_trade_row(row))
+    out = []
+    for d in sorted(days, reverse=True):
+        items = days[d]
+        rets = [float(t["ret_pct"]) for t in items if t.get("ret_pct") is not None]
+        out.append({
+            "trade_date": d,
+            "trades": items,
+            "count": len(items),
+            "win": sum(1 for r in rets if r > 0),
+            "avg_ret_pct": round(sum(rets) / len(rets), 2) if rets else None,
+        })
+    return out

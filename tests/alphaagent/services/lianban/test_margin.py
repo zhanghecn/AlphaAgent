@@ -280,12 +280,15 @@ def test_margin_job_registered_in_data_sync():
     assert cad.freshness_table == "market_margin_balance"
 
     assert job.id in svc._RECOMMENDED_PRIORITY
-    # 尾部: 交易所晚间公布, 依赖越少越靠后
+    # 尾部: 交易所晚间公布, 依赖越少越靠后; 潜龙首板盘后定版必须压在最后
+    # (依赖日线 + 连板重建的全部产出)
     for schedule_id in ("eod_1900", "eod_finalize_2130"):
         schedule = next(
             item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
         )
-        assert schedule["job_ids"][-1] == "sync_margin_balance"
+        assert schedule["job_ids"][-3] == "sync_margin_balance"
+        assert schedule["job_ids"][-2] == "qianlong_eod_finalize"
+        assert schedule["job_ids"][-1] == "w2s_eod_finalize"
 
 
 def test_data_sync_runner_wires_margin_sync(monkeypatch):

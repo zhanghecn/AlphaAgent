@@ -1760,6 +1760,258 @@ Index(
 )
 
 
+# ── 潜龙首板(首板打板)产品线 ──
+# 策略口径 = 量化因子研究/潜龙首板/潜龙首板条件定稿.md v4,一字不改。
+# 盘前池:每个执行交易日一行/股,8 条硬条件全部来自 T-1 收盘数据。
+qianlong_pool_entries = Table(
+    "qianlong_pool_entries",
+    metadata,
+    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False),
+    Column("prev_close", Float, nullable=False),   # T-1 收盘
+    Column("trigger_price", Float, nullable=False),  # 昨收 × 1.08
+    Column("limit_price", Float, nullable=True),   # 涨停价(昨收 × 1.1)
+    Column("ma20", Float, nullable=True),
+    Column("dist_ma20", Float, nullable=True),
+    Column("chg_tm1", Float, nullable=True),       # 昨日涨幅 %
+    Column("low_tm1", Float, nullable=True),
+    Column("turnover_rate_tm1", Float, nullable=True),
+    Column("market_cap_yi", Float, nullable=True),
+    # v6 底盘形态字段
+    Column("vol_ma5", Float, nullable=True),        # 前5日均量(手), 盘中量比基准
+    Column("chassis_tag", String(4), nullable=True),  # A=全新急建仓 B=小阳建仓 AB=双满足
+    Column("trend_days", Float, nullable=True),     # 多头排列持续天数(T-1)
+    Column("yang10", Float, nullable=True),         # 近10日阳线数
+    Column("ret10", Float, nullable=True),          # 近10日涨幅(小数)
+    Column("lu_cnt20", Float, nullable=True),       # 近20日涨停次数
+    Column("lu_cnt60", Float, nullable=True),       # 近60日涨停次数
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_qianlong_pool_entries_date", qianlong_pool_entries.c.trade_date)
+
+# 盘中触发信号:与池同主键,状态机随扫描推进;EOD 定版封板/连板/退出。
+# 该表同时是前推交割单(entered 且有 exit 的行),避免双写不一致。
+qianlong_signals = Table(
+    "qianlong_signals",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False),
+    # watching/touched/confirmed_entered/unconfirmed/skipped_gap/no_trigger
+    Column("status", String(24), nullable=False, server_default="watching"),
+    Column("gap_open", Float, nullable=True),      # 高开幅度(小数)
+    Column("priority", Boolean, nullable=False, server_default="false"),  # 高开 2~6% 先做
+    Column("prev_close", Float, nullable=False),
+    Column("trigger_price", Float, nullable=False),
+    Column("touched_at", DateTime(timezone=True), nullable=True),
+    Column("entry_price", Float, nullable=True),   # 确认时现价 × 1.005 滑点
+    Column("entry_time", DateTime(timezone=True), nullable=True),
+    Column("last_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),    # 现价相对昨收 %
+    # EOD 定版字段
+    Column("sealed", Boolean, nullable=True),      # 当日是否封板
+    Column("streak_h", Integer, nullable=True),    # 连板持有中的当前板数
+    Column("exit_date", Date, nullable=True),
+    Column("exit_price", Float, nullable=True),
+    # next_open_fail(未封板)/next_open_nostreak(未连板)/break_open(断板)
+    Column("exit_reason", String(24), nullable=True),
+    Column("ret_pct", Float, nullable=True),       # (exit/entry-1)×100
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_qianlong_signals_date", qianlong_signals.c.trade_date)
+Index("ix_qianlong_signals_status", qianlong_signals.c.status)
+
+# 每分钟盘中扫描运行轨道(诊断用)。
+qianlong_live_scan_runs = Table(
+    "qianlong_live_scan_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=False),
+    Column("duration_ms", Integer, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("pool_count", Integer, nullable=True),
+    Column("touched_count", Integer, nullable=True),
+    Column("entered_count", Integer, nullable=True),
+    Column("spot_active_symbols", Integer, nullable=True),
+    Column("rules_version", String(80), nullable=False),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index(
+    "ix_qianlong_live_scan_runs_date_time",
+    qianlong_live_scan_runs.c.trade_date,
+    qianlong_live_scan_runs.c.started_at,
+)
+
+# 回测报告:单行 id=1 物化(同低吸模式,CLI/调度写库,API 只读)。
+qianlong_backtest_runs = Table(
+    "qianlong_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1
+    Column("rules_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# 回测重算运行轨道(手动/定时请求)。
+qianlong_backtest_rebuild_runs = Table(
+    "qianlong_backtest_rebuild_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source", String(24), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("stage", String(48), nullable=False),
+    Column("rules_version", String(80), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_qianlong_backtest_rebuild_requested",
+    qianlong_backtest_rebuild_runs.c.requested_at,
+)
+
+# ── 趋势弱转强(二板弱转强打板)产品线 ──
+# 策略口径 = 量化因子研究/低吸研究/趋势低吸研究-弱转强v2.md 定稿 v2,一字不改。
+# 盘前池:每个执行交易日一行/股/组,全部条件来自 T-1 收盘数据。
+w2s_pool_entries = Table(
+    "w2s_pool_entries",
+    metadata,
+    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("group_key", String(8), primary_key=True),  # a1/a2/b
+    Column("name", String(80), nullable=False),
+    Column("prev_close", Float, nullable=False),   # T-1 收盘
+    Column("trigger_price", Float, nullable=False),  # A1/B=昨收×1.07;A2=涨停价
+    Column("limit_price", Float, nullable=True),
+    # 条件快照值(T-1)
+    Column("chg_tm1", Float, nullable=True),       # 昨日涨幅 %
+    Column("lshadow_tm1", Float, nullable=True),   # 昨日下影线 %
+    Column("fade_tm1", Float, nullable=True),      # 昨日(最高-收盘)/昨收 %(研究"上影线"口径)
+    Column("vol_rel5_tm1", Float, nullable=True),  # 昨日量比(量÷5日均量)
+    Column("amp_tm1", Float, nullable=True),       # 昨日振幅 %
+    Column("turnover_tm1", Float, nullable=True),  # 昨日换手 %
+    Column("base20_tm1", Float, nullable=True),    # 底座(20日涨幅) %
+    Column("last_streak", Integer, nullable=True), # 前段连板高度(最近一次≥2连板)
+    Column("gap_days", Integer, nullable=True),    # 距连板末日交易日数
+    Column("mkt_lim_tm1", Integer, nullable=True), # 昨日大盘(主板非ST)涨停家数
+    Column("halted", Boolean, nullable=False, server_default="false"),  # 大盘停手(>110)
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_w2s_pool_entries_date", w2s_pool_entries.c.trade_date)
+
+# 盘中触发信号:与池同主键,状态机随扫描推进;EOD 定版封板/连板/退出。
+# 该表同时是前推交割单(entered 且有 exit 的行),避免双写不一致。
+w2s_signals = Table(
+    "w2s_signals",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("group_key", String(8), primary_key=True),
+    Column("name", String(80), nullable=False),
+    # watching/skipped_gap/halted/touched/entered/holding/pending_exit/no_trigger/closed
+    Column("status", String(24), nullable=False, server_default="watching"),
+    Column("gap_open", Float, nullable=True),      # 竞价/开盘高开幅度(小数,仅A1过滤用)
+    Column("prev_close", Float, nullable=False),
+    Column("trigger_price", Float, nullable=False),
+    Column("touched_at", DateTime(timezone=True), nullable=True),
+    Column("entry_price", Float, nullable=True),   # A1/B=触发价(昨收×1.07);A2=涨停价
+    Column("entry_time", DateTime(timezone=True), nullable=True),
+    Column("last_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),    # 现价相对昨收 %
+    # EOD 定版字段
+    Column("sealed", Boolean, nullable=True),      # 买入当日是否封板
+    Column("streak_h", Integer, nullable=True),    # 连板持有中的当前板数
+    Column("exit_date", Date, nullable=True),
+    Column("exit_price", Float, nullable=True),
+    # next_close_fail(T+1未涨停收盘卖)/break_close(断板收盘卖)/max_hold_close(T+15兜底)
+    Column("exit_reason", String(24), nullable=True),
+    Column("ret_pct", Float, nullable=True),       # (exit/entry-1)×100
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_w2s_signals_date", w2s_signals.c.trade_date)
+Index("ix_w2s_signals_status", w2s_signals.c.status)
+
+# 每分钟盘中扫描运行轨道(诊断用)。
+w2s_live_scan_runs = Table(
+    "w2s_live_scan_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=False),
+    Column("duration_ms", Integer, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("pool_count", Integer, nullable=True),
+    Column("touched_count", Integer, nullable=True),
+    Column("entered_count", Integer, nullable=True),
+    Column("spot_active_symbols", Integer, nullable=True),
+    Column("rules_version", String(80), nullable=False),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index(
+    "ix_w2s_live_scan_runs_date_time",
+    w2s_live_scan_runs.c.trade_date,
+    w2s_live_scan_runs.c.started_at,
+)
+
+# 回测报告:单行 id=1 物化(CLI/调度写库,API 只读)。
+w2s_backtest_runs = Table(
+    "w2s_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1
+    Column("rules_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# 回测重算运行轨道(手动/定时请求)。
+w2s_backtest_rebuild_runs = Table(
+    "w2s_backtest_rebuild_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source", String(24), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("stage", String(48), nullable=False),
+    Column("rules_version", String(80), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_w2s_backtest_rebuild_requested",
+    w2s_backtest_rebuild_runs.c.requested_at,
+)
+
+
 market_timing_panel = Table(
     "market_timing_panel",
     metadata,

@@ -13,6 +13,8 @@ from alphaagent.server.api.lianban import router as lianban_router
 from alphaagent.server.api.mainline_replay import router as mainline_replay_router
 from alphaagent.server.api.first_board import router as first_board_router
 from alphaagent.server.api.low_suction import router as low_suction_router
+from alphaagent.server.api.qianlong import router as qianlong_router
+from alphaagent.server.api.weak_to_strong import router as weak_to_strong_router
 from alphaagent.server.api.market import router as market_router
 from alphaagent.server.api.market_timing import router as market_timing_router
 from alphaagent.server.api.research_graphs import router as research_graphs_router
@@ -38,6 +40,8 @@ api_router.include_router(mainline_replay_router)
 api_router.include_router(first_board_router)
 api_router.include_router(lianban_router)
 api_router.include_router(low_suction_router)
+api_router.include_router(qianlong_router)
+api_router.include_router(weak_to_strong_router)
 api_router.include_router(stocks_router)
 api_router.include_router(indices_router)
 api_router.include_router(sectors_router)

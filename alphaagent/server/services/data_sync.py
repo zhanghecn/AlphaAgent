@@ -283,6 +283,38 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={},
     ),
     JobDefinition(
+        id="qianlong_eod_finalize",
+        name="潜龙首板盘后定版",
+        description="潜龙首板信号定版/退出回填 + 次日盘前池计算;口径见 qianlong.contracts(v4)。",
+        source_id="alphaagent_local",
+        target_table="qianlong_signals",
+        default_params={},
+    ),
+    JobDefinition(
+        id="qianlong_live_scan_tick",
+        name="潜龙首板盘中扫描",
+        description="每分钟现货扫描盘前池:触及+8%检测、收住确认、模拟买入(09:30~11:30)。",
+        source_id="alphaagent_local",
+        target_table="qianlong_signals",
+        default_params={},
+    ),
+    JobDefinition(
+        id="w2s_eod_finalize",
+        name="趋势弱转强盘后定版",
+        description="趋势弱转强信号定版/退出回填 + 次日三组盘前池计算;口径见 weak_to_strong.contracts(w2s-v2)。",
+        source_id="alphaagent_local",
+        target_table="w2s_signals",
+        default_params={},
+    ),
+    JobDefinition(
+        id="w2s_live_scan_tick",
+        name="趋势弱转强盘中扫描",
+        description="每分钟现货扫描三组盘前池:竞价过滤(仅A1)、+7% 触及直接打、A2 尾盘封板确认(09:30~15:00)。",
+        source_id="alphaagent_local",
+        target_table="w2s_signals",
+        default_params={},
+    ),
+    JobDefinition(
         id="sync_limit_up_pool_snapshots",
         name="涨停池五池归档",
         description="盘后落库东财涨停/炸板/跌停/昨日涨停/强势股五池,供连板复盘归档。",
@@ -526,6 +558,10 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "sync_index_daily_bars": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_daily_bars", "trade_date"),
     "sync_mainline_sentiment_history": JobCadence(CADENCE_EOD_DAILY, CATEGORY_SECTOR_RESEARCH, 1, "mainline_sentiment_history", "computed_at"),
     "rebuild_stock_limit_up_daily": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "stock_limit_up_daily", "updated_at"),
+    "qianlong_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "qianlong_signals", "updated_at"),
+    "qianlong_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "qianlong_signals", "updated_at"),
+    "w2s_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "w2s_signals", "updated_at"),
+    "w2s_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "w2s_signals", "updated_at"),
     "sync_limit_up_pool_snapshots": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_pool_snapshots", "updated_at"),
     "backfill_limit_up_pool_snapshots": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BARS, 30, "limit_up_pool_snapshots", "updated_at"),
     "sync_margin_balance": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_REALTIME, 1, "market_margin_balance", "trade_date"),
@@ -560,6 +596,8 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_shenwan_industry_members", "sync_industry_board_mapping",
     "sync_supply_chain_edges",
     "sync_stock_daily_bars", "rebuild_stock_limit_up_daily", "sync_limit_up_pool_snapshots", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
+    "qianlong_eod_finalize",
+    "w2s_eod_finalize",
     "sync_stock_minute_bars",
     "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
@@ -705,6 +743,8 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_financial_indicators",
             "sync_stock_business_segments_history",
             "sync_margin_balance",
+            "qianlong_eod_finalize",
+            "w2s_eod_finalize",
         ],
     },
     {
@@ -731,7 +771,45 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_sector_memberships",
             "sync_low_suction_security_snapshot",
             "sync_margin_balance",
+            "qianlong_eod_finalize",
+            "w2s_eod_finalize",
         ],
+    },
+    {
+        "id": "qianlong_live_scan",
+        "name": "潜龙首板盘中扫描（每分钟 09:30~11:30）",
+        "cron": "* 9-11 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["qianlong_live_scan_tick"],
+    },
+    {
+        "id": "qianlong_backtest_2235",
+        "name": "潜龙首板回测重算（22:35）",
+        "cron": "35 22 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["qianlong_backtest_rerun"],
+    },
+    {
+        "id": "w2s_live_scan",
+        "name": "趋势弱转强盘中扫描（每分钟 09:30~15:00）",
+        "cron": "* 9-15 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["w2s_live_scan_tick"],
+    },
+    {
+        "id": "w2s_backtest_2250",
+        "name": "趋势弱转强回测重算（22:50）",
+        "cron": "50 22 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["w2s_backtest_rerun"],
     },
     {
         "id": "low_suction_backtest_2230",
@@ -745,9 +823,13 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
 ]
 
 LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID = "low_suction_daily_backtest_rerun"
+QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID = "qianlong_backtest_rerun"
+W2S_BACKTEST_RERUN_BATCH_JOB_ID = "w2s_backtest_rerun"
 INTERNAL_BATCH_JOB_IDS = {
     LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID,
     LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
+    QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID,
+    W2S_BACKTEST_RERUN_BATCH_JOB_ID,
 }
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
@@ -1434,6 +1516,62 @@ class DataSyncRunner:
                 f"连板梯队日线重建完成：{len(dates)} 个交易日，{rows_written} 行"
             )
         return result
+
+    def _run_qianlong_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """潜龙首板盘后定版:信号推进 + 次日盘前池计算。"""
+        del params
+        from alphaagent.server.services.qianlong.eod_finalize import run_eod_finalize
+
+        self._report_progress("潜龙首板盘后定版", current=0, total=1)
+        result = run_eod_finalize()
+        self._report_progress(
+            "潜龙首板盘后定版", current=1, total=1,
+            current_label=str(result.get("message") or ""),
+            rows_read=int(result.get("rows_read") or 0),
+            rows_written=int(result.get("rows_written") or 0),
+        )
+        return result
+
+    def _run_qianlong_live_scan_tick(self, params: dict[str, Any]) -> dict[str, Any]:
+        """潜龙首板盘中扫描(每分钟):触及检测/收住确认/模拟买入。"""
+        del params
+        from alphaagent.server.services.qianlong.live_scan import run_live_scan_tick
+
+        result = run_live_scan_tick()
+        return {
+            "status": str(result.get("status") or "ok"),
+            "rows_read": int(result.get("pool") or 0),
+            "rows_written": int(result.get("writes") or 0),
+            "message": str(result.get("message") or "潜龙首板盘中扫描"),
+        }
+
+    def _run_w2s_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """趋势弱转强盘后定版:信号推进 + 次日三组盘前池计算。"""
+        del params
+        from alphaagent.server.services.weak_to_strong.eod_finalize import run_eod_finalize
+
+        self._report_progress("趋势弱转强盘后定版", current=0, total=1)
+        result = run_eod_finalize()
+        self._report_progress(
+            "趋势弱转强盘后定版", current=1, total=1,
+            current_label=str(result.get("message") or ""),
+            rows_read=int(result.get("rows_read") or 0),
+            rows_written=int(result.get("rows_written") or 0),
+        )
+        return result
+
+    def _run_w2s_live_scan_tick(self, params: dict[str, Any]) -> dict[str, Any]:
+        """趋势弱转强盘中扫描(每分钟):竞价过滤/+7% 触发/封板确认。"""
+        del params
+        from alphaagent.server.services.weak_to_strong.live_scan import run_live_scan_tick
+
+        result = run_live_scan_tick()
+        return {
+            "status": str(result.get("status") or "ok"),
+            "rows_read": int(result.get("pool") or 0),
+            "rows_written": int(result.get("writes") or 0),
+            "message": str(result.get("message") or "趋势弱转强盘中扫描"),
+        }
 
     def _run_sync_limit_up_pool_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
         """Archive the five EastMoney limit-up pools for dashboard and review reads."""
@@ -2477,6 +2615,10 @@ JOB_RUNNERS: dict[str, str] = {
     "sync_stock_sector_memberships": "_run_sync_stock_sector_memberships",
     "sync_mainline_sentiment_history": "_run_sync_mainline_sentiment_history",
     "rebuild_stock_limit_up_daily": "_run_rebuild_stock_limit_up_daily",
+    "qianlong_eod_finalize": "_run_qianlong_eod_finalize",
+    "qianlong_live_scan_tick": "_run_qianlong_live_scan_tick",
+    "w2s_eod_finalize": "_run_w2s_eod_finalize",
+    "w2s_live_scan_tick": "_run_w2s_live_scan_tick",
     "sync_limit_up_pool_snapshots": "_run_sync_limit_up_pool_snapshots",
     "backfill_limit_up_pool_snapshots": "_run_backfill_limit_up_pool_snapshots",
     "sync_margin_balance": "_run_sync_margin_balance",
@@ -3351,6 +3493,10 @@ def _run_sync_batch(
         try:
             if job_id == LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_low_suction_daily_backtest_rerun_batch_job()
+            elif job_id == QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID:
+                result = _run_qianlong_backtest_rerun_batch_job()
+            elif job_id == W2S_BACKTEST_RERUN_BATCH_JOB_ID:
+                result = _run_w2s_backtest_rerun_batch_job()
             elif job_id == LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID:
                 result = _run_low_suction_live_snapshot_refresh_batch_job()
             else:
@@ -3538,6 +3684,69 @@ def _run_low_suction_daily_backtest_rerun_batch_job() -> dict[str, Any]:
             f"{int(coverage.get('labeled') or 0)} 个带标签候选，"
             f"十槽组合复利 {combined.get('compound_pct')}% / 胜率 {combined.get('win_rate_pct')}%"
         ),
+    }
+
+
+def _run_qianlong_backtest_rerun_batch_job() -> dict[str, Any]:
+    """每晚 22:35 全量重算潜龙首板回测并写库,供前端回测/交割单读取。"""
+
+    from alphaagent.server.services.qianlong.service import (
+        BacktestAlreadyRunningError,
+        run_backtest_sync,
+    )
+
+    if _latest_complete_daily_date_for_research() is None:
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    try:
+        payload = run_backtest_sync()
+    except BacktestAlreadyRunningError:
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": "潜龙首板回测已有任务在执行,跳过本次重复触发",
+        }
+    summary = payload.get("summary") or {}
+    return {
+        "rows_read": int(summary.get("n") or 0),
+        "rows_written": 1,
+        "message": (
+            f"潜龙首板回测已刷新:{summary.get('n')} 笔,"
+            f"均 {summary.get('avg_pct')}% / 胜率 {summary.get('win')}"
+        ),
+    }
+
+
+def _run_w2s_backtest_rerun_batch_job() -> dict[str, Any]:
+    """每晚 22:50 全量重算趋势弱转强回测并写库,供前端回测/交割单读取。"""
+
+    from alphaagent.server.services.weak_to_strong.service import (
+        BacktestAlreadyRunningError,
+        run_backtest_sync,
+    )
+
+    if _latest_complete_daily_date_for_research() is None:
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    try:
+        payload = run_backtest_sync()
+    except BacktestAlreadyRunningError:
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": "趋势弱转强回测已有任务在执行,跳过本次重复触发",
+        }
+    summary = payload.get("summary") or {}
+    parts = []
+    total = 0
+    for gk in ("a1", "a2", "b"):
+        s = summary.get(f"{gk}_product") or {}
+        parts.append(f"{gk.upper()} n={s.get('n')} 均 {s.get('avg_pct')}%")
+        total += int(s.get("n") or 0)
+    return {
+        "rows_read": total,
+        "rows_written": 1,
+        "message": "趋势弱转强回测已刷新:" + ";".join(parts),
     }
 
 
