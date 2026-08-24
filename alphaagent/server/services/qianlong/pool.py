@@ -140,7 +140,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
     last["dist_ma20"] = last["close_price"] / last["ma20"] - 1
     c = contracts
     cond_a = ((last["lu_cnt60"] <= c.CHASSIS_A_LU60_MAX)
-              & (last["trend_days"] <= c.CHASSIS_A_TREND_DAYS_MAX))
+              & (last["trend_days"] <= c.CHASSIS_A_TREND_DAYS_MAX)
+              & (last["change_pct"] > c.CHASSIS_A_D1_CHG_MIN)
+              & (last["change_pct"] < c.CHASSIS_A_D1_CHG_MAX))
     cond_b = ((last["yang10"] >= c.CHASSIS_B_YANG10_MIN)
               & (last["ret10"] < c.CHASSIS_B_RET10_MAX)
               & (last["lu_cnt20"] <= c.CHASSIS_B_LU20_MAX))
@@ -154,6 +156,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
     stats["chassis_b"] = int(cond_b.sum())
     stats["fail_trend_over_10"] = int((last["trend_days"] > c.CHASSIS_A_TREND_DAYS_MAX).sum())
     stats["has_lu60"] = int((last["lu_cnt60"] > c.CHASSIS_A_LU60_MAX).sum())
+    # v6.1 D-1 涨幅带外(仅 A 类受约束):≥+7 过热带 / ≤-6 深跌带
+    stats["d1_over_heat"] = int((last["change_pct"] >= c.CHASSIS_A_D1_CHG_MAX).sum())
+    stats["d1_deep_drop"] = int((last["change_pct"] <= c.CHASSIS_A_D1_CHG_MIN).sum())
 
     entries = []
     for row in pool.itertuples():

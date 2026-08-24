@@ -31,8 +31,12 @@ TRAIN_END = pd.Timestamp("2025-07-01")
 REPLAY_START = "2023-01-01"
 
 
-def run_backtest() -> dict[str, object]:
-    """全量回放并返回物化 payload(不写库,由调用方持久化)。"""
+def build_events() -> pd.DataFrame:
+    """全量回放事件表(含全部特征列)。
+
+    run_backtest() 的物化报告与 量化因子研究/潜龙首板/scripts/ 下的分析脚本
+    共用同一口径来源——分析脚本不得复制本函数逻辑,避免口径漂移。
+    """
     engine = get_engine()
     stocks = pd.read_sql(
         select(schema.stocks.c.vt_symbol, schema.stocks.c.symbol,
@@ -88,8 +92,8 @@ def run_backtest() -> dict[str, object]:
         bars[f"open_p{k}"] = g["open_price"].shift(-k)
         bars[f"close_p{k}"] = g["close_price"].shift(-k)
         bars[f"date_p{k}"] = g["trade_date"].shift(-k)
-    for col in ["close_price", "low_price", "turnover_rate", "change_pct", "ma20",
-                "trend_days", "yang10", "ret10"]:
+    for col in ["close_price", "low_price", "high_price", "open_price", "turnover_rate",
+                "change_pct", "ma20", "trend_days", "yang10", "ret10"]:
         bars[col + "_tm1"] = g[col].shift(1)
     idx = pd.MultiIndex.from_frame(bars[["vt_symbol", "trade_date"]])
     bars["lu_T"] = idx.map(lu_key["is_limit_up"]).fillna(False).astype(bool).values
@@ -124,10 +128,12 @@ def run_backtest() -> dict[str, object]:
     limit_px = (bars["close_price_tm1"] * 1.1 + 1e-9).round(2)
     bars["oneword_strict"] = bars["low_price"] >= limit_px * 0.999
 
-    # v6 底盘池: A 全新急建仓(近60日无涨停 且 多头排列≤10天)
+    # v6 底盘池: A 全新急建仓(近60日无涨停 且 多头排列≤10天 且 D-1涨幅-6%~+7%)
     #            B 小阳建仓(近10日≥7阳 且 10日涨幅<15% 且 近20日无涨停)
     cond_a = ((bars["lu_cnt60"] <= c.CHASSIS_A_LU60_MAX)
-              & (bars["trend_days_tm1"] <= c.CHASSIS_A_TREND_DAYS_MAX))
+              & (bars["trend_days_tm1"] <= c.CHASSIS_A_TREND_DAYS_MAX)
+              & (bars["change_pct_tm1"] > c.CHASSIS_A_D1_CHG_MIN)
+              & (bars["change_pct_tm1"] < c.CHASSIS_A_D1_CHG_MAX))
     cond_b = ((bars["yang10_tm1"] >= c.CHASSIS_B_YANG10_MIN)
               & (bars["ret10_tm1"] < c.CHASSIS_B_RET10_MAX)
               & (bars["lu_cnt20"] <= c.CHASSIS_B_LU20_MAX))
@@ -136,6 +142,15 @@ def run_backtest() -> dict[str, object]:
     bars.loc[cond_a & ~cond_b, "chassis_tag"] = "A"
     bars.loc[~cond_a & cond_b, "chassis_tag"] = "B"
     bars["vol_ratio"] = bars["volume"] / bars["vol_ma5_prev"]
+    # 分析专用特征(只供研究脚本,不参与任何池/触发过滤):
+    # T-1 量比、T-1 振幅、T-1 收盘在 60 日区间位置、近 5 日涨幅(T-1 截断)
+    ga = bars.groupby("vt_symbol", sort=False)
+    bars["vol_ratio_tm1"] = ga["vol_ratio"].shift(1)
+    bars["amp_tm1"] = bars["high_price_tm1"] / bars["low_price_tm1"] - 1
+    hi60 = ga["close_price"].transform(lambda s: s.rolling(60, min_periods=20).max().shift(1))
+    lo60 = ga["close_price"].transform(lambda s: s.rolling(60, min_periods=20).min().shift(1))
+    bars["pos60_tm1"] = (bars["close_price_tm1"] - lo60) / (hi60 - lo60)
+    bars["ret5_tm1"] = ga["close_price"].transform(lambda s: (s / s.shift(5) - 1).shift(1))
     pool = ((~bars["lu_tm1"]) & (cond_a | cond_b)
             & (bars["vol_ratio"] < c.BACKTEST_VOL_RATIO_MAX))
     ev = bars[(bars.trade_date >= REPLAY_START) & bars["triggered"] & pool
@@ -164,6 +179,13 @@ def run_backtest() -> dict[str, object]:
     ev["name"] = ev.vt_symbol.map(name_map)
     ev["priority"] = ev["chassis_tag"].isin(["B", "AB"])  # 小阳建仓(B类)优先
     ev = ev.dropna(subset=["ret"])
+    return ev
+
+
+def run_backtest() -> dict[str, object]:
+    """全量回放并返回物化 payload(不写库,由调用方持久化)。"""
+    c = contracts
+    ev = build_events()
 
     payload = {
         "rules_version": c.QIANLONG_RULES_VERSION,
