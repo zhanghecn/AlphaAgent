@@ -177,7 +177,9 @@ def run_backtest() -> dict[str, object]:
                     "首板全日量比<1.5为收盘定型口径(含前视上限,盘中实盘用触及量比<1.0);"
                     "高开≥8%不做;含0.5%滑点;剔除真一字与除权伪触发(|隔夜缺口|>11%)"),
         "summary": _stats(ev),
-        "chassis_b_subset": _stats(ev[ev["priority"]]),
+        "chassis_a_subset": _stats(ev[ev["chassis_tag"].isin(["A", "AB"])]),
+        "chassis_b_subset": _stats(ev[ev["chassis_tag"].isin(["B", "AB"])]),
+        "chassis_ab_subset": _stats(ev[ev["chassis_tag"] == "AB"]),
         "segments": {
             "train_202301_202506": _stats(ev[ev["is_train"]]),
             "valid_202507_now": _stats(ev[~ev["is_train"]]),
@@ -224,7 +226,12 @@ def _anchor_check(ev: pd.DataFrame) -> dict[str, object]:
 
 
 def _slot_simulation(ev: pd.DataFrame) -> dict[str, object]:
-    """三槽模拟仓:每日最多 3 笔,高开 2~6% 优先;退出日实现盈亏。"""
+    """三槽模拟仓:每日最多 3 笔,B 类(小阳建仓)优先;退出日实现盈亏。
+
+    固定本金口径(非复利):每槽始终投初始本金的 1/3,盈亏直接累加——
+    复利口径在数千笔稳定正期望下会得到 +3,532,804% 这种数学正确但
+    毫无实盘意义的数字(容量/流动性不考虑),展示层面必须非复利。
+    """
     usable = ev.dropna(subset=["exit_date"]).copy()
     picks = usable.sort_values(
         ["trade_date", "priority", "gap_open"],
@@ -233,6 +240,7 @@ def _slot_simulation(ev: pd.DataFrame) -> dict[str, object]:
     all_days = sorted(set(usable.trade_date.dt.date) | set(usable.exit_date.dt.date))
     day_index = {d: i for i, d in enumerate(all_days)}
     by_day = {d: g_ for d, g_ in picks.groupby(picks.trade_date.dt.date)}
+    SLOT_INVEST = 1.0 / 3.0
 
     def run(with_breaker: bool) -> dict[str, object]:
         equity = 1.0
@@ -260,7 +268,7 @@ def _slot_simulation(ev: pd.DataFrame) -> dict[str, object]:
                 exit_i = day_index.get(row.exit_date.date())
                 if exit_i is None:
                     continue
-                slots.append({"invest": equity / 3.0, "ret": float(row.ret),
+                slots.append({"invest": SLOT_INVEST, "ret": float(row.ret),
                               "exit_i": exit_i, "row": _trade_row(row)})
             if with_breaker and month_halted != month and month_start_equity > 0:
                 if (equity - month_start_equity) / month_start_equity * 100 \
@@ -296,6 +304,7 @@ def _trade_row(row) -> dict[str, object]:
     return {
         "vt_symbol": str(row.vt_symbol),
         "name": str(row.name),
+        "chassis_tag": str(getattr(row, "chassis_tag", "") or ""),
         "entry_date": row.trade_date.date().isoformat(),
         "entry_price": _sr(row.entry, 3),
         "gap_open_pct": _sr(float(row.gap_open) * 100 if row.gap_open is not None else None, 2),

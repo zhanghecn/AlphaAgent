@@ -163,8 +163,14 @@ function LedgerRow({ day, trade }: { day: string; trade: QianlongLedgerTrade }) 
       <td className="px-3 py-2.5">
         <span className="inline-flex items-center gap-1.5">
           <StockIdentityLink name={trade.name} vtSymbol={trade.vt_symbol} />
-          {trade.priority ? (
-            <span className="rounded bg-primary/15 px-1 py-0.5 text-[10px] text-primary">先做</span>
+          {trade.chassis_tag ? (
+            <span
+              className={trade.chassis_tag.includes("B")
+                ? "rounded bg-primary/15 px-1 py-0.5 text-[10px] text-primary"
+                : "rounded bg-muted/60 px-1 py-0.5 text-[10px] text-muted-foreground"}
+            >
+              {trade.chassis_tag}
+            </span>
           ) : null}
         </span>
       </td>

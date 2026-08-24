@@ -108,6 +108,7 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
         patch: dict[str, object] = {
             "name": entry.get("name"), "prev_close": prev_close, "trigger_price": trigger,
             "rules_version": contracts.QIANLONG_RULES_VERSION,
+            "chassis_tag": entry.get("chassis_tag"),
             "last_price": last_price,
             "change_pct": round((last_price / prev_close - 1) * 100, 3),
         }

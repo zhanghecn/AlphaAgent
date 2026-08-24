@@ -80,7 +80,9 @@ export interface QianlongBacktestReport {
   coverage: { from: string; to: string; months: number };
   caliber: string;
   summary: QianlongStats;
+  chassis_a_subset: QianlongStats;
   chassis_b_subset: QianlongStats;
+  chassis_ab_subset: QianlongStats;
   segments: Record<string, QianlongStats>;
   monthly: ({ month: string } & QianlongStats)[];
   anchors: Record<string, number>;
@@ -119,6 +121,7 @@ export interface QianlongBacktestPayload {
 export interface QianlongLedgerTrade {
   vt_symbol: string;
   name: string;
+  chassis_tag: string | null;
   entry_date: string;
   entry_price: number | null;
   gap_open_pct: number | null;
@@ -175,6 +178,7 @@ export interface QianlongRulesPayload {
   falsified_rules: string[];
   risk_notes: string[];
   ths_pool_conditions: string;
+  ths_pool_conditions_b: string;
   ths_pool_note: string;
   intraday_playbook: string[];
   anchors: Record<string, number>;

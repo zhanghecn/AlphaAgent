@@ -59,7 +59,8 @@ export function QianlongLiveView({
   const [query, setQuery] = useState("");
   const circuit = payload.circuit_breaker;
   const entries = payload.entries ?? [];
-  const thsConditions = rulesQuery.data?.ths_pool_conditions;
+  const thsConditionsA = rulesQuery.data?.ths_pool_conditions;
+  const thsConditionsB = rulesQuery.data?.ths_pool_conditions_b;
   const playbook = rulesQuery.data?.intraday_playbook ?? [];
   const q = query.trim().toLowerCase();
   const visibleEntries = entries.filter((entry) => {
@@ -110,7 +111,12 @@ export function QianlongLiveView({
                 <option key={d} value={d}>{d}</option>
               ))}
             </select>
-            {thsConditions ? <CopyThsConditionsButton conditions={thsConditions} /> : null}
+            {thsConditionsA ? (
+              <CopyThsConditionsButton conditions={thsConditionsA} label="复制A板块条件" />
+            ) : null}
+            {thsConditionsB ? (
+              <CopyThsConditionsButton conditions={thsConditionsB} label="复制B板块条件" />
+            ) : null}
           </span>
         </div>
 
@@ -212,11 +218,7 @@ function LiveRow({ entry, halted }: { entry: QianlongLiveEntry; halted: boolean 
       <td className="px-3 py-2.5">
         <span className="inline-flex items-center gap-1.5">
           <StockIdentityLink name={entry.name ?? entry.vt_symbol} vtSymbol={entry.vt_symbol} />
-          {entry.priority && !halted ? (
-            <span className="rounded bg-primary/15 px-1 py-0.5 text-[10px] font-medium text-primary">
-              先做
-            </span>
-          ) : null}
+          <ChassisBadge tag={entry.chassis_tag} priority={entry.priority && !halted} />
         </span>
       </td>
       <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatPrice(entry.prev_close)}</td>
@@ -245,6 +247,22 @@ function LiveRow({ entry, halted }: { entry: QianlongLiveEntry; halted: boolean 
         {entry.ret_pct == null ? "--" : formatPct(entry.ret_pct)}
       </td>
     </tr>
+  );
+}
+
+function ChassisBadge({ tag, priority }: { tag: string | null | undefined; priority: boolean }) {
+  if (!tag) return null;
+  const isB = tag.includes("B");
+  return (
+    <span
+      className={cn(
+        "rounded px-1 py-0.5 text-[10px] font-medium",
+        isB ? "bg-primary/15 text-primary" : "bg-muted/60 text-muted-foreground",
+      )}
+      title={isB ? "B类 · 小阳建仓(优先)" : "A类 · 全新急建仓"}
+    >
+      {tag}{isB && priority ? "·优先" : ""}
+    </span>
   );
 }
 

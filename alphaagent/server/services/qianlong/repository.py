@@ -12,29 +12,35 @@ from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, session_scope
 
 # v6 新增列:create_all 不会给已存在的表补列(参照 API Perf 教训),幂等补列
-_POOL_V6_COLUMNS = {
-    "vol_ma5": "DOUBLE PRECISION",
-    "chassis_tag": "VARCHAR(4)",
-    "trend_days": "DOUBLE PRECISION",
-    "yang10": "DOUBLE PRECISION",
-    "ret10": "DOUBLE PRECISION",
-    "lu_cnt20": "DOUBLE PRECISION",
-    "lu_cnt60": "DOUBLE PRECISION",
+_TABLE_V6_COLUMNS = {
+    "qianlong_pool_entries": {
+        "vol_ma5": "DOUBLE PRECISION",
+        "chassis_tag": "VARCHAR(4)",
+        "trend_days": "DOUBLE PRECISION",
+        "yang10": "DOUBLE PRECISION",
+        "ret10": "DOUBLE PRECISION",
+        "lu_cnt20": "DOUBLE PRECISION",
+        "lu_cnt60": "DOUBLE PRECISION",
+    },
+    "qianlong_signals": {
+        "chassis_tag": "VARCHAR(4)",
+    },
 }
-_pool_columns_ensured = False
+_columns_ensured = False
 
 
-def _ensure_pool_columns() -> None:
-    global _pool_columns_ensured
-    if _pool_columns_ensured:
+def _ensure_v6_columns() -> None:
+    global _columns_ensured
+    if _columns_ensured:
         return
     engine = get_engine()
     if engine.dialect.name == "postgresql":
         with engine.begin() as connection:
-            for name, ddl in _POOL_V6_COLUMNS.items():
-                connection.execute(text(
-                    f"ALTER TABLE qianlong_pool_entries ADD COLUMN IF NOT EXISTS {name} {ddl}"))
-    _pool_columns_ensured = True
+            for table, cols in _TABLE_V6_COLUMNS.items():
+                for name, ddl in cols.items():
+                    connection.execute(text(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"))
+    _columns_ensured = True
 
 
 # ── 盘前池 ──
@@ -42,7 +48,7 @@ def _ensure_pool_columns() -> None:
 def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_version: str) -> int:
     """整覆写某执行日的池(先删后插,幂等)。"""
     schema.ensure_schema_once(get_engine())
-    _ensure_pool_columns()
+    _ensure_v6_columns()
     now = datetime.now(timezone.utc)
     with session_scope() as session:
         session.execute(
@@ -80,6 +86,7 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_versio
 
 def load_pool(trade_date: date) -> list[dict[str, object]]:
     schema.ensure_schema_once(get_engine())
+    _ensure_v6_columns()
     with session_scope() as session:
         rows = session.execute(
             select(schema.qianlong_pool_entries)
@@ -120,6 +127,7 @@ def func_max(column):  # 小工具:避免顶部再引 func
 def upsert_signal(trade_date: date, vt_symbol: str, **fields: object) -> None:
     """按主键 upsert 一行信号(只写传入字段)。"""
     schema.ensure_schema_once(get_engine())
+    _ensure_v6_columns()
     now = datetime.now(timezone.utc)
     base = {"trade_date": trade_date, "vt_symbol": vt_symbol,
             "name": str(fields.pop("name", "") or ""),
@@ -139,6 +147,7 @@ def upsert_signal(trade_date: date, vt_symbol: str, **fields: object) -> None:
 
 def load_signals(trade_date: date) -> list[dict[str, object]]:
     schema.ensure_schema_once(get_engine())
+    _ensure_v6_columns()
     with session_scope() as session:
         rows = session.execute(
             select(schema.qianlong_signals)

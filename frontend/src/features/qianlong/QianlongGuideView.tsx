@@ -32,17 +32,29 @@ export function QianlongGuideView() {
           <span className="text-xs text-muted-foreground">
             全部条件经消融实验 + 双段验证 + Welch t 检验;每条都是做或不做的死规则
           </span>
-          <span className="ml-auto">
-            <CopyThsConditionsButton conditions={rules.ths_pool_conditions} />
+          <span className="ml-auto flex items-center gap-2">
+            <CopyThsConditionsButton conditions={rules.ths_pool_conditions} label="复制A板块(全新急建仓)" />
+            <CopyThsConditionsButton conditions={rules.ths_pool_conditions_b} label="复制B板块(小阳建仓)" />
           </span>
         </div>
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">同花顺动态板块条件(盘前池)</div>
-        <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-3 font-mono text-xs leading-6">
-          {rules.ths_pool_conditions}
-        </pre>
+        <div className="mb-2 text-sm font-semibold">同花顺动态板块条件(盘前池 = A板块 ∪ B板块,分别建)</div>
+        <div className="space-y-2">
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">板块 A · 全新急建仓(近60日无涨停 + 趋势年龄小)</div>
+            <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-3 font-mono text-xs leading-6">
+              {rules.ths_pool_conditions}
+            </pre>
+          </div>
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">板块 B · 小阳建仓(10日7阳慢建仓)</div>
+            <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-3 font-mono text-xs leading-6">
+              {rules.ths_pool_conditions_b}
+            </pre>
+          </div>
+        </div>
         <p className="mt-2 text-xs text-muted-foreground">{rules.ths_pool_note}</p>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
           {rules.intraday_playbook.map((line) => <li key={line}>{line}</li>)}

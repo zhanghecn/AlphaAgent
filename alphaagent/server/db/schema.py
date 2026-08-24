@@ -1802,8 +1802,9 @@ qianlong_signals = Table(
     Column("name", String(80), nullable=False),
     # watching/touched/confirmed_entered/unconfirmed/skipped_gap/no_trigger
     Column("status", String(24), nullable=False, server_default="watching"),
+    Column("chassis_tag", String(4), nullable=True),   # A=全新急建仓 B=小阳建仓 AB=双满足(v6)
     Column("gap_open", Float, nullable=True),      # 高开幅度(小数)
-    Column("priority", Boolean, nullable=False, server_default="false"),  # 高开 2~6% 先做
+    Column("priority", Boolean, nullable=False, server_default="false"),  # B 类(小阳建仓)优先
     Column("prev_close", Float, nullable=False),
     Column("trigger_price", Float, nullable=False),
     Column("touched_at", DateTime(timezone=True), nullable=True),

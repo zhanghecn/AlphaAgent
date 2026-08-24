@@ -61,7 +61,8 @@ export function QianlongBacktestView({
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <StatCard title="全样本信号" stats={report.summary} />
-        <StatCard title="小阳建仓(B类)" stats={report.chassis_b_subset} />
+        <StatCard title="A类 · 全新急建仓" stats={report.chassis_a_subset} />
+        <StatCard title="B类 · 小阳建仓" stats={report.chassis_b_subset} />
         <SimCard title="三槽模拟仓" sim={sim.plain} />
         <SimCard title="叠加月度熔断(-5% 停手)" sim={sim.with_circuit_breaker} />
       </section>
@@ -95,7 +96,7 @@ export function QianlongBacktestView({
             </thead>
             <tbody>
               <SegmentRow label="训练段 2023-01 ~ 2025-06" stats={report.segments.train_202301_202506} />
-              <SegmentRow label="验证段 2025-07 起(衰减提示:约为训练段 1/4)" stats={report.segments.valid_202507_now} />
+              <SegmentRow label="验证段 2025-07 起(v6: 14/14 个月全正)" stats={report.segments.valid_202507_now} />
               <SegmentRow label="剔除 2024-09 疯牛月" stats={report.segments.ex_202409} />
             </tbody>
           </table>

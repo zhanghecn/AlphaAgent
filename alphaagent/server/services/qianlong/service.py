@@ -121,7 +121,7 @@ def _live_row(entry: dict[str, object] | None,
             "ret_pct": sig.get("ret_pct"),
         })
     row.setdefault("status", "watching")
-    row.setdefault("priority", False)
+    row.setdefault("priority", "B" in str(row.get("chassis_tag") or ""))
     return row
 
 
@@ -312,7 +312,8 @@ def get_rules() -> dict[str, object]:
         "rules": contracts.RULES,
         "falsified_rules": contracts.FALSIFIED_RULES,
         "risk_notes": contracts.RISK_NOTES,
-        "ths_pool_conditions": contracts.THS_POOL_CONDITIONS,
+        "ths_pool_conditions": contracts.THS_POOL_CONDITIONS_A,
+        "ths_pool_conditions_b": contracts.THS_POOL_CONDITIONS_B,
         "ths_pool_note": contracts.THS_POOL_NOTE,
         "intraday_playbook": contracts.INTRADAY_PLAYBOOK,
         "anchors": contracts.BACKTEST_ANCHORS,
