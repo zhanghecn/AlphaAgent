@@ -5,11 +5,17 @@ import { fetchFirstBoardLive, type FirstBoardLeader } from "@/api/firstBoard";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
+import { ChassisBadge } from "@/features/qianlong/ChassisBadge";
 import { cn, formatAmount, formatPct, formatPrice } from "@/lib/utils";
 
 const FIRST_BOARD_REFRESH_INTERVAL_MS = 30_000;
 
-export function FirstBoardLeaderPage() {
+export function FirstBoardLeaderPage({
+  poolMarks,
+}: {
+  /** 池内标记:vt_symbol → chassis_tag(A/B/AB)。传入后池内票标蓝并排在最前。 */
+  poolMarks?: ReadonlyMap<string, string>;
+}) {
   const query = useQuery({
     queryKey: ["firstBoardLive"],
     queryFn: fetchFirstBoardLive,
@@ -26,6 +32,13 @@ export function FirstBoardLeaderPage() {
 
   const unavailable = payload.status !== "ok";
   const leaders = payload.leaders ?? [];
+  const sorted = poolMarks
+    ? [...leaders].sort((a, b) =>
+        Number(poolMarks.has(b.vt_symbol)) - Number(poolMarks.has(a.vt_symbol)))
+    : leaders;
+  const inPoolCount = poolMarks
+    ? leaders.filter((l) => poolMarks.has(l.vt_symbol)).length
+    : 0;
   return (
     <section aria-label="潜龙首板实时榜" className="rounded-lg border">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-4 py-3 text-xs text-muted-foreground">
@@ -34,6 +47,9 @@ export function FirstBoardLeaderPage() {
         <span>{sessionLabel(payload.session_stage)}</span>
         <span>涨停池 {payload.data_quality.pool_total} 只</span>
         <span>主板非 ST 首板 {payload.data_quality.first_board_total} 只</span>
+        {poolMarks ? (
+          <span className="font-medium text-primary">池内命中 {inPoolCount} 只</span>
+        ) : null}
         <span className="ml-auto flex items-center gap-1 tabular-nums">
           <RefreshCw size={13} />
           {formatCapturedAt(payload.captured_at)}
@@ -43,7 +59,7 @@ export function FirstBoardLeaderPage() {
         <div className="p-4">
           <EmptyState message={payload.data_quality.message ?? "涨停池暂时不可用"} />
         </div>
-      ) : leaders.length === 0 ? (
+      ) : sorted.length === 0 ? (
         <div className="px-4 py-10 text-center text-sm text-muted-foreground">
           当前没有符合条件的主板非 ST 首板
         </div>
@@ -65,7 +81,10 @@ export function FirstBoardLeaderPage() {
               </tr>
             </thead>
             <tbody>
-              {leaders.map((leader) => <LeaderRow key={leader.vt_symbol} leader={leader} />)}
+              {sorted.map((leader) => (
+                <LeaderRow key={leader.vt_symbol} leader={leader}
+                  poolTag={poolMarks?.get(leader.vt_symbol)} />
+              ))}
             </tbody>
           </table>
         </div>
@@ -74,11 +93,16 @@ export function FirstBoardLeaderPage() {
   );
 }
 
-function LeaderRow({ leader }: { leader: FirstBoardLeader }) {
+function LeaderRow({ leader, poolTag }: { leader: FirstBoardLeader; poolTag?: string }) {
   return (
-    <tr className="border-b last:border-b-0 hover:bg-muted/30">
+    <tr className={cn("border-b last:border-b-0 hover:bg-muted/30", poolTag && "bg-primary/5")}>
       <td className="px-4 py-2.5 font-mono tabular-nums text-muted-foreground">{leader.rank}</td>
-      <td className="px-4 py-2.5"><StockIdentityLink name={leader.name} vtSymbol={leader.vt_symbol} /></td>
+      <td className="px-4 py-2.5">
+        <span className="inline-flex items-center gap-1.5">
+          <StockIdentityLink name={leader.name} vtSymbol={leader.vt_symbol} />
+          <ChassisBadge tag={poolTag} />
+        </span>
+      </td>
       <td className="px-4 py-2.5 text-right font-mono tabular-nums">{formatPrice(leader.last_price)}</td>
       <td className={cn("px-4 py-2.5 text-right font-mono tabular-nums", leader.change_pct != null && leader.change_pct >= 0 ? "text-rise" : "text-fall")}>
         {formatPct(leader.change_pct)}

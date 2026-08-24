@@ -10,6 +10,7 @@ import {
 import { EmptyState } from "@/components/EmptyState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
+import { ChassisBadge } from "@/features/qianlong/ChassisBadge";
 import { FirstBoardLeaderPage } from "@/pages/FirstBoardLeaderPage";
 import { cn, formatPct, formatPrice } from "@/lib/utils";
 
@@ -92,6 +93,13 @@ export function QianlongLiveView({
   }, [entries]);
   const groupCount = (key: GroupKey) =>
     key === "A" ? groupCounts.a : key === "B" ? groupCounts.b : key === "AB" ? groupCounts.ab : null;
+  const poolMarks = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const e of entries) {
+      if (e.chassis_tag) map.set(e.vt_symbol, e.chassis_tag);
+    }
+    return map;
+  }, [entries]);
   const visibleEntries = entries.filter((entry) => {
     if (q) {
       return (
@@ -240,9 +248,9 @@ export function QianlongLiveView({
       <section aria-label="已封板首板复盘对照">
         <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
           <span className="font-semibold text-foreground">已封板首板(复盘对照)</span>
-          <span>东财涨停池口径 · 用于对照池外封板与池内漏网</span>
+          <span>东财涨停池口径 · 池内票标蓝置顶,用于对照池外封板与池内漏网</span>
         </div>
-        <FirstBoardLeaderPage />
+        <FirstBoardLeaderPage poolMarks={poolMarks} />
       </section>
     </div>
   );
@@ -285,22 +293,6 @@ function LiveRow({ entry, halted }: { entry: QianlongLiveEntry; halted: boolean 
         {entry.ret_pct == null ? "--" : formatPct(entry.ret_pct)}
       </td>
     </tr>
-  );
-}
-
-function ChassisBadge({ tag, priority }: { tag: string | null | undefined; priority: boolean }) {
-  if (!tag) return null;
-  const isB = tag.includes("B");
-  return (
-    <span
-      className={cn(
-        "rounded px-1 py-0.5 text-[10px] font-medium",
-        isB ? "bg-primary/15 text-primary" : "bg-muted/60 text-muted-foreground",
-      )}
-      title={isB ? "B类 · 小阳建仓(优先)" : "A类 · 全新急建仓"}
-    >
-      {tag}{isB && priority ? "·优先" : ""}
-    </span>
   );
 }
 
