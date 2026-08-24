@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertOctagon, ChevronDown, RefreshCw } from "lucide-react";
 
@@ -38,6 +38,23 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   break_open: "断板日卖",
 };
 
+// v6 池 = A板块 ∪ B板块(买卖规则对两组完全相同,标签只决定同日抢槽优先级与分组统计)
+type GroupKey = "auto" | "A" | "B" | "AB" | "all";
+const GROUP_OPTIONS: { key: GroupKey; label: string }[] = [
+  { key: "auto", label: "可操作" },
+  { key: "A", label: "A板块" },
+  { key: "B", label: "B板块" },
+  { key: "AB", label: "AB双满足" },
+  { key: "all", label: "全池" },
+];
+const GROUP_DESC: Record<GroupKey, string> = {
+  auto: "默认:B 类优先 + 活跃信号",
+  A: "A板块 = 全新急建仓(含 AB)",
+  B: "B板块 = 小阳建仓(含 AB)",
+  AB: "AB = 两类同时满足,历史最优子集",
+  all: "全池(A∪B 并集)",
+};
+
 export function QianlongLiveView({
   payload,
   availableDates,
@@ -55,7 +72,7 @@ export function QianlongLiveView({
     staleTime: 300_000,
   });
   const [playbookOpen, setPlaybookOpen] = useState(false);
-  const [showAll, setShowAll] = useState(false);
+  const [group, setGroup] = useState<GroupKey>("auto");
   const [query, setQuery] = useState("");
   const circuit = payload.circuit_breaker;
   const entries = payload.entries ?? [];
@@ -63,6 +80,18 @@ export function QianlongLiveView({
   const thsConditionsB = rulesQuery.data?.ths_pool_conditions_b;
   const playbook = rulesQuery.data?.intraday_playbook ?? [];
   const q = query.trim().toLowerCase();
+  const groupCounts = useMemo(() => {
+    let a = 0, b = 0, ab = 0;
+    for (const e of entries) {
+      const tag = e.chassis_tag ?? "";
+      if (tag.includes("A")) a += 1;
+      if (tag.includes("B")) b += 1;
+      if (tag === "AB") ab += 1;
+    }
+    return { a, b, ab };
+  }, [entries]);
+  const groupCount = (key: GroupKey) =>
+    key === "A" ? groupCounts.a : key === "B" ? groupCounts.b : key === "AB" ? groupCounts.ab : null;
   const visibleEntries = entries.filter((entry) => {
     if (q) {
       return (
@@ -70,8 +99,12 @@ export function QianlongLiveView({
         (entry.name ?? "").toLowerCase().includes(q)
       );
     }
-    if (showAll) return true;
-    // v6 池是宽观察池(千余只):默认只显示可操作行(活跃状态 + B类优先)
+    const tag = entry.chassis_tag ?? "";
+    if (group === "all") return true;
+    if (group === "A") return tag.includes("A");
+    if (group === "B") return tag.includes("B");
+    if (group === "AB") return tag === "AB";
+    // auto:宽观察池默认只显示可操作行(活跃状态 + B类优先)
     return entry.priority || (entry.status !== "watching" && entry.status !== "no_trigger");
   });
 
@@ -152,9 +185,24 @@ export function QianlongLiveView({
         ) : (
           <div className="overflow-x-auto">
             <div className="flex flex-wrap items-center gap-3 border-b px-4 py-2 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1" aria-label="按底盘分组查看">
+                {GROUP_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    className={cn(
+                      "h-7 rounded-md border px-2",
+                      group === opt.key && "border-primary text-primary",
+                    )}
+                    onClick={() => setGroup(opt.key)}
+                  >
+                    {opt.label}
+                    {groupCount(opt.key) != null ? ` ${groupCount(opt.key)}` : ""}
+                  </button>
+                ))}
+              </span>
               <span>
-                显示 {visibleEntries.length} / 全池 {entries.length}(默认:B 类优先 +
-              活跃信号;v6 为宽观察池)
+                显示 {visibleEntries.length} / 全池 {entries.length}({GROUP_DESC[group]})
               </span>
               <input
                 className="h-7 w-44 rounded-md border bg-background px-2 text-xs"
@@ -163,16 +211,6 @@ export function QianlongLiveView({
                 onChange={(e) => setQuery(e.target.value)}
                 aria-label="搜索池内股票"
               />
-              <button
-                type="button"
-                className={cn(
-                  "h-7 rounded-md border px-2 text-xs",
-                  showAll && "border-primary text-primary",
-                )}
-                onClick={() => setShowAll((v) => !v)}
-              >
-                {showAll ? "收起为可操作" : "展开全池"}
-              </button>
             </div>
             <table className="w-full min-w-[1080px] text-sm">
               <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
