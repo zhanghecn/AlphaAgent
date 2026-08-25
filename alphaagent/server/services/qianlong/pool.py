@@ -1,7 +1,8 @@
 """潜龙首板盘前池计算(v6 纯底盘版):底盘形态条件,全部来自 T-1 收盘数据(无未来函数)。
 
-口径与 量化因子研究/潜龙首板/潜龙首板条件定稿.md v6 一致:
+口径与 量化因子研究/潜龙首板/潜龙首板条件定稿.md v6.2 一致:
   A 类 全新急建仓:近 60 日涨停次数 = 0 且 多头排列(收>MA5>MA10>MA20)持续 ≤ 10 天
+                  且 昨日涨幅 > -6% 且 近 5 日(T-5..T-1)单日涨幅均 < +7%
   B 类 小阳建仓:  近 10 日阳线 ≥ 7 根 且 近 10 日涨幅 < 15% 且 近 20 日涨停次数 = 0
   (A|B) 满足其一即入选;出货死规则(多头>12天/回锅贴脸)天然不满足 A|B。
 量比条件(首板当天不爆量)是盘中属性,不进盘前池——由 live_scan 在确认时执行。
@@ -112,9 +113,11 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
     bars["yang"] = bars["close_price"] > bars["open_price"]
     bars["yang10"] = g["yang"].transform(lambda s: s.rolling(10, min_periods=5).sum())
     # change_pct 列存在约 20 个交易日的历史缺口(覆盖率<50%);
-    # 用收盘对收盘推导值回填(仅作展示字段, v6 池条件不依赖它)
+    # 用收盘对收盘推导值回填(v6.2 起池条件依赖它:近5日最大单日涨幅)
     derived_chg = g["close_price"].transform(lambda s: (s / s.shift(1) - 1) * 100)
     bars["change_pct"] = bars["change_pct"].fillna(derived_chg)
+    # 近5日(T-5..T-1)最大单日涨幅%:last 行即 T-1 结尾窗口,与 backtest.maxchg5_tm1 同窗口
+    bars["maxchg5"] = g["change_pct"].transform(lambda s: s.rolling(5).max())
     # 连续多头排列天数(窗口截断不影响 ≤10 判定:超长趋势在窗口内读数必然 >10)
     bull = ((bars["close_price"] > bars["ma5"]) & (bars["ma5"] > bars["ma10"])
             & (bars["ma10"] > bars["ma20"])).fillna(False)
@@ -142,7 +145,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
     cond_a = ((last["lu_cnt60"] <= c.CHASSIS_A_LU60_MAX)
               & (last["trend_days"] <= c.CHASSIS_A_TREND_DAYS_MAX)
               & (last["change_pct"] > c.CHASSIS_A_D1_CHG_MIN)
-              & (last["change_pct"] < c.CHASSIS_A_D1_CHG_MAX))
+              & (last["maxchg5"] < c.CHASSIS_A_MAXCHG5_MAX))
     cond_b = ((last["yang10"] >= c.CHASSIS_B_YANG10_MIN)
               & (last["ret10"] < c.CHASSIS_B_RET10_MAX)
               & (last["lu_cnt20"] <= c.CHASSIS_B_LU20_MAX))
@@ -156,8 +159,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
     stats["chassis_b"] = int(cond_b.sum())
     stats["fail_trend_over_10"] = int((last["trend_days"] > c.CHASSIS_A_TREND_DAYS_MAX).sum())
     stats["has_lu60"] = int((last["lu_cnt60"] > c.CHASSIS_A_LU60_MAX).sum())
-    # v6.1 D-1 涨幅带外(仅 A 类受约束):≥+7 过热带 / ≤-6 深跌带
-    stats["d1_over_heat"] = int((last["change_pct"] >= c.CHASSIS_A_D1_CHG_MAX).sum())
+    # v6.2 A 类涨幅约束带外(仅 A 类受约束):近5日最大≥+7 过热接力带 / 昨日≤-6 深跌带
+    stats["overheat5"] = int((last["maxchg5"] >= c.CHASSIS_A_MAXCHG5_MAX).sum())
     stats["d1_deep_drop"] = int((last["change_pct"] <= c.CHASSIS_A_D1_CHG_MIN).sum())
 
     entries = []

@@ -128,12 +128,16 @@ def build_events() -> pd.DataFrame:
     limit_px = (bars["close_price_tm1"] * 1.1 + 1e-9).round(2)
     bars["oneword_strict"] = bars["low_price"] >= limit_px * 0.999
 
-    # v6 底盘池: A 全新急建仓(近60日无涨停 且 多头排列≤10天 且 D-1涨幅-6%~+7%)
+    # 近5日(T-5..T-1)最大单日涨幅%(v6.2 A 类池条件;窗口不满为 NaN→剔除)
+    bars["maxchg5_tm1"] = g["change_pct"].transform(
+        lambda s: s.rolling(5).max().shift(1))
+    # v6 底盘池: A 全新急建仓(近60日无涨停 且 多头排列≤10天 且 昨日涨幅>-6% 且
+    #            近5日单日涨幅均<+7%——v6.2 把 v6.1 单日上界扩成 5 日窗口,蕴含昨日<+7)
     #            B 小阳建仓(近10日≥7阳 且 10日涨幅<15% 且 近20日无涨停)
     cond_a = ((bars["lu_cnt60"] <= c.CHASSIS_A_LU60_MAX)
               & (bars["trend_days_tm1"] <= c.CHASSIS_A_TREND_DAYS_MAX)
               & (bars["change_pct_tm1"] > c.CHASSIS_A_D1_CHG_MIN)
-              & (bars["change_pct_tm1"] < c.CHASSIS_A_D1_CHG_MAX))
+              & (bars["maxchg5_tm1"] < c.CHASSIS_A_MAXCHG5_MAX))
     cond_b = ((bars["yang10_tm1"] >= c.CHASSIS_B_YANG10_MIN)
               & (bars["ret10_tm1"] < c.CHASSIS_B_RET10_MAX)
               & (bars["lu_cnt20"] <= c.CHASSIS_B_LU20_MAX))
@@ -151,6 +155,14 @@ def build_events() -> pd.DataFrame:
     lo60 = ga["close_price"].transform(lambda s: s.rolling(60, min_periods=20).min().shift(1))
     bars["pos60_tm1"] = (bars["close_price_tm1"] - lo60) / (hi60 - lo60)
     bars["ret5_tm1"] = ga["close_price"].transform(lambda s: (s / s.shift(5) - 1).shift(1))
+    # 近5日 ≥7% 大阳次数、距最近一次 ≥7% 大阳的交易日数(1=T-1)
+    bars["bigcnt7_5tm1"] = (bars["change_pct"] >= 7).groupby(
+        bars["vt_symbol"], sort=False).transform(lambda s: s.rolling(5).sum().shift(1))
+    day_no = ga.cumcount() + 1
+    last_big_day = day_no.where(bars["change_pct"] >= 7).groupby(
+        bars["vt_symbol"], sort=False).ffill()
+    bars["lastbig7_off_tm1"] = (day_no - last_big_day).groupby(
+        bars["vt_symbol"], sort=False).shift(1)
     pool = ((~bars["lu_tm1"]) & (cond_a | cond_b)
             & (bars["vol_ratio"] < c.BACKTEST_VOL_RATIO_MAX))
     ev = bars[(bars.trade_date >= REPLAY_START) & bars["triggered"] & pool
