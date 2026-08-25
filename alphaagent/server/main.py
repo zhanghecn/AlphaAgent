@@ -1,5 +1,8 @@
 """FastAPI entrypoint for AlphaAgent."""
 
+import faulthandler
+import signal
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -11,6 +14,14 @@ from alphaagent.server.services.data_sync import ensure_sync_schema, start_data_
 from alphaagent.market.cache import configure_market_cache
 from alphaagent.market.warmup import start_market_cache_warmup
 from alphaagent.server.services.market_timing.panel import start_intraday_refresher
+
+# 运维钩子:段错误等致命信号 dump 全线程栈;docker kill -USR1 <pid> 主动 dump。
+faulthandler.enable(all_threads=True)
+if hasattr(signal, "SIGUSR1"):
+    try:
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except (ValueError, OSError):
+        pass
 
 
 def create_app() -> FastAPI:

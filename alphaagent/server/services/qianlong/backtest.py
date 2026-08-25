@@ -207,9 +207,7 @@ def run_backtest() -> dict[str, object]:
             "valid_202507_now": _stats(ev[~ev["is_train"]]),
             "ex_202409": _stats(ev[ev.month != "2024-09"]),
         },
-        "monthly": [
-            {"month": m, **_stats(g_)} for m, g_ in ev.groupby("month")
-        ],
+        "monthly": _monthly_rows(ev),
         "anchors": c.BACKTEST_ANCHORS,
         "anchor_check": _anchor_check(ev),
     }
@@ -220,9 +218,10 @@ def run_backtest() -> dict[str, object]:
 
 
 def _stats(df: pd.DataFrame) -> dict[str, object]:
+    # 小样本(n=1~4)同样返回均值:不藏"--"(含亏损月,如 2023-01 n=1)
     r = df["ret"].dropna()
-    if len(r) < 5:
-        return {"n": int(len(r))}
+    if len(r) == 0:
+        return {"n": 0}
     return {
         "n": int(len(r)),
         "avg_pct": round(float(r.mean()) * 100, 2),
@@ -231,6 +230,24 @@ def _stats(df: pd.DataFrame) -> dict[str, object]:
         "seal": round(float(df["sealed"].mean()), 3),
         "streak2": round(float((df["streak_k"] >= 2).mean()), 3),
     }
+
+
+def _monthly_rows(ev: pd.DataFrame) -> list[dict[str, object]]:
+    """月度明细:等权统计 + 月收益(精确式)。
+
+    月收益口径 = 每个有信号的交易日赚一次「当日全部信号等权均值」,按信号日加总
+    (全部信号都算买上、每日本金重置、非复利)。不能用「月均每笔×交易日数」近似:
+    信号在日间分布不均时偏差平均 17.8pct/最大 74.6pct(2023-01 会算出 -78% 虚构值)。
+    signal_days = 当月有信号的天数(无信号日贡献 0,不入计数)。
+    """
+    daily_mean = ev.groupby([ev["month"], ev["trade_date"].dt.date])["ret"].mean()
+    month_ret = (daily_mean.groupby(level=0).sum() * 100).round(2)
+    signal_days = daily_mean.groupby(level=0).size()
+    return [
+        {"month": m, **_stats(g_),
+         "ret_pct": float(month_ret[m]), "signal_days": int(signal_days[m])}
+        for m, g_ in ev.groupby("month")
+    ]
 
 
 def _anchor_check(ev: pd.DataFrame) -> dict[str, object]:

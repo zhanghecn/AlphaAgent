@@ -46,7 +46,9 @@ export function QianlongLedgerView({
     let count = 0;
     let wins = 0;
     let sum = 0;
+    let monthRet = 0;
     for (const day of ledgerDays) {
+      if (day.avg_ret_pct != null) monthRet += day.avg_ret_pct;
       for (const t of day.trades) {
         if (t.ret_pct == null) continue;
         count += 1;
@@ -58,7 +60,7 @@ export function QianlongLedgerView({
       count,
       winRate: count > 0 ? (wins / count) * 100 : null,
       avgPct: count > 0 ? sum / count : null,
-      totalPct: count > 0 ? sum : null,
+      monthRet,
     };
   }, [ledgerDays]);
 
@@ -87,9 +89,10 @@ export function QianlongLedgerView({
           <span className={cn("font-medium", tone(summary.avgPct))}>{fmtSigned(summary.avgPct)}</span>
         </span>
         <span>
-          <span className="text-muted-foreground">累计 </span>
-          <span className={cn("font-semibold", tone(summary.totalPct))}>{fmtSigned(summary.totalPct)}</span>
+          <span className="text-muted-foreground">月收益 </span>
+          <span className={cn("font-semibold", tone(summary.monthRet))}>{fmtSigned(summary.monthRet)}</span>
         </span>
+        <span className="text-muted-foreground">(月收益=每个信号日满仓当日全部信号赚一次当日均值,非复利)</span>
       </div>
 
       <div className="flex flex-wrap items-end gap-2 border-b px-4 py-2">
@@ -103,7 +106,7 @@ export function QianlongLedgerView({
           >
             {months.map((m) => (
               <option key={m.month} value={m.month}>
-                {m.month} · {m.count}笔 · 均{m.avg_ret_pct == null ? "--" : formatPct(m.avg_ret_pct)}
+                {m.month} · {m.count}笔 · 月收益{m.month_ret_pct == null ? "--" : formatPct(m.month_ret_pct)}
               </option>
             ))}
           </select>

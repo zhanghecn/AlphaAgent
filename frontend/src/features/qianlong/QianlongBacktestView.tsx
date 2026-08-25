@@ -105,13 +105,19 @@ export function QianlongBacktestView({
 
       <section className="rounded-lg border p-4">
         <div className="mb-2 text-sm font-semibold">月度明细</div>
+        <div className="mb-1 text-xs text-muted-foreground">
+          月收益 = 每个信号日满仓当日全部信号(等权)赚一次当日均值,按信号日加总(非复利);
+          一天多笔只算赚一次,信号爆炸月不再虚高。
+        </div>
         <div className="max-h-[420px] overflow-auto">
-          <table className="w-full min-w-[560px] text-sm">
+          <table className="w-full min-w-[720px] text-sm">
             <thead className="sticky top-0 border-b bg-background text-xs text-muted-foreground">
               <tr>
                 <th className="py-2 text-left font-medium">月份</th>
                 <th className="py-2 text-right font-medium">笔数</th>
                 <th className="py-2 text-right font-medium">平均每笔</th>
+                <th className="py-2 text-right font-medium">月收益</th>
+                <th className="py-2 text-right font-medium">信号日</th>
                 <th className="py-2 text-right font-medium">胜率</th>
                 <th className="py-2 text-right font-medium">连板率</th>
               </tr>
@@ -123,6 +129,12 @@ export function QianlongBacktestView({
                   <td className="py-1.5 text-right font-mono tabular-nums">{m.n}</td>
                   <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(m.avg_pct))}>
                     {m.avg_pct == null ? "--" : formatPct(m.avg_pct)}
+                  </td>
+                  <td className={cn("py-1.5 text-right font-mono tabular-nums font-semibold", tone(m.ret_pct))}>
+                    {m.ret_pct == null ? "--" : formatPct(m.ret_pct)}
+                  </td>
+                  <td className="py-1.5 text-right font-mono tabular-nums">
+                    {m.signal_days ?? "--"}
                   </td>
                   <td className="py-1.5 text-right font-mono tabular-nums">
                     {m.win == null ? "--" : formatPct(m.win * 100)}

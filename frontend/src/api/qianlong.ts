@@ -84,7 +84,7 @@ export interface QianlongBacktestReport {
   chassis_b_subset: QianlongStats;
   chassis_ab_subset: QianlongStats;
   segments: Record<string, QianlongStats>;
-  monthly: ({ month: string } & QianlongStats)[];
+  monthly: ({ month: string; ret_pct?: number; signal_days?: number } & QianlongStats)[];
   anchors: Record<string, number>;
   anchor_check: Record<string, number | string>;
   simulation: {
@@ -147,7 +147,9 @@ export interface QianlongLedgerMonth {
   count: number;
   win_rate: number | null;
   avg_ret_pct: number | null;
-  total_ret_pct: number;
+  /** 月收益(精确式):Σ当日全部信号等权均值,每天满仓当日全部信号、非复利 */
+  month_ret_pct: number;
+  signal_days: number;
 }
 
 export interface QianlongLedgerPayload {

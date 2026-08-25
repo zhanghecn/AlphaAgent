@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 import threading
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
@@ -186,24 +188,30 @@ def get_rebuild_status() -> dict[str, object]:
 
 
 def start_backtest_rebuild(source: str = "manual") -> dict[str, object]:
-    """409 去重:已有 queued/running 任务则拒绝。"""
-    global _rebuild_running
-    with _rebuild_lock:
-        if _rebuild_running:
-            return {"already_running": True}
-        _rebuild_running = True
+    """409 去重:已有 queued/running 任务则拒绝;执行走独立子进程。
+
+    去重以 DB 状态为准——uvicorn --workers 2 下进程内标志跨 worker 无效;
+    执行不在 worker 线程里跑(原装 worker 首次全量回放会无声崩溃,见
+    rebuild_worker 模块注释),子进程与 worker 生命周期解耦;
+    开头顺手 reap 僵尸(worker 崩溃后状态永远停在 running,详见 repository)。
+    """
+    repository.fail_stale_rebuild_runs()
+    if repository.has_active_rebuild_run():
+        return {"already_running": True}
     run_id = repository.create_rebuild_run(source, contracts.QIANLONG_RULES_VERSION)
-    thread = threading.Thread(
-        target=_background_rebuild, args=(run_id,), daemon=True,
-        name="qianlong-backtest-rebuild",
+    subprocess.Popen(
+        [sys.executable, "-m",
+         "alphaagent.server.services.qianlong.rebuild_worker", str(run_id)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
-    thread.start()
     return {"run_id": run_id, "status": "queued"}
 
 
 def run_backtest_sync(source: str = "scheduler") -> dict[str, object]:
     """调度链同步执行(内部也走重建轨道,供批次读取状态)。"""
     global _rebuild_running
+    repository.fail_stale_rebuild_runs()
     with _rebuild_lock:
         if _rebuild_running:
             raise BacktestAlreadyRunningError
@@ -211,15 +219,6 @@ def run_backtest_sync(source: str = "scheduler") -> dict[str, object]:
     run_id = repository.create_rebuild_run(source, contracts.QIANLONG_RULES_VERSION)
     try:
         return _execute_rebuild(run_id)
-    finally:
-        with _rebuild_lock:
-            _rebuild_running = False
-
-
-def _background_rebuild(run_id: int) -> None:
-    global _rebuild_running
-    try:
-        _execute_rebuild(run_id)
     finally:
         with _rebuild_lock:
             _rebuild_running = False
@@ -273,13 +272,23 @@ def get_ledger(month: str | None = None) -> dict[str, object]:
 
 
 def _month_summaries(days: list[dict[str, object]]) -> list[dict[str, object]]:
-    """按月汇总交割单(笔数/胜率/平均每笔/累计等权),最新在前。"""
+    """按月汇总交割单(笔数/胜率/平均每笔/月收益),最新在前。
+
+    月收益与回测页月度表同口径(精确式):Σ当日全部信号等权均值——每天满仓当日
+    全部信号、次日本金重置、非复利。旧「Σ每笔等权」把一天 N 笔当 N 次满仓,
+    信号爆炸月虚高最狠(2024-02 单月虚 +1,431% vs 真实 +8.7%),已废。
+    """
     acc: dict[str, dict[str, float]] = {}
     for day in days:
         key = str(day.get("trade_date") or "")[:7]
         if not key:
             continue
-        bucket = acc.setdefault(key, {"count": 0, "win": 0, "sum_ret": 0.0})
+        bucket = acc.setdefault(
+            key, {"count": 0, "win": 0, "sum_ret": 0.0, "day_sum": 0.0, "days": 0})
+        day_avg = day.get("avg_ret_pct")
+        if day_avg is not None:
+            bucket["day_sum"] += float(day_avg)
+            bucket["days"] += 1
         for t in day.get("trades") or []:
             ret = t.get("ret_pct")
             if ret is None:
@@ -292,7 +301,8 @@ def _month_summaries(days: list[dict[str, object]]) -> list[dict[str, object]]:
         {"month": m, "count": int(v["count"]),
          "win_rate": round(v["win"] / v["count"] * 100, 1) if v["count"] else None,
          "avg_ret_pct": round(v["sum_ret"] / v["count"], 2) if v["count"] else None,
-         "total_ret_pct": round(v["sum_ret"], 2)}
+         "month_ret_pct": round(v["day_sum"], 2),
+         "signal_days": int(v["days"])}
         for m, v in sorted(acc.items(), reverse=True)
     ]
 

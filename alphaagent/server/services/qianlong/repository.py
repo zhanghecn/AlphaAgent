@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import delete, desc, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -278,3 +278,37 @@ def latest_rebuild_run() -> dict[str, object] | None:
             .limit(1)
         ).mappings().one_or_none()
     return dict(row) if row else None
+
+
+def fail_stale_rebuild_runs(stale_minutes: int = 30) -> int:
+    """把超时仍停在 queued/running 的重建任务标 failed,返回清理条数。
+
+    uvicorn 多 worker 下手动 rebuild 的执行线程随 worker 进程崩溃而消失
+    (uvicorn 秒级补位新 worker,但线程不复活),状态会永远停在 running;
+    容器重启也会遗留僵尸。正常全量回放仅 1~5 分钟,30 分钟阈值安全。
+    """
+    schema.ensure_schema_once(get_engine())
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
+    with session_scope() as session:
+        result = session.execute(
+            update(schema.qianlong_backtest_rebuild_runs)
+            .where(schema.qianlong_backtest_rebuild_runs.c.status.in_(("queued", "running")),
+                   schema.qianlong_backtest_rebuild_runs.c.requested_at < cutoff)
+            .values(status="failed", stage="失败",
+                    error="执行进程中断(worker 崩溃或重启),请重新计算",
+                    finished_at=datetime.now(timezone.utc))
+        )
+    return int(result.rowcount or 0)
+
+
+def has_active_rebuild_run() -> bool:
+    """是否存在排队/执行中的重建任务(跨进程去重,以 DB 状态为准)。"""
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        run_id = session.execute(
+            select(schema.qianlong_backtest_rebuild_runs.c.id)
+            .where(schema.qianlong_backtest_rebuild_runs.c.status.in_(("queued", "running")))
+            .order_by(desc(schema.qianlong_backtest_rebuild_runs.c.id))
+            .limit(1)
+        ).scalar_one_or_none()
+    return run_id is not None
