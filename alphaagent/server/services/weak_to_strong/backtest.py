@@ -1,15 +1,17 @@
 """趋势弱转强回测引擎:日线口径全量回放 + 物化报告。
 
-口径 = 量化因子研究/低吸研究/scripts/w2s_replay.py(定稿 v2,一字不改):
+口径 = 量化因子研究/低吸研究/scripts/w2s_replay.py(定稿 v3.0):
 - 事件池: 主板非ST非退 / 前10日内出现过≥2连板 / 昨日未涨停 / 昨日换手3%~60%
 - 组划分: 最近一次≥2连板高度==2 → A 组;>=4 且距末日≥3交易日 → B 组;=3 弃
-- A1: 跌>3%+下影<2%+(量比0.7~1.2 或 振幅≥12%)+换手8~20%+底座<30%;+7%直接打
-- A2: (最高-收盘)/昨收<2%+底座<30%;收盘封板才买(买价=涨停价)
+- A1: 跌>3%+下影<2%+(量比0.7~1.2 或 振幅≥12%)+换手8~20%+近20日涨幅<30%;+7%直接打
+- A2: 昨日收阳+上影线<2%(同花顺标准口径)+换手8~20%+近20日涨幅<30%;
+  +9% 限价直接打(准封板确认;封板确认入场已证伪不可执行)
 - B:  跌>3%+下影<2%+(量比0.7~1.2 或 振幅≥12%)+换手5~25%;+7%直接打
-- 盘中规则: A1 竞价0~+4% 过滤;昨日大盘(主板非ST)涨停>110 家停手
-- 卖出: 买入日T,T+1 起首个未涨停日收盘卖,T+15 兜底
-日线保守口径:A1/B 最高价触及+7% 且最低价不高于触发价(买得进)才算触发;无滑点;
-日线未复权(除权极端收益 ~2% 噪声,规则说明披露)。
+- 盘中规则: A1/A2 竞价0~+4% 过滤;昨日大盘(主板非ST)涨停>110 家停手
+- 卖出: A2 买入日未封板 → 当日收盘卖(未封当日走);封板及 A1/B → T+1 起首个
+  未涨停日收盘卖,T+15 兜底
+日线保守口径:A1/B 最高价触及+7%、A2 触及+9% 且最低价不高于触发价(买得进)才算触发;
+无滑点;日线未复权(除权极端收益 ~2% 噪声,规则说明披露)。
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ def run_backtest() -> dict[str, object]:
     for gk in contracts.GROUP_KEYS:
         trades[gk] = _trades_for(T, groups[gk], gk, auction=False, halt=False)
     product["a1"] = _product_filter(trades["a1"], auction=True)
-    product["a2"] = _product_filter(trades["a2"], auction=False)
+    product["a2"] = _product_filter(trades["a2"], auction=True)
     product["b"] = _product_filter(trades["b"], auction=False)
 
     summary: dict[str, object] = {}
@@ -60,7 +62,8 @@ def run_backtest() -> dict[str, object]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "coverage": coverage,
         "caliber": ("日线保守口径:A1/B 最高价触及 +7% 且最低价 ≤ 触发价即算触发(买价=昨收×1.07);"
-                    "A2 收盘封板才视为买入(买价=涨停价);卖出=T+1 起首个未涨停日收盘,T+15 兜底;"
+                    "A2 最高价触及 +9% 且最低价 ≤ 触发价即算触发(买价=昨收×1.09);"
+                    "A2 买入日收盘未涨停按当日收盘卖出,封板及 A1/B=T+1 起首个未涨停日收盘,T+15 兜底;"
                     "无滑点,日线未复权"),
         "group_labels": contracts.GROUP_LABELS,
         "summary": summary,
@@ -115,7 +118,10 @@ def _build_events() -> pd.DataFrame:
     bars["chg_d2"] = g["chg"].shift(1)  # 前日涨跌幅(v2.2:前日也须收跌)
     low_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).min(axis=1)
     bars["lshadow"] = (low_oc - bars["low_price"]) / bars["prev_close"] * 100
-    bars["fade"] = (bars["high_price"] - bars["close_price"]) / bars["prev_close"] * 100
+    # v3.0 A2:同花顺标准上影线(最高-实体顶)/昨收 + 昨日收阳
+    high_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).max(axis=1)
+    bars["ushadow"] = (bars["high_price"] - high_oc) / bars["prev_close"] * 100
+    bars["yang"] = bars["close_price"] > bars["open_price"]
     bars["amp"] = (bars["high_price"] - bars["low_price"]) / bars["prev_close"] * 100
     bars["base20"] = g["close_price"].transform(lambda s: (s / s.shift(20) - 1) * 100)
     gv = g["volume"]
@@ -157,6 +163,8 @@ def _build_events() -> pd.DataFrame:
     T = T[T["n1_close"].notna() & (T["n1_gap"] <= 10)].copy()
     pc1 = T["close_price"]
     T["reach7"] = (T["n1_high"] / pc1 - 1 >= 0.07) & (T["n1_low"] / pc1 - 1 <= 0.07)
+    T["reach9"] = (T["n1_high"] / pc1 - 1 >= contracts.A2_TRIGGER_PCT) & (
+        T["n1_low"] / pc1 - 1 <= contracts.A2_TRIGGER_PCT)
     T["seal"] = T["n1_is_lim"].fillna(False).astype(bool)
     T["open_g"] = T["n1_open"] / pc1 - 1
     T["n2_lim"] = T["n2_is_lim"].fillna(False).astype(bool)
@@ -174,7 +182,9 @@ def _split_groups(T: pd.DataFrame) -> dict[str, pd.Series]:
         "a1": base & grp_a & panic & cc & T["turnover_rate"].between(
             c.A1_TURNOVER_MIN, c.A1_TURNOVER_MAX) & (T["base20"] < c.BASE20_MAX)
             & (~T["brk60"]) & (T["chg_d2"] < 0),
-        "a2": base & grp_a & (T["fade"] < c.FADE_MAX) & (T["base20"] < c.BASE20_MAX),
+        "a2": base & grp_a & T["yang"] & (T["ushadow"] < c.UPPER_SHADOW_MAX)
+            & T["turnover_rate"].between(c.A2_TURNOVER_MIN, c.A2_TURNOVER_MAX)
+            & (T["base20"] < c.BASE20_MAX),
         "b": base & grp_b & panic & cc & T["turnover_rate"].between(
             c.B_TURNOVER_MIN, c.B_TURNOVER_MAX),
     }
@@ -190,8 +200,9 @@ def _trades_for(T: pd.DataFrame, mask: pd.Series, group_key: str,
     if halt:
         e = e[e["mkt_lim"] <= contracts.MKT_LIM_HALT]
     if group_key == "a2":
-        e = e[e["seal"]]
-        e["entry_price"] = np.round(e["close_price"] * 1.10 + 1e-9, 2)
+        # v3.0:+9% 限价直接打(准封板确认;封板确认已证伪不可执行)
+        e = e[e["reach9"]]
+        e["entry_price"] = e["close_price"] * (1 + contracts.A2_TRIGGER_PCT)
     else:
         e = e[e["reach7"]]
         e["entry_price"] = e["close_price"] * (1 + contracts.TRIGGER_PCT)
@@ -199,11 +210,17 @@ def _trades_for(T: pd.DataFrame, mask: pd.Series, group_key: str,
     e["ret_d1"] = e["n2_close"] / e["entry_price"] - 1
     e = e[e["ret_d1"].notna() & e["entry_date"].notna()].copy()
 
-    # 板留断走: n2..n15 首个未涨停日收盘卖;全板则 n15 收盘
+    # 退出: A2 买入日未封板 → 当日收盘卖(未封当日走);其余/封板 → 板留断走
     exit_px = pd.Series(np.nan, index=e.index)
     exit_dt = pd.Series(pd.NaT, index=e.index)
-    hold_days = pd.Series(np.nan, index=e.index)  # 退出日相对买入日的日序(n2=2 … n15=15)
+    hold_days = pd.Series(np.nan, index=e.index)  # 退出日相对买入日的日序(n1=1 … n15=15)
     reason = pd.Series("open_end", index=e.index, dtype=object)
+    if group_key == "a2":
+        unsealed = ~e["seal"]
+        exit_px[unsealed] = e.loc[unsealed, "n1_close"]
+        exit_dt[unsealed] = e.loc[unsealed, "n1_date"]
+        hold_days[unsealed] = 1
+        reason[unsealed] = "same_day_fail"
     for k in range(2, 16):
         lim = e[f"n{k}_is_lim"].fillna(False).astype(bool)
         avail = e[f"n{k}_close"].notna() & e[f"n{k}_date"].notna()
@@ -221,8 +238,12 @@ def _trades_for(T: pd.DataFrame, mask: pd.Series, group_key: str,
     e["exit_date_bw"] = exit_dt
     e["hold_days"] = hold_days
     e["ret_bw"] = e["exit_price_bw"] / e["entry_price"] - 1
+    if group_key == "a2":
+        # A2 主口径 = 实际执行收益(未封当日卖/封板板留),交割单/月度/曲线全按此
+        e["ret_d1"] = e["ret_bw"]
     # 连板高度 = 买入日起连续涨停天数:退出日为 n2..n15 首个未涨停日,
     # 买入日封板 → 高度 = hold_days-1;买入日未封 → 高度 = hold_days-2(可能 0)
+    # (A2 未封当日卖 hold_days=1 → 高度 0)
     e["exit_reason"] = reason
     e["streak_h"] = (e["hold_days"] - 1 - (~e["seal"]).astype(int)).clip(lower=0)
     e["group"] = group_key
@@ -312,8 +333,12 @@ def _case_gates(T: pd.DataFrame, groups: dict[str, pd.Series]) -> list[dict[str,
         expect = str(case["expect"])
         if expect == "in_a1":
             passed = "a1" in actual_groups
+        elif expect == "in_a2":
+            passed = "a2" in actual_groups
         elif expect == "out_a1":
             passed = "a1" not in actual_groups
+        elif expect == "out_a2":
+            passed = "a2" not in actual_groups
         elif expect == "out_b":
             passed = "b" not in actual_groups
         else:  # out_any

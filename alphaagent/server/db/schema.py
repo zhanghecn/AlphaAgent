@@ -1898,12 +1898,13 @@ w2s_pool_entries = Table(
     Column("group_key", String(8), primary_key=True),  # a1/a2/b
     Column("name", String(80), nullable=False),
     Column("prev_close", Float, nullable=False),   # T-1 收盘
-    Column("trigger_price", Float, nullable=False),  # A1/B=昨收×1.07;A2=涨停价
+    Column("trigger_price", Float, nullable=False),  # A1/B=昨收×1.07;A2=昨收×1.09(v3)
     Column("limit_price", Float, nullable=True),
     # 条件快照值(T-1)
     Column("chg_tm1", Float, nullable=True),       # 昨日涨幅 %
     Column("lshadow_tm1", Float, nullable=True),   # 昨日下影线 %
-    Column("fade_tm1", Float, nullable=True),      # 昨日(最高-收盘)/昨收 %(研究"上影线"口径)
+    Column("ushadow_tm1", Float, nullable=True),   # 昨日上影线 %(同花顺标准口径,A2 v3 条件)
+    Column("yang_tm1", Boolean, nullable=True),    # 昨日收阳(A2 v3 条件)
     Column("vol_rel5_tm1", Float, nullable=True),  # 昨日量比(量÷5日均量)
     Column("amp_tm1", Float, nullable=True),       # 昨日振幅 %
     Column("turnover_tm1", Float, nullable=True),  # 昨日换手 %

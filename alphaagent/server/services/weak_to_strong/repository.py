@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
 
-from sqlalchemy import delete, desc, func, select, update
+from sqlalchemy import delete, desc, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -13,12 +13,36 @@ from alphaagent.server.db.session import get_engine, session_scope
 
 _SIGNAL_PK = ("trade_date", "vt_symbol", "group_key")
 
+# v3.0 新增列:create_all 不给已存在的表补列(参照 API Perf 教训),幂等补列
+_TABLE_V3_COLUMNS = {
+    "w2s_pool_entries": {
+        "ushadow_tm1": "DOUBLE PRECISION",
+        "yang_tm1": "BOOLEAN",
+    },
+}
+_columns_ensured = False
+
+
+def _ensure_v3_columns() -> None:
+    global _columns_ensured
+    if _columns_ensured:
+        return
+    engine = get_engine()
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            for table, cols in _TABLE_V3_COLUMNS.items():
+                for name, ddl in cols.items():
+                    connection.execute(text(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"))
+    _columns_ensured = True
+
 
 # ── 盘前池 ──
 
 def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_version: str) -> int:
     """整覆写某执行日的池(先删后插,幂等)。"""
     schema.ensure_schema_once(get_engine())
+    _ensure_v3_columns()
     now = datetime.now(timezone.utc)
     with session_scope() as session:
         session.execute(
@@ -37,7 +61,8 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_versio
                     limit_price=e.get("limit_price"),
                     chg_tm1=e.get("chg_tm1"),
                     lshadow_tm1=e.get("lshadow_tm1"),
-                    fade_tm1=e.get("fade_tm1"),
+                    ushadow_tm1=e.get("ushadow_tm1"),
+                    yang_tm1=e.get("yang_tm1"),
                     vol_rel5_tm1=e.get("vol_rel5_tm1"),
                     amp_tm1=e.get("amp_tm1"),
                     turnover_tm1=e.get("turnover_tm1"),
@@ -55,6 +80,7 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_versio
 
 def load_pool(trade_date: date) -> list[dict[str, object]]:
     schema.ensure_schema_once(get_engine())
+    _ensure_v3_columns()
     with session_scope() as session:
         rows = session.execute(
             select(schema.w2s_pool_entries)

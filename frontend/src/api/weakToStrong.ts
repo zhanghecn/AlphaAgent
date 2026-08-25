@@ -14,7 +14,8 @@ export interface W2sLiveEntry {
   limit_price: number | null;
   chg_tm1: number | null;
   lshadow_tm1: number | null;
-  fade_tm1: number | null;
+  ushadow_tm1: number | null;
+  yang_tm1: boolean | null;
   vol_rel5_tm1: number | null;
   amp_tm1: number | null;
   turnover_tm1: number | null;
@@ -35,7 +36,9 @@ export interface W2sLiveEntry {
   streak_h: number | null;
   exit_date: string | null;
   exit_price: number | null;
-  exit_reason: "next_close_fail" | "break_close" | "max_hold_close" | "open_end" | null;
+  exit_reason:
+    | "next_close_fail" | "break_close" | "max_hold_close" | "open_end"
+    | "same_day_fail" | null;
   ret_pct: number | null;
 }
 

@@ -1,10 +1,11 @@
 """趋势弱转强盘前池计算:全部条件来自 T-1 收盘数据(无未来函数)。
 
-口径与 量化因子研究/低吸研究/scripts/w2s_replay.py 研究管线一致(定稿 v2):
+口径与 量化因子研究/低吸研究/scripts/w2s_replay.py 研究管线一致(定稿 v3.0):
   基本条件: 主板非ST非退 / 前10个交易日内出现过≥2连板 / 昨日未涨停 / 昨日换手 3%~60%
   组划分: 最近一次≥2连板高度==2 → A 组;>=4 且距连板末日≥3个交易日 → B 组;=3 弃
-  A1: 跌>3% + 下影线<2% + (量比0.7~1.2 或 振幅≥12%) + 换手8~20% + 底座(20日涨幅)<30%
-  A2: (最高-收盘)/昨收<2% + 底座<30%
+  A1: 跌>3% + 下影线<2% + (量比0.7~1.2 或 振幅≥12%) + 换手8~20% + 近20日涨幅<30%
+  A2: 昨日收阳 + 上影线<2%(同花顺标准口径,与「昨日收阳」组合=收盘贴全日高点)
+      + 换手8~20% + 近20日涨幅<30%;盘中触 +9% 限价买(准封板确认)
   B:  跌>3% + 下影线<2% + (量比0.7~1.2 或 振幅≥12%) + 换手5~25%
 涨停判定与研究浮点口径一致(主板非ST:涨停价 = round(昨收×1.10+1e-9, 2),收盘等于即封板);
 连板序列在本窗口内自建,与 stock_limit_up_daily(detector 口径)对主板非ST等价。
@@ -108,7 +109,10 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
     bars["chg_d2"] = g["chg"].shift(1)  # 前日涨跌幅(v2.2:前日也须收跌)
     low_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).min(axis=1)
     bars["lshadow"] = (low_oc - bars["low_price"]) / bars["prev_close"] * 100
-    bars["fade"] = (bars["high_price"] - bars["close_price"]) / bars["prev_close"] * 100
+    # v3.0 A2:昨日收阳 + 同花顺标准上影线(最高-实体顶)/昨收
+    high_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).max(axis=1)
+    bars["ushadow"] = (bars["high_price"] - high_oc) / bars["prev_close"] * 100
+    bars["yang"] = bars["close_price"] > bars["open_price"]
     bars["amp"] = (bars["high_price"] - bars["low_price"]) / bars["prev_close"] * 100
     bars["ret20"] = g["close_price"].transform(lambda s: (s / s.shift(20) - 1) * 100)
     gv = g["volume"]
@@ -152,7 +156,10 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                & (last["ret20"] < c.BASE20_MAX)
                & (~last["brk60"])
                & (last["chg_d2"] < 0)),
-        "a2": base & grp_a & (last["fade"] < c.FADE_MAX) & (last["ret20"] < c.BASE20_MAX),
+        "a2": (base & grp_a & last["yang"]
+               & (last["ushadow"] < c.UPPER_SHADOW_MAX)
+               & last["turnover_rate"].between(c.A2_TURNOVER_MIN, c.A2_TURNOVER_MAX)
+               & (last["ret20"] < c.BASE20_MAX)),
         "b": (base & grp_b & panic & cc
               & last["turnover_rate"].between(c.B_TURNOVER_MIN, c.B_TURNOVER_MAX)),
     }
@@ -167,8 +174,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         for row in last[mask].itertuples():
             prev_close = float(row.close_price)
             limit_price = round(prev_close * 1.10 + 1e-9, 2)
-            trigger_price = (limit_price if group_key == "a2"
-                             else round(prev_close * (1 + c.TRIGGER_PCT) + 1e-9, 4))
+            trigger_pct = c.A2_TRIGGER_PCT if group_key == "a2" else c.TRIGGER_PCT
+            trigger_price = round(prev_close * (1 + trigger_pct) + 1e-9, 4)
             entries.append({
                 "vt_symbol": str(row.vt_symbol),
                 "group_key": group_key,
@@ -178,7 +185,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                 "limit_price": limit_price,
                 "chg_tm1": _f(row.chg),
                 "lshadow_tm1": _f(row.lshadow),
-                "fade_tm1": _f(row.fade),
+                "ushadow_tm1": _f(row.ushadow),
+                "yang_tm1": bool(row.yang),
                 "vol_rel5_tm1": _f(row.vol_rel5),
                 "amp_tm1": _f(row.amp),
                 "turnover_tm1": _f(row.turnover_rate),

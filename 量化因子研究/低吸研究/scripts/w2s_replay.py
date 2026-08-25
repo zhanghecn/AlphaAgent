@@ -6,14 +6,16 @@
     docker exec -i vnpy-alphaagent-api-1 python 量化因子研究/低吸研究/scripts/w2s_replay.py pool 2026-08-21
     docker exec -i vnpy-alphaagent-api-1 python 量化因子研究/低吸研究/scripts/w2s_replay.py cases
 
-口径 = 趋势低吸研究-弱转强v2.md 定稿 v2(2026-08-23):
+口径 = 趋势低吸研究-弱转强v2.md 定稿 v3.0(2026-08-25):
 - 基本条件: 主板/非ST非退/上市>5日/前10个交易日内出现过≥2连板/昨日未涨停/昨日换手3%~60%
 - 组划分: 最近一次≥2连板高度==2 → A组; >=4 且距连板末日>=3个交易日 → B组; ==3 删除不做
-- A1: +昨日跌>3% +下影线<2% +(量比0.7~1.2 或 振幅>=12%) +换手8~20% +底座(20日涨幅)<30%; +7%直接打
-- A2: +(最高-收盘)/昨收<2%(冲高回落幅度, 文档内称上影线) +底座<30%; 封板确认(收盘封板才买, 买价=涨停价)
+- A1: +昨日跌>3% +下影线<2% +(量比0.7~1.2 或 振幅>=12%) +换手8~20% +近20日涨幅<30%; +7%直接打
+- A2: +昨日收阳 +上影线<2%(同花顺标准口径,收阳时=收盘距全日高点) +换手8~20% +近20日涨幅<30%;
+  +9%限价直接打(准封板确认,封板率65%;封板确认入场已证伪不可执行——79%次日一字买不到)
 - B:  +昨日跌>3% +下影线<2% +(量比0.7~1.2 或 振幅>=12%) +换手5~25%; +7%直接打
-- 盘中规则: A1 竞价0~+4% 过滤(仅A1); 昨日大盘(主板非ST)涨停>110家停手
-- 卖出: 买入日T, T+1起首个未涨停日收盘卖, T+15仍未断板则T+15收盘卖
+- 盘中规则: A1/A2 竞价0~+4% 过滤; 昨日大盘(主板非ST)涨停>110家停手
+- 卖出: A2 买入日未封板→当日收盘卖(未封当日走); 封板及A1/B → T+1起首个未涨停日收盘卖,
+  T+15仍未断板则T+15收盘卖
 """
 import os
 import sys
@@ -31,7 +33,8 @@ END = "2026-08-21"
 START_BARS = "2023-03-28"
 START_EVT = pd.Timestamp("2023-04-01")
 
-RULES_VERSION = "w2s-v2.2"
+RULES_VERSION = "w2s-v3.0"
+A2_TRIGGER_PCT = 0.09
 
 # ── 案例门禁(验收3): (名称, 信号日, 期望) ──
 CASES = [
@@ -40,6 +43,8 @@ CASES = [
     ("汇嘉时代", "2023-10-31", "out_a1"),     # 量比1.64 出清确认不过
     ("厦门港务", "2025-12-12", "out_b"),      # 前段4板但回落仅1天
     ("荣盛发展", "2023-07-27", "out_any"),    # 误杀代表: 跌停收+量比1.33+换手22+底座67
+    ("华正新材", "2026-08-06", "in_a2"),      # A2-v3 好票: 断板收阳+上影1.0, 次日+9%触发买, 封板+7.27%
+    ("上工申贝", "2024-03-15", "out_a2"),     # 十字星收阴, 不满足「昨日收阳」
 ]
 
 
@@ -82,13 +87,15 @@ def build_events(eng):
     brk = (~bars["is_lim"]).groupby(bars["sid"], sort=False).cumsum()
     bars["streak"] = is_lim_i.groupby([bars["sid"], brk], sort=False).cumsum()
     bars["amp"] = (bars["high_price"] - bars["low_price"]) / bars["prev_close"]
-    bars["fade"] = (bars["high_price"] - bars["close_price"]) / bars["prev_close"]
     bars["chg"] = bars["close_price"] / bars["prev_close"] - 1
     bars["chg_d2"] = g["chg"].shift(1)  # 前日涨跌幅(v2.2)
     lo = pd.concat([bars["open_price"], bars["close_price"]], axis=1).min(axis=1)
     bars["lshadow"] = (lo - bars["low_price"]) / bars["prev_close"] * 100
+    # v3.0 A2:同花顺标准上影线(最高-实体顶)/昨收 + 昨日收阳
+    hi_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).max(axis=1)
+    bars["ushadow"] = (bars["high_price"] - hi_oc) / bars["prev_close"] * 100
+    bars["yang"] = bars["close_price"] > bars["open_price"]
     bars["amp_pct"] = bars["amp"] * 100
-    bars["fade_pct"] = bars["fade"] * 100
     bars.drop(columns=["limit_price"], inplace=True)
 
     gc = g["close_price"]
@@ -131,6 +138,8 @@ def build_events(eng):
     T = T[T["n1_close"].notna() & (T["n1_gap"] <= 10)].copy()
     pc1 = T["close_price"]
     T["reach7"] = (T["n1_high"] / pc1 - 1 >= 0.07) & (T["n1_low"] / pc1 - 1 <= 0.07)
+    T["reach9"] = (T["n1_high"] / pc1 - 1 >= A2_TRIGGER_PCT) & (
+        T["n1_low"] / pc1 - 1 <= A2_TRIGGER_PCT)
     T["seal"] = T["n1_is_lim"].fillna(False).astype(bool)
     T["open_g"] = T["n1_open"] / pc1 - 1
     T["n2_lim"] = T["n2_is_lim"].fillna(False).astype(bool)
@@ -148,7 +157,8 @@ def split_groups(T):
     return {
         "a1": base & grp_a & panic & cc & T["turnover_rate"].between(8, 20) & (T["base20"] < 30)
               & (~T["brk60"]) & (T["chg_d2"] < 0),
-        "a2": base & grp_a & (T["fade_pct"] < 2) & (T["base20"] < 30),
+        "a2": base & grp_a & T["yang"] & (T["ushadow"] < 2)
+              & T["turnover_rate"].between(8, 20) & (T["base20"] < 30),
         "b": base & grp_b & panic & cc & T["turnover_rate"].between(5, 25),
     }
 
@@ -167,8 +177,9 @@ def board_walk_ret(e, ep):
 
 def trades_for(T, mask, group_key, auction=False, halt=False):
     """事件池行 → 成交明细(研究口径)。
-    A1/B: reach7 触发, 买价=昨收×1.07;A2: 收盘封板, 买价=涨停价。
-    卖出: T+1 起首个未涨停日收盘;T+15 兜底。返回 DataFrame。
+    A1/B: reach7 触发, 买价=昨收×1.07;A2(v3): reach9 触发, 买价=昨收×1.09。
+    卖出: A2 买入日未封板→当日收盘卖(未封当日走), 封板→板留断走;
+    A1/B → T+1 起首个未涨停日收盘;T+15 兜底。返回 DataFrame。
     """
     e = T[mask].copy()
     if auction:
@@ -176,14 +187,20 @@ def trades_for(T, mask, group_key, auction=False, halt=False):
     if halt:
         e = e[e["mkt_lim"] <= 110]
     if group_key == "a2":
-        e = e[e["seal"]]
-        e["entry_price"] = np.round(e["close_price"] * 1.10 + 1e-9, 2)
+        e = e[e["reach9"]]
+        e["entry_price"] = e["close_price"] * (1 + A2_TRIGGER_PCT)
     else:
         e = e[e["reach7"]]
         e["entry_price"] = e["close_price"] * 1.07
     r1 = e["n2_close"] / e["entry_price"] - 1
     e["ret_d1"] = r1
-    e["ret_bw"] = board_walk_ret(e, e["entry_price"])
+    bw = board_walk_ret(e, e["entry_price"])
+    if group_key == "a2":
+        same_day = e["n1_close"] / e["entry_price"] - 1
+        e["ret_exec"] = np.where(e["seal"], bw, same_day)  # 实际执行收益
+        e["ret_bw"] = e["ret_exec"]
+    else:
+        e["ret_bw"] = bw
     e = e[e["ret_d1"].notna()].copy()
     e["sealed_d1"] = e["seal"]
     e["group"] = group_key
@@ -211,12 +228,15 @@ def cmd_anchors(eng):
         e = trades_for(T, groups[gk], gk)
         final[gk] = e
         stat_line(f"{gk.upper()} 终版", e)
-    print("== 产品口径(A1+竞价0~4+停手; B/A2 仅停手) ==")
+    if len(final.get("a2", [])):
+        print(f"A2 终版实际执行收益(未封当日卖/封板板留): "
+              f"{final['a2']['ret_bw'].mean()*100:+.2f}%/{(final['a2']['ret_bw']>0).mean()*100:.0f}%")
+    print("== 产品口径(A1/A2+竞价0~4+停手; B 仅停手) ==")
     prod = {}
     prod["a1"] = trades_for(T, groups["a1"], "a1", auction=True, halt=True)
     stat_line("A1 终版+竞价0~4+停手", prod["a1"])
-    prod["a2"] = trades_for(T, groups["a2"], "a2", halt=True)
-    stat_line("A2 终版+停手", prod["a2"])
+    prod["a2"] = trades_for(T, groups["a2"], "a2", auction=True, halt=True)
+    stat_line("A2 终版+竞价0~4+停手", prod["a2"])
     prod["b"] = trades_for(T, groups["b"], "b", halt=True)
     stat_line("B 终版+停手", prod["b"])
     print("== 分年(产品口径) ==")
@@ -243,7 +263,7 @@ def cmd_pool(eng, day):
     for gk in ("a1", "a2", "b"):
         sub = T[groups[gk] & (T["trade_date"] == day_ts)]
         print(f"== {day} {gk.upper()} 池 n={len(sub)} ==")
-        cols = ["vt_symbol", "name", "chg", "lshadow", "fade_pct", "vol_rel5", "amp_pct",
+        cols = ["vt_symbol", "name", "chg", "lshadow", "ushadow", "yang", "vol_rel5", "amp_pct",
                 "turnover_rate", "base20", "last_streak", "gap2", "mkt_lim"]
         print(sub[cols].to_string(index=False))
 
@@ -259,7 +279,7 @@ def cmd_cases(eng):
         row = sub.iloc[0]
         in_g = [gk.upper() for gk in ("a1", "a2", "b") if bool(groups[gk].loc[row.name])]
         print(f"{name} {day}: 入组={in_g or '无'} 期望 {expect} | "
-              f"chg={row['chg']*100:.1f} 下影={row['lshadow']:.2f} fade={row['fade_pct']:.2f} "
+              f"chg={row['chg']*100:.1f} 下影={row['lshadow']:.2f} 上影={row['ushadow']:.2f} "
               f"量比={row['vol_rel5']:.2f} 振幅={row['amp_pct']:.1f} 换手={row['turnover_rate']:.1f} "
               f"底座={row['base20']:.0f} 前段={row['last_streak']:.0f} 距末日={row['gap2']:.0f}")
 

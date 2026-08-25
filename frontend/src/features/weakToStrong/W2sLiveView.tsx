@@ -38,6 +38,7 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   next_close_fail: "次日未涨停·收盘卖",
   break_close: "断板日收盘卖",
   max_hold_close: "15日兜底·收盘卖",
+  same_day_fail: "当日未封·尾盘卖",
   open_end: "持有中",
 };
 

@@ -2,7 +2,8 @@
 
 退出推进用"从数据重算"而非增量状态,天然幂等(重复跑/补跑结果一致)。
 对每个未了结信号,从 stock_limit_up_daily + stock_daily_bars 逐日重放:
-- 买入日 T;从 T+1 起,首个未涨停日收盘卖(next_close_fail / break_close)
+- A2 买入日未涨停 → 当日收盘卖(same_day_fail,v3.0 未封当日走纪律)
+- 其余/封板:买入日 T,从 T+1 起,首个未涨停日收盘卖(next_close_fail / break_close)
 - 一路涨停到 T+15 → T+15 收盘卖(max_hold_close,研究统计窗口)
 - T+15 内未断板且数据未到 T+15 → holding(在持),streak_h = 连续涨停天数
 """
@@ -110,6 +111,18 @@ def _finalize_signals(data_date: date) -> dict[str, int]:
             holding += 1
             continue
         sealed = lu_map.get((vt, entry_date), False)
+        # A2 v3.0 未封当日走:买入日未涨停 → 当日收盘卖(14:50 尾盘纪律的 EOD 定版)
+        if group_key == "a2" and not sealed and (vt, entry_date) in close_map:
+            exit_price = close_map[(vt, entry_date)]
+            repository.upsert_signal(
+                entry_date, vt, group_key,
+                status="closed", sealed=False, streak_h=0,
+                exit_date=entry_date, exit_price=exit_price,
+                exit_reason="same_day_fail",
+                ret_pct=round((exit_price / entry_price - 1) * 100, 3),
+            )
+            closed += 1
+            continue
         # T+1 起逐日检查(日序 k: T+1=2 … T+15=15)
         exit_day: date | None = None
         reason: str | None = None
