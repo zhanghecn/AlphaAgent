@@ -158,6 +158,10 @@ def build_events() -> pd.DataFrame:
     # 近5日 ≥7% 大阳次数、距最近一次 ≥7% 大阳的交易日数(1=T-1)
     bars["bigcnt7_5tm1"] = (bars["change_pct"] >= 7).groupby(
         bars["vt_symbol"], sort=False).transform(lambda s: s.rolling(5).sum().shift(1))
+    # 近10日上涨天数(涨幅>0, 同花顺「上涨天数」口径; 区别于阳线数 yang10)
+    bars["up10_tm1"] = (bars["change_pct"] > 0).groupby(
+        bars["vt_symbol"], sort=False).transform(
+        lambda s: s.rolling(10, min_periods=5).sum().shift(1))
     day_no = ga.cumcount() + 1
     last_big_day = day_no.where(bars["change_pct"] >= 7).groupby(
         bars["vt_symbol"], sort=False).ffill()

@@ -53,6 +53,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
     entries.sort(key=_live_sort_key)
 
     circuit = _circuit_breaker_state(now)
+    window = _time_window(now) if trade_date is None else None
     status_counts: dict[str, int] = {}
     for e in entries:
         key = str(e["status"])
@@ -70,6 +71,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
             **status_counts,
         },
         "circuit_breaker": circuit,
+        "time_window": window,
         "last_scan": {
             "finished_at": _iso(last_scan.get("finished_at")),
             "status": last_scan.get("status"),
@@ -146,6 +148,23 @@ def _session_stage(now: datetime) -> str:
     if current <= time(15, 0):
         return "afternoon_closed_for_entry"  # 午后不做,仅展示
     return "closed"
+
+
+def _time_window(now: datetime) -> dict[str, object] | None:
+    """当前时刻所属的时段质量窗(实时指挥条;仅实时视图,回看不给)。"""
+    current = now.timetz().replace(tzinfo=None)
+    for w in contracts.INTRADAY_WINDOWS:
+        start = _parse_hhmm(str(w["start"]))
+        end = _parse_hhmm(str(w["end"]))
+        if start <= current < end:
+            return {"level": w["level"], "label": w["label"],
+                    "start": w["start"], "end": w["end"], "advice": w["advice"]}
+    return None
+
+
+def _parse_hhmm(value: str) -> time:
+    hour, minute = value.split(":")
+    return time(int(hour), int(minute))
 
 
 def _circuit_breaker_state(now: datetime) -> dict[str, object]:
@@ -326,6 +345,8 @@ def get_rules() -> dict[str, object]:
         "ths_pool_conditions_b": contracts.THS_POOL_CONDITIONS_B,
         "ths_pool_note": contracts.THS_POOL_NOTE,
         "intraday_playbook": contracts.INTRADAY_PLAYBOOK,
+        "intraday_windows": contracts.INTRADAY_WINDOWS,
+        "intraday_windows_note": contracts.INTRADAY_WINDOWS_NOTE,
         "anchors": contracts.BACKTEST_ANCHORS,
     }
 

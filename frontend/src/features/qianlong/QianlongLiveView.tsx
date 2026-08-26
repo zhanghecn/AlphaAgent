@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertOctagon, ChevronDown, RefreshCw } from "lucide-react";
+import { AlarmClock, AlertOctagon, AlertTriangle, ChevronDown, RefreshCw } from "lucide-react";
 
 import {
   fetchQianlongRules,
   type QianlongLiveEntry,
   type QianlongLivePayload,
+  type QianlongTimeWindow,
 } from "@/api/qianlong";
 import { EmptyState } from "@/components/EmptyState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
@@ -37,6 +38,17 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   next_open_fail: "未封板·次日开盘卖",
   next_open_nostreak: "未连板·次日开盘卖",
   break_open: "断板日卖",
+};
+
+// 时段指挥条样式(分钟研究 916 笔:09:30-09:50 黄金 > 09:50 断崖 > 10:30 后转弱)
+const WINDOW_META: Record<string, string> = {
+  prep: "border-primary/30 bg-primary/5 text-primary",
+  gold: "border-primary/50 bg-primary/10 text-primary",
+  fading: "border-amber-500/40 bg-amber-500/10 text-amber-600",
+  weak: "border-amber-600/50 bg-amber-500/15 text-amber-700",
+  lunch: "border-border bg-muted/30 text-muted-foreground",
+  none: "border-fall/40 bg-fall/10 text-fall",
+  closed: "border-border bg-muted/30 text-muted-foreground",
 };
 
 // v6 池 = A板块 ∪ B板块(买卖规则对两组完全相同,标签只决定同日抢槽优先级与分组统计)
@@ -169,6 +181,10 @@ export function QianlongLiveView({
           </div>
         ) : null}
 
+        {payload.time_window && !selectedDate ? (
+          <TimeWindowBar tw={payload.time_window} />
+        ) : null}
+
         <div className="border-b px-4 py-2">
           <button
             type="button"
@@ -256,6 +272,29 @@ export function QianlongLiveView({
   );
 }
 
+function TimeWindowBar({ tw }: { tw: QianlongTimeWindow }) {
+  const meta = WINDOW_META[tw.level] ?? WINDOW_META.closed;
+  const Icon = tw.level === "gold" || tw.level === "prep" ? AlarmClock : AlertTriangle;
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-2 text-xs",
+        meta,
+      )}
+      aria-label="当前时段操作提示"
+    >
+      <span className="flex items-center gap-1.5 font-semibold">
+        <Icon size={14} />
+        {tw.label}
+        <span className="font-mono tabular-nums opacity-80">
+          {tw.start}~{tw.end}
+        </span>
+      </span>
+      <span className="opacity-90">{tw.advice}</span>
+    </div>
+  );
+}
+
 function LiveRow({ entry, halted }: { entry: QianlongLiveEntry; halted: boolean }) {
   const meta = STATUS_META[entry.status] ?? STATUS_META.watching;
   const dimmed = entry.status === "skipped_gap" || entry.status === "no_trigger";
@@ -280,6 +319,11 @@ function LiveRow({ entry, halted }: { entry: QianlongLiveEntry; halted: boolean 
       </td>
       <td className={cn("px-3 py-2.5 text-xs", meta.className)}>
         {meta.label}
+        {entry.touched_at ? (
+          <span className="ml-1 font-mono tabular-nums opacity-70">
+            {fmtHHMM(entry.touched_at)}触
+          </span>
+        ) : null}
         {entry.status === "holding" && entry.streak_h ? `${entry.streak_h}板` : ""}
         {entry.status === "closed" && entry.exit_reason
           ? ` · ${EXIT_REASON_LABELS[entry.exit_reason] ?? entry.exit_reason}`
@@ -299,6 +343,14 @@ function LiveRow({ entry, halted }: { entry: QianlongLiveEntry; halted: boolean 
 function pctTone(value: number | null | undefined) {
   if (value == null) return "";
   return value >= 0 ? "text-rise" : "text-fall";
+}
+
+function fmtHHMM(value: string) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).format(d);
 }
 
 function formatScanTime(value: string | null) {

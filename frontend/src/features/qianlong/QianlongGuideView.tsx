@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchQianlongRules } from "@/api/qianlong";
+import { fetchQianlongRules, type QianlongTimeWindow, type QianlongWindowStats } from "@/api/qianlong";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
@@ -10,6 +10,17 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   buy: { badge: "bg-rise/15 text-rise", label: "买" },
   sell: { badge: "bg-amber-500/15 text-amber-500", label: "卖" },
   risk: { badge: "bg-fall/15 text-fall", label: "风控" },
+};
+
+// 时段窗口表格:级别徽章样式(与实时页指挥条同色系)
+const WINDOW_LEVEL_BADGE: Record<string, string> = {
+  prep: "bg-primary/10 text-primary",
+  gold: "bg-primary/15 text-primary font-semibold",
+  fading: "bg-amber-500/15 text-amber-600",
+  weak: "bg-amber-600/20 text-amber-700",
+  lunch: "bg-muted text-muted-foreground",
+  none: "bg-fall/15 text-fall",
+  closed: "bg-muted text-muted-foreground",
 };
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
@@ -61,6 +72,10 @@ export function QianlongGuideView() {
         </ol>
       </section>
 
+      {rules.intraday_windows?.length ? (
+        <IntradayWindowsTable windows={rules.intraday_windows} note={rules.intraday_windows_note} />
+      ) : null}
+
       {rules.rules.map((group) => {
         const style = GROUP_STYLES[group.group] ?? GROUP_STYLES.pool;
         return (
@@ -102,5 +117,72 @@ export function QianlongGuideView() {
         </ul>
       </section>
     </div>
+  );
+}
+
+/** 什么时候操作:时段质量分层表(数据来自 /rules 契约 intraday_windows,分钟研究)。 */
+export function IntradayWindowsTable({
+  windows,
+  note,
+}: {
+  windows: QianlongTimeWindow[];
+  note?: string;
+}) {
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="mb-1 text-sm font-semibold">什么时候操作 · 时段质量分层</div>
+      <div className="mb-3 text-xs text-muted-foreground">
+        死规则窗口仍是 09:30~11:30;下表是分钟研究给出的质量分层——同日多信号优先做早盘触发。
+        A/B 数据为分钟级窗口统计(笔数 · 均笔收益 · 触板率)。
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[860px] text-sm">
+          <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">时间窗</th>
+              <th className="px-3 py-2 text-left font-medium">级别</th>
+              <th className="px-3 py-2 text-left font-medium">A类(全新急建仓)</th>
+              <th className="px-3 py-2 text-left font-medium">B类(小阳建仓)</th>
+              <th className="px-3 py-2 text-left font-medium">操作要点</th>
+            </tr>
+          </thead>
+          <tbody>
+            {windows.map((w) => (
+              <tr key={`${w.start}-${w.end}`} className="border-b last:border-b-0">
+                <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums">
+                  {w.start}~{w.end}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2.5">
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-xs ${WINDOW_LEVEL_BADGE[w.level] ?? WINDOW_LEVEL_BADGE.closed}`}
+                  >
+                    {w.label}
+                  </span>
+                </td>
+                <WindowStatsCell stats={w.stats?.a} />
+                <WindowStatsCell stats={w.stats?.b} />
+                <td className="px-3 py-2.5 text-xs text-muted-foreground">{w.advice}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {note ? <p className="mt-2 text-xs text-muted-foreground">{note}</p> : null}
+    </section>
+  );
+}
+
+function WindowStatsCell({ stats }: { stats?: QianlongWindowStats }) {
+  if (!stats) {
+    return <td className="whitespace-nowrap px-3 py-2.5 text-xs text-muted-foreground/50">--</td>;
+  }
+  return (
+    <td className="whitespace-nowrap px-3 py-2.5 text-xs">
+      <span className="tabular-nums text-muted-foreground">{stats.n} 笔</span>
+      <span className={`ml-2 font-mono tabular-nums ${stats.ret >= 0 ? "text-rise" : "text-fall"}`}>
+        {stats.ret >= 0 ? "+" : ""}{stats.ret.toFixed(2)}%
+      </span>
+      <span className="ml-2 tabular-nums text-muted-foreground">触板 {stats.seal.toFixed(0)}%</span>
+    </td>
   );
 }

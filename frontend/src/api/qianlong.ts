@@ -52,8 +52,26 @@ export interface QianlongLivePayload {
   rules_version: string;
   counts: Record<string, number>;
   circuit_breaker: QianlongCircuitBreaker;
+  time_window?: QianlongTimeWindow | null;
   last_scan: { finished_at: string | null; status: string; message: string | null } | null;
   entries: QianlongLiveEntry[];
+}
+
+export interface QianlongWindowStats {
+  n: number;
+  seal: number;   // 触板率%
+  streak: number; // 连板率%
+  d1: number;     // D+1 均价%
+  ret: number;    // 均笔收益%
+}
+
+export interface QianlongTimeWindow {
+  level: "prep" | "gold" | "fading" | "weak" | "lunch" | "none" | "closed";
+  label: string;
+  start: string;
+  end: string;
+  advice: string;
+  stats?: { a?: QianlongWindowStats; b?: QianlongWindowStats };
 }
 
 export interface QianlongStats {
@@ -183,6 +201,8 @@ export interface QianlongRulesPayload {
   ths_pool_conditions_b: string;
   ths_pool_note: string;
   intraday_playbook: string[];
+  intraday_windows?: QianlongTimeWindow[];
+  intraday_windows_note?: string;
   anchors: Record<string, number>;
 }
 
