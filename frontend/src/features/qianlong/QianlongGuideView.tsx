@@ -207,6 +207,7 @@ export function AuctionMatrixSection({ matrix }: { matrix: QianlongAuctionMatrix
     <section className="rounded-lg border p-4">
       <div className="mb-1 text-sm font-semibold">竞价开盘 × 时段 · 7% 直买决策矩阵</div>
       <div className="mb-3 text-xs text-muted-foreground">{matrix.caliber}</div>
+      {matrix.group_ranges?.length ? <GroupRangesCard ranges={matrix.group_ranges} /> : null}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[1020px] text-sm">
           <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
@@ -340,4 +341,29 @@ function sealTone(seal: number) {
   if (seal >= 60) return "bg-primary/15 px-1.5 py-0.5 rounded text-primary font-semibold";
   if (seal < 35) return "text-muted-foreground";
   return "";
+}
+
+/** A/B 竞价范围速查:开盘竞价出来按组查表即知动作(数据来自契约 group_ranges)。 */
+export function GroupRangesCard({ ranges }: { ranges: QianlongAuctionMatrix["group_ranges"] }) {
+  return (
+    <div className="mb-4 grid gap-3 lg:grid-cols-2">
+      {(ranges ?? []).map((g) => (
+        <div key={g.group} className="rounded-md border bg-muted/20 p-3">
+          <div className="mb-2 text-xs font-semibold">{g.label}</div>
+          <table className="w-full text-xs">
+            <tbody>
+              {g.ranges.map((r) => (
+                <tr key={r.gap} className="border-b last:border-b-0">
+                  <td className="whitespace-nowrap py-1.5 pr-2 font-mono tabular-nums align-top">
+                    {r.gap}
+                  </td>
+                  <td className="py-1.5 pl-2 text-muted-foreground">{r.action}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
 }

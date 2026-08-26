@@ -214,8 +214,21 @@ export interface QianlongAuctionGapRow {
   cells_b?: ({ seal: number; n: number; ret: number } | null)[];
 }
 
+export interface QianlongGroupRangeItem {
+  gap: string;
+  tone: "good" | "gold_only" | "caution" | "avoid";
+  action: string;
+}
+
+export interface QianlongGroupRanges {
+  group: string;
+  label: string;
+  ranges: QianlongGroupRangeItem[];
+}
+
 export interface QianlongAuctionMatrix {
   caliber: string;
+  group_ranges?: QianlongGroupRanges[];
   matrix_buckets: string[];
   gap_rows: QianlongAuctionGapRow[];
   note: string;

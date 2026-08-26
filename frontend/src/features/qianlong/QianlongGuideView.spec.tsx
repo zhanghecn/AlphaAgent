@@ -51,6 +51,17 @@ describe("IntradayWindowsTable 时段窗口表格", () => {
 
 const AUCTION_MATRIX = {
   caliber: "竞价档 × 首次触及+7% 时段交叉,分钟样本 924 笔,A/B 分开统计。",
+  group_ranges: [
+    { group: "a", label: "A类 · 全新急建仓(安静底盘)",
+      ranges: [
+        { gap: "高开 4~8%", tone: "good" as const, action: "最优:开盘 10 分钟内冲 +7% 直买" },
+        { gap: "低开 <0%", tone: "avoid" as const, action: "不提前——以产品 +8% 触发口径为准" },
+      ] },
+    { group: "b", label: "B类 · 小阳建仓(活跃底盘)",
+      ranges: [
+        { gap: "低开 <0%", tone: "good" as const, action: "也可做:唯一不用看时段的档" },
+      ] },
+  ],
   matrix_buckets: ["黄金窗 09:30-09:50", "衰减期 09:50-10:30"],
   gap_rows: [
     { label: "平开 0~2%", n: 440, seal: 36.1, d1_win: 42.7, ret: 0.68, verdict: "neutral" as const,
@@ -73,6 +84,11 @@ describe("AuctionMatrixSection 竞价决策矩阵", () => {
   it("渲染 A/B 并排总表(判定徽章/着色收益)+ A/B 两张热感矩阵(样本不足显示—)", () => {
     const html = renderToStaticMarkup(<AuctionMatrixSection matrix={AUCTION_MATRIX} />);
     expect(html).toContain("竞价开盘 × 时段 · 7% 直买决策矩阵");
+    expect(html).toContain("A类 · 全新急建仓(安静底盘)");
+    expect(html).toContain("B类 · 小阳建仓(活跃底盘)");
+    expect(html).toContain("高开 4~8%");
+    expect(html).toContain("最优:开盘 10 分钟内冲 +7% 直买");
+    expect(html).toContain("唯一不用看时段的档");
     expect(html).toContain("A类(全新急建仓)");
     expect(html).toContain("B类(小阳建仓)");
     expect(html).toContain("限黄金窗");
