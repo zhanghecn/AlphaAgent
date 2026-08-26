@@ -192,6 +192,13 @@ export interface QianlongRuleGroup {
   items: QianlongRuleItem[];
 }
 
+export interface QianlongGapGroupStats {
+  n: number;
+  seal: number;
+  d1_win: number;
+  ret: number;
+}
+
 export interface QianlongAuctionGapRow {
   label: string;
   n: number;
@@ -200,7 +207,11 @@ export interface QianlongAuctionGapRow {
   ret: number;
   verdict: "best" | "good" | "neutral" | "caution" | "avoid";
   advice: string;
+  a?: QianlongGapGroupStats;
+  b?: QianlongGapGroupStats;
   cells: ({ seal: number; n: number } | null)[];
+  cells_a?: ({ seal: number; n: number } | null)[];
+  cells_b?: ({ seal: number; n: number } | null)[];
 }
 
 export interface QianlongAuctionMatrix {

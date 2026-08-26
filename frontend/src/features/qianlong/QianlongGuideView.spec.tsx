@@ -50,33 +50,41 @@ describe("IntradayWindowsTable 时段窗口表格", () => {
 });
 
 const AUCTION_MATRIX = {
-  caliber: "竞价档 × 首次触及+7% 时段交叉,分钟样本 916 笔。",
-  matrix_buckets: ["09:30", "09:35", "09:40", "09:45", "09:50", "09:55"],
+  caliber: "竞价档 × 首次触及+7% 时段交叉,分钟样本 924 笔,A/B 分开统计。",
+  matrix_buckets: ["09:30", "09:35", "09:40", "09:45"],
   gap_rows: [
     { label: "高开 6~8%", n: 23, seal: 87.0, d1_win: 95.7, ret: 6.18, verdict: "best" as const,
       advice: "全场最强,只在前 10 分钟出现",
-      cells: [{ seal: 86.7, n: 15 }, { seal: 100.0, n: 7 }, null, null, null, null] },
-    { label: "低开 <0%", n: 348, seal: 33.3, d1_win: 37.9, ret: -0.17, verdict: "avoid" as const,
-      advice: "7% 直买负期望,以 8% 触发口径为准",
-      cells: [{ seal: 37.5, n: 8 }, { seal: 59.3, n: 27 }, { seal: 58.3, n: 24 },
-              { seal: 52.6, n: 19 }, { seal: 50.0, n: 12 }, { seal: 55.6, n: 9 }] },
+      a: { n: 22, seal: 86.4, d1_win: 95.5, ret: 6.17 },
+      b: { n: 1, seal: 100.0, d1_win: 100.0, ret: 6.40 },
+      cells: [{ seal: 86.7, n: 15 }, { seal: 100.0, n: 7 }, null, null],
+      cells_a: [{ seal: 86.7, n: 15 }, { seal: 100.0, n: 6 }, null, null],
+      cells_b: [null, null, null, null] },
+    { label: "低开 <0%", n: 387, seal: 32.6, d1_win: 37.5, ret: 0.06, verdict: "avoid" as const,
+      advice: "A 类负期望以 8% 触发为准,B 类尚可",
+      a: { n: 302, seal: 30.8, d1_win: 36.4, ret: -0.39 },
+      b: { n: 85, seal: 38.8, d1_win: 43.5, ret: 1.17 },
+      cells: [{ seal: 37.5, n: 8 }, { seal: 59.3, n: 27 }, { seal: 58.3, n: 24 }, { seal: 52.6, n: 19 }],
+      cells_a: [{ seal: 40.0, n: 5 }, { seal: 66.7, n: 21 }, { seal: 65.0, n: 20 }, { seal: 50.0, n: 18 }],
+      cells_b: [{ seal: 33.3, n: 3 }, { seal: 44.4, n: 9 }, { seal: 57.1, n: 7 }, null] },
   ],
   note: "不替换 +8% 触发线。",
 };
 
 describe("AuctionMatrixSection 竞价决策矩阵", () => {
-  it("渲染竞价总表(判定徽章/着色收益)+ 5分钟热感矩阵(样本不足显示—)", () => {
+  it("渲染 A/B 并排总表(判定徽章/着色收益)+ A/B 两张热感矩阵(样本不足显示—)", () => {
     const html = renderToStaticMarkup(<AuctionMatrixSection matrix={AUCTION_MATRIX} />);
     expect(html).toContain("竞价开盘 × 时段 · 7% 直买决策矩阵");
-    expect(html).toContain("高开 6~8%");
+    expect(html).toContain("A类(全新急建仓)");
+    expect(html).toContain("B类(小阳建仓)");
     expect(html).toContain("最优");
     expect(html).toContain("不做");
-    expect(html).toContain("D+1胜%");
-    expect(html).toContain("+6.18%");
-    expect(html).toContain("-0.17%"); // 负收益 fall 着色存在
-    expect(html).toContain("封板率热感");
-    expect(html).toContain("100%");  // 高开6~8 09:35 桶
-    expect(html).toContain("—");     // cells null 样本不足
+    expect(html).toContain("+6.17%");   // 高开6~8 A 组 ret
+    expect(html).toContain("-0.39%");   // 低开 A 组负收益 fall 着色
+    expect(html).toContain("+1.17%");   // 低开 B 组
+    expect(html).toContain("黄金窗封板率热感");
+    expect(html).toContain("100%");     // cells_a 高开6~8 09:35 桶
+    expect(html).toContain("—");        // cells null 样本不足
     expect(html).toContain("不替换 +8% 触发线");
   });
 });

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchQianlongRules, type QianlongAuctionMatrix, type QianlongTimeWindow, type QianlongWindowStats } from "@/api/qianlong";
+import { fetchQianlongRules, type QianlongAuctionMatrix, type QianlongGapGroupStats, type QianlongTimeWindow, type QianlongWindowStats } from "@/api/qianlong";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
@@ -201,35 +201,39 @@ function WindowStatsCell({ stats }: { stats?: QianlongWindowStats }) {
   );
 }
 
-/** 竞价开盘 × 时段 · 7% 直买决策矩阵(数据来自 /rules 契约 auction_matrix)。 */
+/** 竞价开盘 × 时段 · 7% 直买决策矩阵(数据来自 /rules 契约 auction_matrix,A/B 分开)。 */
 export function AuctionMatrixSection({ matrix }: { matrix: QianlongAuctionMatrix }) {
   return (
     <section className="rounded-lg border p-4">
       <div className="mb-1 text-sm font-semibold">竞价开盘 × 时段 · 7% 直买决策矩阵</div>
       <div className="mb-3 text-xs text-muted-foreground">{matrix.caliber}</div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] text-sm">
+        <table className="w-full min-w-[1020px] text-sm">
           <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
             <tr>
-              <th className="px-3 py-2 text-left font-medium">竞价档</th>
-              <th className="px-3 py-2 text-right font-medium">n</th>
-              <th className="px-3 py-2 text-right font-medium">封板%</th>
-              <th className="px-3 py-2 text-right font-medium">D+1胜%</th>
-              <th className="px-3 py-2 text-right font-medium">ret</th>
-              <th className="px-3 py-2 text-left font-medium">判定</th>
-              <th className="px-3 py-2 text-left font-medium">操作要点</th>
+              <th className="px-3 py-2 text-left font-medium" rowSpan={2}>竞价档</th>
+              <th className="px-2 py-1 text-center font-medium" colSpan={4}>A类(全新急建仓)</th>
+              <th className="px-2 py-1 text-center font-medium" colSpan={4}>B类(小阳建仓)</th>
+              <th className="px-3 py-2 text-left font-medium" rowSpan={2}>判定</th>
+              <th className="px-3 py-2 text-left font-medium" rowSpan={2}>操作要点</th>
+            </tr>
+            <tr>
+              <th className="px-2 py-1 text-right font-medium">n</th>
+              <th className="px-2 py-1 text-right font-medium">封板%</th>
+              <th className="px-2 py-1 text-right font-medium">D+1胜%</th>
+              <th className="px-2 py-1 text-right font-medium">ret</th>
+              <th className="px-2 py-1 text-right font-medium">n</th>
+              <th className="px-2 py-1 text-right font-medium">封板%</th>
+              <th className="px-2 py-1 text-right font-medium">D+1胜%</th>
+              <th className="px-2 py-1 text-right font-medium">ret</th>
             </tr>
           </thead>
           <tbody>
             {matrix.gap_rows.map((row) => (
               <tr key={row.label} className="border-b last:border-b-0 align-top">
                 <td className="whitespace-nowrap px-3 py-2.5">{row.label}</td>
-                <td className="px-3 py-2.5 text-right font-mono tabular-nums text-xs text-muted-foreground">{row.n}</td>
-                <td className="px-3 py-2.5 text-right font-mono tabular-nums">{row.seal.toFixed(0)}</td>
-                <td className="px-3 py-2.5 text-right font-mono tabular-nums">{row.d1_win.toFixed(0)}</td>
-                <td className={`px-3 py-2.5 text-right font-mono tabular-nums ${row.ret >= 0 ? "text-rise" : "text-fall"}`}>
-                  {row.ret >= 0 ? "+" : ""}{row.ret.toFixed(2)}%
-                </td>
+                <GapGroupCells g={row.a} />
+                <GapGroupCells g={row.b} />
                 <td className="whitespace-nowrap px-3 py-2.5">
                   <span className={`rounded px-1.5 py-0.5 text-xs ${AUCTION_VERDICT_BADGE[row.verdict] ?? AUCTION_VERDICT_BADGE.neutral}`}>
                     {AUCTION_VERDICT_LABEL[row.verdict] ?? row.verdict}
@@ -243,41 +247,88 @@ export function AuctionMatrixSection({ matrix }: { matrix: QianlongAuctionMatrix
       </div>
 
       <div className="mb-1 mt-4 text-xs font-medium text-muted-foreground">
-        封板率热感(行=竞价档,列=首次触及+7% 的 5 分钟桶;— = 样本不足 3 笔)
+        黄金窗封板率热感 09:30~09:50(列=首触 5 分钟桶;— = 样本不足 3 笔;括号=笔数)
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[640px] text-sm">
-          <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
-            <tr>
-              <th className="px-3 py-2 text-left font-medium">竞价\首触时段</th>
-              {matrix.matrix_buckets.map((b) => (
-                <th key={b} className="px-3 py-2 text-right font-medium">{b}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {matrix.gap_rows.map((row) => (
-              <tr key={row.label} className="border-b last:border-b-0">
-                <td className="whitespace-nowrap px-3 py-2 text-xs">{row.label}</td>
-                {row.cells.map((cell, i) => (
-                  <td key={i} className="px-3 py-2 text-right">
-                    {cell == null ? (
-                      <span className="text-xs text-muted-foreground/40">—</span>
-                    ) : (
-                      <span className={`font-mono tabular-nums text-xs ${sealTone(cell.seal)}`}>
-                        {cell.seal.toFixed(0)}%
-                        <span className="ml-1 text-[10px] text-muted-foreground">({cell.n})</span>
-                      </span>
-                    )}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <HeatTable rows={matrix.gap_rows} buckets={matrix.matrix_buckets} groupKey="a" title="A类(全新急建仓)" />
+        <HeatTable rows={matrix.gap_rows} buckets={matrix.matrix_buckets} groupKey="b" title="B类(小阳建仓)" />
       </div>
       <p className="mt-2 text-xs text-muted-foreground">{matrix.note}</p>
     </section>
+  );
+}
+
+function GapGroupCells({ g }: { g?: QianlongGapGroupStats }) {
+  if (!g) {
+    return (
+      <>
+        <td className="px-2 py-2.5 text-right text-xs text-muted-foreground/50">--</td>
+        <td className="px-2 py-2.5 text-right text-xs text-muted-foreground/50">--</td>
+        <td className="px-2 py-2.5 text-right text-xs text-muted-foreground/50">--</td>
+        <td className="px-2 py-2.5 text-right text-xs text-muted-foreground/50">--</td>
+      </>
+    );
+  }
+  return (
+    <>
+      <td className="px-2 py-2.5 text-right font-mono tabular-nums text-xs text-muted-foreground">{g.n}</td>
+      <td className="px-2 py-2.5 text-right font-mono tabular-nums text-xs">{g.seal.toFixed(0)}</td>
+      <td className="px-2 py-2.5 text-right font-mono tabular-nums text-xs">{g.d1_win.toFixed(0)}</td>
+      <td className={`px-2 py-2.5 text-right font-mono tabular-nums text-xs ${g.ret >= 0 ? "text-rise" : "text-fall"}`}>
+        {g.ret >= 0 ? "+" : ""}{g.ret.toFixed(2)}%
+      </td>
+    </>
+  );
+}
+
+function HeatTable({
+  rows, buckets, groupKey, title,
+}: {
+  rows: QianlongAuctionMatrix["gap_rows"];
+  buckets: string[];
+  groupKey: "a" | "b";
+  title: string;
+}) {
+  const cellsKey = groupKey === "a" ? "cells_a" : "cells_b";
+  return (
+    <div>
+      <div className="mb-1 text-xs text-muted-foreground">{title}</div>
+      <table className="w-full text-sm">
+        <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+          <tr>
+            <th className="px-2 py-1.5 text-left font-medium">竞价\首触</th>
+            {buckets.map((b) => (
+              <th key={b} className="px-2 py-1.5 text-right font-medium">{b}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const cells = (row[cellsKey] ?? []) as ({ seal: number; n: number } | null)[];
+            return (
+              <tr key={row.label} className="border-b last:border-b-0">
+                <td className="whitespace-nowrap px-2 py-2 text-xs">{row.label}</td>
+                {buckets.map((b, i) => {
+                  const cell = cells[i];
+                  return (
+                    <td key={b} className="px-2 py-2 text-right">
+                      {cell == null ? (
+                        <span className="text-xs text-muted-foreground/40">—</span>
+                      ) : (
+                        <span className={`font-mono tabular-nums text-xs ${sealTone(cell.seal)}`}>
+                          {cell.seal.toFixed(0)}%
+                          <span className="ml-1 text-[10px] text-muted-foreground">({cell.n})</span>
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
