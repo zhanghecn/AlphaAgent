@@ -321,6 +321,7 @@ def get_rules() -> dict[str, object]:
         "ths_pool_conditions": contracts.THS_POOL_CONDITIONS,
         "ths_pool_note": contracts.THS_POOL_NOTE,
         "intraday_playbook": contracts.INTRADAY_PLAYBOOK,
+        "session_window": contracts.SESSION_WINDOW,
         "anchors": contracts.BACKTEST_ANCHORS,
         "anchor_tolerances": contracts.ANCHOR_TOLERANCES,
         "case_gates": contracts.CASE_GATES,

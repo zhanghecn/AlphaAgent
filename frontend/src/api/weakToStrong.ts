@@ -195,6 +195,34 @@ export interface W2sRuleGroup {
   items: W2sRuleItem[];
 }
 
+export interface W2sSessionWindowRow {
+  group: W2sGroupKey;
+  window: string;
+  share: string;
+  note: string;
+}
+
+export interface W2sSessionTableRow {
+  group: W2sGroupKey;
+  bucket: string;
+  n: number;
+  seal: number;
+  d1: number;
+  d1_win: number;
+  n2_lim: number;
+  ret: number;
+  ret_win: number;
+}
+
+export interface W2sSessionWindow {
+  headline: string;
+  rows: W2sSessionWindowRow[];
+  table_columns?: string[];
+  table_rows?: W2sSessionTableRow[];
+  warning: string;
+  research_note: string;
+}
+
 export interface W2sRulesPayload {
   rules_version: string;
   group_labels: Record<W2sGroupKey, string>;
@@ -204,6 +232,7 @@ export interface W2sRulesPayload {
   ths_pool_conditions: Record<W2sGroupKey, string>;
   ths_pool_note: string;
   intraday_playbook: string[];
+  session_window: W2sSessionWindow;
   anchors: Record<string, W2sAnchorStats>;
   anchor_tolerances: Record<string, number>;
   case_gates: Omit<W2sCaseGate, "actual_groups" | "pass">[];

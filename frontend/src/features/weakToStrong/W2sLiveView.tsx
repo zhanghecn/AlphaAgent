@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertOctagon, ChevronDown, RefreshCw } from "lucide-react";
+import { AlertOctagon, ChevronDown, Clock, RefreshCw } from "lucide-react";
 
 import {
   fetchW2sRules,
@@ -65,10 +65,12 @@ export function W2sLiveView({
     staleTime: 300_000,
   });
   const [playbookOpen, setPlaybookOpen] = useState(false);
+  const [windowOpen, setWindowOpen] = useState(false);
   const halt = payload.market_halt;
   const entries = payload.entries ?? [];
   const thsConditions = rulesQuery.data?.ths_pool_conditions;
   const playbook = rulesQuery.data?.intraday_playbook ?? [];
+  const sessionWindow = rulesQuery.data?.session_window;
   const byGroup = payload.counts.by_group ?? {};
   const byStatus = payload.counts.by_status ?? {};
 
@@ -128,6 +130,50 @@ export function W2sLiveView({
             <AlertOctagon size={14} />
             大盘停手日:昨日主板非ST涨停 {halt.mkt_lim_tm1 ?? "--"} 家(阈值 {halt.threshold}),
             今日整池停手——情绪高潮日池内 -2.12%/35%,不做。
+          </div>
+        ) : null}
+
+        {sessionWindow ? (
+          <div className="border-b border-amber-500/30 bg-amber-500/5 px-4 py-2 text-xs">
+            <button
+              type="button"
+              className="flex w-full items-start gap-2 text-left"
+              onClick={() => setWindowOpen((v) => !v)}
+              aria-expanded={windowOpen}
+            >
+              <Clock size={14} className="mt-0.5 shrink-0 text-amber-500" />
+              <span className="min-w-0 flex-1">
+                <span className="font-medium text-amber-600">{sessionWindow.headline}</span>
+                <span className="ml-2 text-muted-foreground">{sessionWindow.warning}</span>
+              </span>
+              <ChevronDown
+                size={13}
+                className={cn("mt-0.5 shrink-0 text-muted-foreground", windowOpen && "rotate-180")}
+              />
+            </button>
+            {windowOpen ? (
+              <div className="mt-2 space-y-1.5 pl-6">
+                {sessionWindow.rows.map((row) => (
+                  <div key={row.group} className="flex gap-2">
+                    <span
+                      className={cn(
+                        "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                        GROUP_BADGES[row.group].className,
+                      )}
+                    >
+                      {GROUP_BADGES[row.group].label}
+                    </span>
+                    <span className="shrink-0 rounded bg-rise/15 px-1.5 py-0.5 text-[10px] font-medium text-rise">
+                      出手期 {row.window}
+                    </span>
+                    <span className="text-muted-foreground">
+                      首触占比 {row.share} · {row.note}
+                    </span>
+                  </div>
+                ))}
+                <p className="text-[11px] text-muted-foreground/80">{sessionWindow.research_note}</p>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
