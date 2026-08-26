@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchQianlongRules, type QianlongTimeWindow, type QianlongWindowStats } from "@/api/qianlong";
+import { fetchQianlongRules, type QianlongAuctionMatrix, type QianlongTimeWindow, type QianlongWindowStats } from "@/api/qianlong";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
@@ -21,6 +21,18 @@ const WINDOW_LEVEL_BADGE: Record<string, string> = {
   lunch: "bg-muted text-muted-foreground",
   none: "bg-fall/15 text-fall",
   closed: "bg-muted text-muted-foreground",
+};
+
+// 竞价档判定徽章(7% 直买决策矩阵)
+const AUCTION_VERDICT_BADGE: Record<string, string> = {
+  best: "bg-primary/20 text-primary font-semibold",
+  good: "bg-primary/10 text-primary",
+  neutral: "bg-muted text-muted-foreground",
+  caution: "bg-amber-500/15 text-amber-600",
+  avoid: "bg-fall/15 text-fall",
+};
+const AUCTION_VERDICT_LABEL: Record<string, string> = {
+  best: "最优", good: "可做", neutral: "看时段", caution: "谨慎", avoid: "不做",
 };
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
@@ -75,6 +87,8 @@ export function QianlongGuideView() {
       {rules.intraday_windows?.length ? (
         <IntradayWindowsTable windows={rules.intraday_windows} note={rules.intraday_windows_note} />
       ) : null}
+
+      {rules.auction_matrix ? <AuctionMatrixSection matrix={rules.auction_matrix} /> : null}
 
       {rules.rules.map((group) => {
         const style = GROUP_STYLES[group.group] ?? GROUP_STYLES.pool;
@@ -185,4 +199,90 @@ function WindowStatsCell({ stats }: { stats?: QianlongWindowStats }) {
       <span className="ml-2 tabular-nums text-muted-foreground">触板 {stats.seal.toFixed(0)}%</span>
     </td>
   );
+}
+
+/** 竞价开盘 × 时段 · 7% 直买决策矩阵(数据来自 /rules 契约 auction_matrix)。 */
+export function AuctionMatrixSection({ matrix }: { matrix: QianlongAuctionMatrix }) {
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="mb-1 text-sm font-semibold">竞价开盘 × 时段 · 7% 直买决策矩阵</div>
+      <div className="mb-3 text-xs text-muted-foreground">{matrix.caliber}</div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] text-sm">
+          <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">竞价档</th>
+              <th className="px-3 py-2 text-right font-medium">n</th>
+              <th className="px-3 py-2 text-right font-medium">封板%</th>
+              <th className="px-3 py-2 text-right font-medium">D+1胜%</th>
+              <th className="px-3 py-2 text-right font-medium">ret</th>
+              <th className="px-3 py-2 text-left font-medium">判定</th>
+              <th className="px-3 py-2 text-left font-medium">操作要点</th>
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.gap_rows.map((row) => (
+              <tr key={row.label} className="border-b last:border-b-0 align-top">
+                <td className="whitespace-nowrap px-3 py-2.5">{row.label}</td>
+                <td className="px-3 py-2.5 text-right font-mono tabular-nums text-xs text-muted-foreground">{row.n}</td>
+                <td className="px-3 py-2.5 text-right font-mono tabular-nums">{row.seal.toFixed(0)}</td>
+                <td className="px-3 py-2.5 text-right font-mono tabular-nums">{row.d1_win.toFixed(0)}</td>
+                <td className={`px-3 py-2.5 text-right font-mono tabular-nums ${row.ret >= 0 ? "text-rise" : "text-fall"}`}>
+                  {row.ret >= 0 ? "+" : ""}{row.ret.toFixed(2)}%
+                </td>
+                <td className="whitespace-nowrap px-3 py-2.5">
+                  <span className={`rounded px-1.5 py-0.5 text-xs ${AUCTION_VERDICT_BADGE[row.verdict] ?? AUCTION_VERDICT_BADGE.neutral}`}>
+                    {AUCTION_VERDICT_LABEL[row.verdict] ?? row.verdict}
+                  </span>
+                </td>
+                <td className="px-3 py-2.5 text-xs text-muted-foreground">{row.advice}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mb-1 mt-4 text-xs font-medium text-muted-foreground">
+        封板率热感(行=竞价档,列=首次触及+7% 的 5 分钟桶;— = 样本不足 3 笔)
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[640px] text-sm">
+          <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">竞价\首触时段</th>
+              {matrix.matrix_buckets.map((b) => (
+                <th key={b} className="px-3 py-2 text-right font-medium">{b}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.gap_rows.map((row) => (
+              <tr key={row.label} className="border-b last:border-b-0">
+                <td className="whitespace-nowrap px-3 py-2 text-xs">{row.label}</td>
+                {row.cells.map((cell, i) => (
+                  <td key={i} className="px-3 py-2 text-right">
+                    {cell == null ? (
+                      <span className="text-xs text-muted-foreground/40">—</span>
+                    ) : (
+                      <span className={`font-mono tabular-nums text-xs ${sealTone(cell.seal)}`}>
+                        {cell.seal.toFixed(0)}%
+                        <span className="ml-1 text-[10px] text-muted-foreground">({cell.n})</span>
+                      </span>
+                    )}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">{matrix.note}</p>
+    </section>
+  );
+}
+
+function sealTone(seal: number) {
+  if (seal >= 60) return "bg-primary/15 px-1.5 py-0.5 rounded text-primary font-semibold";
+  if (seal < 35) return "text-muted-foreground";
+  return "";
 }

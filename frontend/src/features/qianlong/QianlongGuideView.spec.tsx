@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { IntradayWindowsTable } from "@/features/qianlong/QianlongGuideView";
+import { AuctionMatrixSection, IntradayWindowsTable } from "@/features/qianlong/QianlongGuideView";
 
 const WINDOWS = [
   { level: "gold" as const, start: "09:30", end: "09:50", label: "黄金操作窗",
@@ -46,5 +46,37 @@ describe("IntradayWindowsTable 时段窗口表格", () => {
     expect(html).toContain("98 笔");
     expect(html).toContain("text-fall"); // weak 窗 A 类 -0.61 负收益着色
     expect(html).toContain("--");         // lunch 无 stats
+  });
+});
+
+const AUCTION_MATRIX = {
+  caliber: "竞价档 × 首次触及+7% 时段交叉,分钟样本 916 笔。",
+  matrix_buckets: ["09:30", "09:35", "09:40", "09:45", "09:50", "09:55"],
+  gap_rows: [
+    { label: "高开 6~8%", n: 23, seal: 87.0, d1_win: 95.7, ret: 6.18, verdict: "best" as const,
+      advice: "全场最强,只在前 10 分钟出现",
+      cells: [{ seal: 86.7, n: 15 }, { seal: 100.0, n: 7 }, null, null, null, null] },
+    { label: "低开 <0%", n: 348, seal: 33.3, d1_win: 37.9, ret: -0.17, verdict: "avoid" as const,
+      advice: "7% 直买负期望,以 8% 触发口径为准",
+      cells: [{ seal: 37.5, n: 8 }, { seal: 59.3, n: 27 }, { seal: 58.3, n: 24 },
+              { seal: 52.6, n: 19 }, { seal: 50.0, n: 12 }, { seal: 55.6, n: 9 }] },
+  ],
+  note: "不替换 +8% 触发线。",
+};
+
+describe("AuctionMatrixSection 竞价决策矩阵", () => {
+  it("渲染竞价总表(判定徽章/着色收益)+ 5分钟热感矩阵(样本不足显示—)", () => {
+    const html = renderToStaticMarkup(<AuctionMatrixSection matrix={AUCTION_MATRIX} />);
+    expect(html).toContain("竞价开盘 × 时段 · 7% 直买决策矩阵");
+    expect(html).toContain("高开 6~8%");
+    expect(html).toContain("最优");
+    expect(html).toContain("不做");
+    expect(html).toContain("D+1胜%");
+    expect(html).toContain("+6.18%");
+    expect(html).toContain("-0.17%"); // 负收益 fall 着色存在
+    expect(html).toContain("封板率热感");
+    expect(html).toContain("100%");  // 高开6~8 09:35 桶
+    expect(html).toContain("—");     // cells null 样本不足
+    expect(html).toContain("不替换 +8% 触发线");
   });
 });

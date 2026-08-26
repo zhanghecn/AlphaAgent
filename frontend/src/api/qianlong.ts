@@ -192,6 +192,24 @@ export interface QianlongRuleGroup {
   items: QianlongRuleItem[];
 }
 
+export interface QianlongAuctionGapRow {
+  label: string;
+  n: number;
+  seal: number;
+  d1_win: number;
+  ret: number;
+  verdict: "best" | "good" | "neutral" | "caution" | "avoid";
+  advice: string;
+  cells: ({ seal: number; n: number } | null)[];
+}
+
+export interface QianlongAuctionMatrix {
+  caliber: string;
+  matrix_buckets: string[];
+  gap_rows: QianlongAuctionGapRow[];
+  note: string;
+}
+
 export interface QianlongRulesPayload {
   rules_version: string;
   rules: QianlongRuleGroup[];
@@ -203,6 +221,7 @@ export interface QianlongRulesPayload {
   intraday_playbook: string[];
   intraday_windows?: QianlongTimeWindow[];
   intraday_windows_note?: string;
+  auction_matrix?: QianlongAuctionMatrix;
   anchors: Record<string, number>;
 }
 
