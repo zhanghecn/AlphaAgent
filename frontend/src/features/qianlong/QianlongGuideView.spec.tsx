@@ -51,22 +51,20 @@ describe("IntradayWindowsTable 时段窗口表格", () => {
 
 const AUCTION_MATRIX = {
   caliber: "竞价档 × 首次触及+7% 时段交叉,分钟样本 924 笔,A/B 分开统计。",
-  matrix_buckets: ["09:30", "09:35", "09:40", "09:45"],
+  matrix_buckets: ["黄金窗 09:30-09:50", "衰减期 09:50-10:30"],
   gap_rows: [
-    { label: "高开 6~8%", n: 23, seal: 87.0, d1_win: 95.7, ret: 6.18, verdict: "best" as const,
-      advice: "全场最强,只在前 10 分钟出现",
-      a: { n: 22, seal: 86.4, d1_win: 95.5, ret: 6.17 },
-      b: { n: 1, seal: 100.0, d1_win: 100.0, ret: 6.40 },
-      cells: [{ seal: 86.7, n: 15 }, { seal: 100.0, n: 7 }, null, null],
-      cells_a: [{ seal: 86.7, n: 15 }, { seal: 100.0, n: 6 }, null, null],
-      cells_b: [null, null, null, null] },
-    { label: "低开 <0%", n: 387, seal: 32.6, d1_win: 37.5, ret: 0.06, verdict: "avoid" as const,
-      advice: "A 类负期望以 8% 触发为准,B 类尚可",
-      a: { n: 302, seal: 30.8, d1_win: 36.4, ret: -0.39 },
-      b: { n: 85, seal: 38.8, d1_win: 43.5, ret: 1.17 },
-      cells: [{ seal: 37.5, n: 8 }, { seal: 59.3, n: 27 }, { seal: 58.3, n: 24 }, { seal: 52.6, n: 19 }],
-      cells_a: [{ seal: 40.0, n: 5 }, { seal: 66.7, n: 21 }, { seal: 65.0, n: 20 }, { seal: 50.0, n: 18 }],
-      cells_b: [{ seal: 33.3, n: 3 }, { seal: 44.4, n: 9 }, { seal: 57.1, n: 7 }, null] },
+    { label: "平开 0~2%", n: 440, seal: 36.1, d1_win: 42.7, ret: 0.68, verdict: "neutral" as const,
+      advice: "确实要看时段:黄金窗 A +2.86、B +4.72 都强;衰减期 A 仅 +0.11 接近白干",
+      a: { n: 335, seal: 34.9, d1_win: 40.3, ret: 0.48 },
+      b: { n: 105, seal: 40.0, d1_win: 49.5, ret: 1.34 },
+      cells_a: [{ seal: 65.2, n: 112, ret: 2.86 }, { seal: 35.7, n: 70, ret: 0.11 }],
+      cells_b: [{ seal: 77.8, n: 36, ret: 4.72 }, { seal: 42.3, n: 26, ret: 0.50 }] },
+    { label: "高开 4~6%", n: 41, seal: 63.4, d1_win: 68.3, ret: 2.79, verdict: "good" as const,
+      advice: "秒冲型,衰减期几乎不存在",
+      a: { n: 39, seal: 64.1, d1_win: 69.2, ret: 2.73 },
+      b: { n: 7, seal: 71.4, d1_win: 71.4, ret: 4.49 },
+      cells_a: [{ seal: 69.4, n: 36, ret: 3.23 }, { seal: 0.0, n: 1, ret: -4.68 }],
+      cells_b: [{ seal: 71.4, n: 7, ret: 4.49 }, null] },
   ],
   note: "不替换 +8% 触发线。",
 };
@@ -77,14 +75,14 @@ describe("AuctionMatrixSection 竞价决策矩阵", () => {
     expect(html).toContain("竞价开盘 × 时段 · 7% 直买决策矩阵");
     expect(html).toContain("A类(全新急建仓)");
     expect(html).toContain("B类(小阳建仓)");
-    expect(html).toContain("最优");
-    expect(html).toContain("不做");
-    expect(html).toContain("+6.17%");   // 高开6~8 A 组 ret
-    expect(html).toContain("-0.39%");   // 低开 A 组负收益 fall 着色
-    expect(html).toContain("+1.17%");   // 低开 B 组
-    expect(html).toContain("黄金窗封板率热感");
-    expect(html).toContain("100%");     // cells_a 高开6~8 09:35 桶
-    expect(html).toContain("—");        // cells null 样本不足
+    expect(html).toContain("限黄金窗");
+    expect(html).toContain("可做");
+    expect(html).toContain("确实要看时段");
+    expect(html).toContain("黄金窗 09:30-09:50");
+    expect(html).toContain("衰减期 09:50-10:30");
+    expect(html).toContain("+2.86");    // 平开 A 黄金窗 ret
+    expect(html).toContain("+4.72");    // 平开 B 黄金窗 ret
+    expect(html).toContain("—");        // cells null / n<3 样本不足
     expect(html).toContain("不替换 +8% 触发线");
   });
 });

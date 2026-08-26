@@ -32,7 +32,7 @@ const AUCTION_VERDICT_BADGE: Record<string, string> = {
   avoid: "bg-fall/15 text-fall",
 };
 const AUCTION_VERDICT_LABEL: Record<string, string> = {
-  best: "最优", good: "可做", neutral: "看时段", caution: "谨慎", avoid: "不做",
+  best: "最优", good: "可做", neutral: "限黄金窗", caution: "谨慎", avoid: "不做",
 };
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
@@ -304,7 +304,8 @@ function HeatTable({
         </thead>
         <tbody>
           {rows.map((row) => {
-            const cells = (row[cellsKey] ?? []) as ({ seal: number; n: number } | null)[];
+            const cells = (row[cellsKey] ?? []) as
+              ({ seal: number; n: number; ret: number } | null)[];
             return (
               <tr key={row.label} className="border-b last:border-b-0">
                 <td className="whitespace-nowrap px-2 py-2 text-xs">{row.label}</td>
@@ -312,12 +313,15 @@ function HeatTable({
                   const cell = cells[i];
                   return (
                     <td key={b} className="px-2 py-2 text-right">
-                      {cell == null ? (
+                      {cell == null || cell.n < 3 ? (
                         <span className="text-xs text-muted-foreground/40">—</span>
                       ) : (
                         <span className={`font-mono tabular-nums text-xs ${sealTone(cell.seal)}`}>
                           {cell.seal.toFixed(0)}%
                           <span className="ml-1 text-[10px] text-muted-foreground">({cell.n})</span>
+                          <span className={`ml-1.5 text-[10px] ${cell.ret >= 0 ? "text-rise" : "text-fall"}`}>
+                            {cell.ret >= 0 ? "+" : ""}{cell.ret.toFixed(2)}
+                          </span>
                         </span>
                       )}
                     </td>

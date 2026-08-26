@@ -209,9 +209,9 @@ export interface QianlongAuctionGapRow {
   advice: string;
   a?: QianlongGapGroupStats;
   b?: QianlongGapGroupStats;
-  cells: ({ seal: number; n: number } | null)[];
-  cells_a?: ({ seal: number; n: number } | null)[];
-  cells_b?: ({ seal: number; n: number } | null)[];
+  cells?: ({ seal: number; n: number } | null)[];
+  cells_a?: ({ seal: number; n: number; ret: number } | null)[];
+  cells_b?: ({ seal: number; n: number; ret: number } | null)[];
 }
 
 export interface QianlongAuctionMatrix {
