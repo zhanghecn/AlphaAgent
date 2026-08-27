@@ -718,13 +718,26 @@ def test_all_stock_ohlcv_spot_falls_back_to_eastmoney_when_sina_blocked(
 
     adapter_module._FULL_MARKET_OHLCV_SPOT_CACHE.clear()
 
-    def blocked_sina_count(_node):
-        raise AkShareSourceError("Sina A-share stock count unavailable")
-
+    # 降级目标(东财)同样打桩,避免测试依赖真实网络与时钟
     monkeypatch.setattr(
         adapter_module,
-        "_sina_sector_member_count",
-        blocked_sina_count,
+        "_eastmoney_stock_page_is_fresh",
+        lambda _payload: True,
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "_eastmoney_all_a_page",
+        lambda *_a, **_k: {
+            "items": [{"vt_symbol": "600519.SSE", "symbol": "600519",
+                       "exchange": "SSE", "name": "贵州茅台",
+                       "last_price": 1291.16, "open_price": 1304.0,
+                       "high_price": 1314.45, "low_price": 1288.0,
+                       "volume": 13363.02, "turnover": 1.7e9,
+                       "quote_observed_at": "2026-08-27T03:29:03+00:00"}],
+            "page": 1, "page_size": 200, "total": 1,
+            "source": "eastmoney.push2delay.clist",
+            "updated_at": "2026-08-27T03:29:05+00:00",
+        },
     )
 
     def make_row(index: int) -> dict[str, object]:

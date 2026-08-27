@@ -1,14 +1,15 @@
-"""潜龙首板回测引擎(v6 纯底盘版):日线口径全量回放 + 三槽模拟仓 + 物化报告。
+"""潜龙首板回测引擎(v7.0 无未来函数版):日线口径全量回放 + 三槽模拟仓 + 物化报告。
 
-口径 = 量化因子研究/潜龙首板/scripts/fb_chassis_pool.py 研究管线(J 池,41 个月,含 0.5% 滑点):
-- 池 = 底盘形态 A|B(全新急建仓/小阳建仓), 无市值/价门槛
-- 触发:当日最高价 ≥ 昨收×1.08(日线无法回放分钟收住,标注口径)
-- 量比:首板全日量比 < 1.5(收盘定型,含前视上限;盘中实盘用触及量比<1.0)
-- 高开 ≥ +8% 不做(直接从宇宙剔除)
-- 进场:触发价 × 1.005;卖出:未封板/未连板 → 次日开盘;连板 → 断板日开盘
-- 除权污染:|隔夜缺口|>11% 剔除
-模拟仓:3 槽位(每槽入场时净值的 1/3),B 类(小阳建仓)优先,退出日确认盈亏;
-熔断层:当月已实现亏损达 -5% 后当月停止开仓。
+v7.0 方法论修正(2026-08-27):移除全部前视。
+- 池 = 底盘形态 A|B,全部由 T-1 收盘数据构成(无未来)
+- 触发 = 当日最高价曾达到 昨收×1.08(盘中事实);高开≥8% 用开盘价判(盘时可判)
+- 一字板 = 开盘即顶格近似(原全天最低价口径属未来信息,已废)
+- 确认与买入 = 当日尾盘:全日量比 <1.5 在 14:55 已可确证,以收盘价×1.005 成交
+  (旧「触发价×1.005」+收盘量比过滤组合在决策时序上不成立,已废除)
+- 卖出:未封板/未连板 → 次日开盘;连板 → 断板日开盘(逐日演化,无未来)
+- 已删:「|隔夜缺口|>11% 除权剔除」——按持有结局丢样本属翻看答案
+模拟仓:3 槽位,B 类优先,退出日确认盈亏;当月 -5% 熔断停开。
+盘中实盘工具(live_scan)不受本口径影响,其确认逻辑本就只用当时信息。
 """
 
 from __future__ import annotations
@@ -205,15 +206,19 @@ def build_events() -> pd.DataFrame:
 
     c = contracts
     bars["trigger_price"] = bars["close_price_tm1"] * (1 + c.TRIGGER_PCT)
+    # 触发是盘中事实:当日最高价曾达到 +8%(在哪一刻触及不需要知道)
     bars["triggered"] = bars["high_price"] >= bars["trigger_price"] - 1e-9
-    bars["entry"] = np.where(bars["open_price"] > bars["trigger_price"],
-                             bars["open_price"], bars["trigger_price"]) * (1 + c.ENTRY_SLIPPAGE)
+    # v7.0 无未来函数口径:入场=当日尾盘(全日量比确认后)按收盘价成交。
+    # 决策时刻=14:55 附近,此时 全日量比/最高价触及/高开 均为既成事实;
+    # 原「触发价×滑点」入场依赖预知收盘量比,已在 v7.0 移除。
+    bars["entry"] = bars["close_price"] * (1 + c.ENTRY_SLIPPAGE)
     bars["sealed"] = bars["lu_T"]
     bars["cap_yi"] = bars.vt_symbol.map(cap_map)
     bars["gap_open"] = bars["open_price"] / bars["close_price_tm1"] - 1
     bars["dist_ma20"] = bars["close_price_tm1"] / bars["ma20_tm1"] - 1
     limit_px = (bars["close_price_tm1"] * 1.1 + 1e-9).round(2)
-    bars["oneword_strict"] = bars["low_price"] >= limit_px * 0.999
+    # 一字板改用开盘即顶格近似(盘时可判):原全天 low>=涨停价 也属未来信息
+    bars["oneword_strict"] = bars["open_price"] >= limit_px * 0.999
 
     # 近5日(T-5..T-1)最大单日涨幅%(v6.2 A 类池条件;窗口不满为 NaN→剔除)
     bars["maxchg5_tm1"] = g["change_pct"].transform(
@@ -272,11 +277,8 @@ def build_events() -> pd.DataFrame:
         exit_date = np.where((k == kk).values, ev[f"date_p{kk}"].values, exit_date)
     exit_date = np.where(~ev["sealed"] | (k < 2), ev["date_p1"].values, exit_date)
     ev["exit_date"] = pd.to_datetime(pd.Series(exit_date, index=ev.index))
-    disc = (ev["open_p1"] / ev["close_price"] - 1).abs() > 0.11
-    for kk in range(2, 7):
-        disc |= (pd.Series(ev[f"open_p{kk}"].values / ev[f"close_p{kk-1}"].values - 1,
-                           index=ev.index).abs() > 0.11)
-    ev = ev[~disc.fillna(False)]
+    # v7.0 移除「|隔夜缺口|>11% 除权伪触发」事后剔除:它按持有结局丢弃样本,
+    # 属于翻看答案式前视。除权污染改为已知风险(日线未复权),见 RISK_NOTES。
     ev["month"] = ev["trade_date"].dt.to_period("M").astype(str)
     ev["is_train"] = ev.trade_date < TRAIN_END
     ev["name"] = ev.vt_symbol.map(name_map)
@@ -298,9 +300,11 @@ def run_backtest() -> dict[str, object]:
             "to": ev.trade_date.max().date().isoformat(),
             "months": int(ev["month"].nunique()),
         },
-        "caliber": ("日线口径:最高价触及+8%即算触发(无法回放分钟收住);"
-                    "首板全日量比<1.5为收盘定型口径(含前视上限,盘中实盘用触及量比<1.0);"
-                    "高开≥8%不做;含0.5%滑点;剔除真一字与除权伪触发(|隔夜缺口|>11%)"),
+        "caliber": ("v7.0 无未来函数口径:池=T-1底盘形态;事件=当日盘中曾触及+8%;"
+                    "入场=当日尾盘确认全日量比<1.5后按收盘价×1.005接货(决策信息在确认时点"
+                    "全部可得,非事后挑选);一字板按开盘即顶格判定;高开≥8%不做;"
+                    "卖出:未封/未连板次日开盘,连板断板日开盘。日线未复权,"
+                    "除权污染为已知残留风险(旧11%缺口剔除属前视已废)。"),
         "summary": _stats(ev),
         "chassis_a_subset": _stats(ev[ev["chassis_tag"].isin(["A", "AB"])]),
         "chassis_b_subset": _stats(ev[ev["chassis_tag"].isin(["B", "AB"])]),
