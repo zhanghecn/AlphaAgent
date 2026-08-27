@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as dt_time, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,90 @@ from alphaagent.server.services.qianlong import contracts
 logger = logging.getLogger(__name__)
 TRAIN_END = pd.Timestamp("2025-07-01")
 REPLAY_START = "2023-01-01"
+MIN_FRESH_SPOT_SYMBOLS = 3000  # 与 live_scan 相同的新鲜度门槛,防节假日假信号
+SPOT_VOLUME_PER_LOT = 100.0    # 现货快照 volume=股 → 日线库单位为手
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _append_spot_synthetic_today(
+    bars: pd.DataFrame,
+    *,
+    main_symbols: set[str],
+    today: date,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """补一根「今日开盘」合成尾行,让昨日信号当日即可定版(不入库)。
+
+    昨日入场信号的退出价 = 今日开盘价;该价格 09:25 集合竞价即定格且
+    不再变化(无未来函数),但日线表要 EOD 才写入。这里从现货快照取今开
+    拼出最后一根 bar,使 date_p1/open_p1 在日间重算时依然存在——昨日
+    的交割单无需等到晚间。快照新鲜度以「拉取发生于当日 A 股交易时段」
+    为锚(新浪 ticktime 在午休/盘后可能只含时间不带日期,行级日期不可
+    靠);非交易时段、EOD 后已有今日日线、或源异常时静默跳过,回测退回
+    原口径。今日合成行自身因缺少 T+1 数据不会成为新事件(dropna(ret)
+    剔除),不影响任何历史值。
+    """
+
+    now = now or datetime.now(SHANGHAI_TZ)
+    latest_date = pd.to_datetime(bars["trade_date"]).max()
+    if (
+        latest_date is None
+        or latest_date.date() >= today
+        or now.weekday() >= 5
+        or now.date() != today
+        or not (dt_time(9, 30) <= now.timetz().replace(tzinfo=None) <= dt_time(15, 1))
+    ):
+        return bars
+    try:
+        from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+
+        snapshot = AkShareAdapter().all_stock_ohlcv_spot()
+        items = [it for it in (snapshot.get("items") or []) if isinstance(it, dict)]
+        fresh = [
+            it for it in items
+            if str(it.get("vt_symbol") or "") in main_symbols
+            and (_number(it.get("volume")) or 0.0) > 0
+            and _open_of(it) is not None
+        ]
+    except Exception as exc:  # noqa: BLE001 — 预览增强失败不得拖垮回测主流程
+        logger.warning("spot synthetic tail skipped: %s", exc)
+        return bars
+    if len(fresh) < MIN_FRESH_SPOT_SYMBOLS:
+        logger.info("spot synthetic tail skipped: only %d fresh rows", len(fresh))
+        return bars
+    tails = [
+        {
+            "vt_symbol": str(it["vt_symbol"]),
+            "trade_date": today,
+            "open_price": open_price,
+            "high_price": open_price,
+            "low_price": open_price,
+            "close_price": open_price,
+            "volume": (_number(it.get("volume")) or 0.0) / SPOT_VOLUME_PER_LOT,
+            "turnover_rate": None,
+            "change_pct": None,
+        }
+        for it in fresh
+        for open_price in (_open_of(it),)
+    ]
+    logger.info("spot synthetic tail appended: %d rows for %s", len(tails), today)
+    return pd.concat([bars, pd.DataFrame(tails)], ignore_index=True)
+
+
+def _open_of(item: dict[str, object]) -> float | None:
+    try:
+        value = float(item.get("open_price"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _number(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number is not None and math.isfinite(number) else None
 
 
 def build_events() -> pd.DataFrame:
@@ -64,6 +149,8 @@ def build_events() -> pd.DataFrame:
     name_map = main.set_index("vt_symbol")["name"].to_dict()
 
     bars = bars[bars.vt_symbol.isin(main_syms)].copy()
+    bars = _append_spot_synthetic_today(
+        bars, main_symbols=main_syms, today=date.today())
     bars["trade_date"] = pd.to_datetime(bars["trade_date"])
     bars.sort_values(["vt_symbol", "trade_date"], inplace=True)
     lu = lu[lu.vt_symbol.isin(main_syms)].copy()
