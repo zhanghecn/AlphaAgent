@@ -4107,6 +4107,97 @@ def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
     assert not triggered
 
 
+def _backtest_schedule_row(cron: str) -> dict[str, Any]:
+    return {
+        "id": "qianlong_backtest_2235",
+        "cron": cron,
+        "enabled": True,
+        "action": "sync",
+        "job_ids": ["qianlong_backtest_rerun"],
+        "concurrency": 1,
+        "last_started_at": None,
+    }
+
+
+def test_scheduler_catches_missed_cron_minute_on_next_pass(monkeypatch) -> None:
+    """上一轮 tick 被批次阻塞跨过 cron 分钟后，恢复的首个 tick 立即补跑。
+
+    回归背景：22:30 低吸回测批同步占用调度线程 27 分钟，导致
+    22:35 潜龙回测档从未触发过（cron 只匹配精确分钟，错过即整晚丢失）。
+    """
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "x"})
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [_backtest_schedule_row("35 22 * * 1-5")],
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 8, 26, 22, 58, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    # 上次调度通过 = 22:31（随后阻塞到 22:58），窗口内含被错过的 22:35。
+    svc._run_scheduled_jobs(window_start=dt.datetime(2026, 8, 26, 22, 31, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    assert triggered, "expected the missed cron minute to be caught up"
+    assert triggered[0]["schedule_id"] == "qianlong_backtest_2235"
+    assert triggered[0]["source"] == "schedule"
+
+
+def test_scheduler_window_skips_before_window_start(monkeypatch) -> None:
+    """cron 时刻早于上次调度通过时刻时不重复补跑。"""
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "x"})
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [_backtest_schedule_row("35 22 * * 1-5")],
+    )
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 8, 26, 23, 10, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    # 上次通过在 22:40：22:35 已在其之前（例如已被补跑过），不应再次触发。
+    svc._run_scheduled_jobs(window_start=dt.datetime(2026, 8, 26, 22, 40, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    assert not triggered
+
+
+def test_scheduler_cold_start_catchup_window_is_bounded(monkeypatch) -> None:
+    """冷启动首轮回溯上限为 90 分钟：更早错过的档不由本进程启动时追溯。"""
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "x"})
+    monkeypatch.setattr(
+        svc,
+        "_load_batch_schedules",
+        lambda: [{"id": "auction_0926", "cron": "26 9 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_auction_snapshots"], "concurrency": 1, "last_started_at": None}],
+    )
+    # 冷启动无上次通过记录 → 从 now 往前最多看 90 分钟（09:30 起），09:26 在线外。
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 8, 27, 11, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    svc._run_scheduled_jobs()
+
+    assert not triggered
+
+
+def test_scheduler_does_not_refire_recently_started_schedule(monkeypatch) -> None:
+    """1800 秒节流在窗口机制下依然生效，防止错过补偿连环重复触发。"""
+    import datetime as dt
+
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "x"})
+    row = _backtest_schedule_row("35 22 * * 1-5")
+    # _recently_started 读真实 UTC 时钟:相对 now 构造 10 分钟前的时间戳。
+    row["last_started_at"] = datetime.now(timezone.utc) - timedelta(seconds=600)
+    monkeypatch.setattr(svc, "_load_batch_schedules", lambda: [row])
+    monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 8, 26, 23, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    svc._run_scheduled_jobs(window_start=dt.datetime(2026, 8, 26, 22, 31, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+
+    assert not triggered
+
 
 def test_due_low_suction_scan_runs_in_a_background_slot(monkeypatch) -> None:
     import threading

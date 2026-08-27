@@ -70,6 +70,9 @@ INTERRUPTED_SCHEDULE_RECOVERY_WAIT_SECONDS = 6 * 60 * 60
 INTERRUPTED_SCHEDULE_RECOVERY_POLL_SECONDS = 5
 SCHEDULER_TICK_SECONDS = 2
 SCHEDULER_IDLE_TICK_SECONDS = 30
+# 冷启动(进程重启)首轮回溯上限:只补最近 90 分钟内被错过的 cron 分钟,
+# 避免停机一夜后首个 tick 追溯整晚的档。
+SCHEDULER_COLD_START_CATCHUP_MINUTES = 90
 DEFAULT_SYNC_CONCURRENCY = 2
 # 单只股/板块同步的超时上限：AkShare 正常请求数秒，超时则跳过该 item（防 hang 拖死整批）
 SYNC_PER_ITEM_TIMEOUT_SECONDS = 60.0
@@ -2646,6 +2649,7 @@ JOB_RUNNERS: dict[str, str] = {
 # ─── Global state ────────────────────────────────────────────────────────
 
 _scheduler_thread: threading.Thread | None = None
+_last_scheduler_pass_at: datetime | None = None
 _scheduler_stop = threading.Event()
 _low_suction_schedule_lock = threading.Lock()
 _low_suction_schedule_running = False
@@ -4868,11 +4872,21 @@ def _interrupted_schedule_recovery_due(
 
 def _scheduler_loop() -> None:
     """Main scheduler loop with a fast tick for time-sensitive intraday scans."""
+    global _last_scheduler_pass_at
     while not _scheduler_stop.is_set():
+        now_china = _now_china()
+        window_start = (
+            _last_scheduler_pass_at
+            if _last_scheduler_pass_at is not None
+            else now_china - timedelta(minutes=SCHEDULER_COLD_START_CATCHUP_MINUTES)
+        )
         try:
-            _run_scheduled_jobs()
+            _run_scheduled_jobs(window_start=window_start)
         except Exception as exc:
             logger.error("Scheduler tick error: %s", exc)
+        finally:
+            # 记录本轮通过时刻,下一轮用它回溯被阻塞/迟到 tick 错过的 cron 分钟。
+            _last_scheduler_pass_at = _now_china()
         _scheduler_stop.wait(timeout=_scheduler_tick_seconds(_now_china()))
 
 
@@ -5019,9 +5033,17 @@ def _start_low_suction_live_scan_warmup() -> bool:
     return False
 
 
-def _run_scheduled_jobs() -> None:
-    """Trigger schedules whose cron matches or whose cron window was missed."""
+def _run_scheduled_jobs(window_start: datetime | None = None) -> None:
+    """Trigger schedules whose cron fell due inside the missed-tick window.
+
+    批次在调度线程里同步执行,长批(EOD 主链/回测重算)会把后续 tick 压住;
+    cron 触发因此按窗口判定:(window_start, now] 内存在命中分钟即触发,
+    阻塞恢复后的首个 tick 会立即按计划时刻顺序补跑被错过的档。
+    """
     now_china = _now_china()
+    if window_start is None:
+        # 直接调用方(测试/诊断)不关心错过窗口:按冷启动回溯上限处理。
+        window_start = now_china - timedelta(minutes=SCHEDULER_COLD_START_CATCHUP_MINUTES)
     for row in _load_batch_schedules():
         cron = row.get("cron")
         if not cron:
@@ -5043,13 +5065,29 @@ def _run_scheduled_jobs() -> None:
         if recently_started:
             continue
         try:
-            if _cron_matches(cron, now_china) or _schedule_catchup_due(row, now_china):
+            if _cron_due_in_window(str(cron), window_start, now_china):
                 if action == "low_suction_live_scan":
                     _start_low_suction_live_scan_schedule(row)
                 else:
                     _run_schedule_action(row)
         except Exception:
             pass
+
+
+def _cron_due_in_window(cron_expr: str, window_start: datetime, now: datetime) -> bool:
+    """Return True if a cron trigger instant falls inside (window_start, now].
+
+    逐分钟枚举复用 _cron_matches,避免再造区间 cron 解析器;窗口长度即当次
+    调度阻塞时长(分钟级粒度足够),右端点含当前分钟以兼容旧的即时匹配语义。
+    """
+    if window_start >= now:
+        return _cron_matches(cron_expr, now)
+    minute = (window_start + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    while minute <= now:
+        if _cron_matches(cron_expr, minute):
+            return True
+        minute += timedelta(minutes=1)
+    return False
 
 
 def _request_low_suction_tail_final_scan(
@@ -5065,25 +5103,6 @@ def _request_low_suction_tail_final_scan(
         force_tail_final=True,
         tail_final_date=now_china.date(),
     )
-
-
-def _schedule_catchup_due(row: dict[str, Any], now_china: datetime) -> bool:
-    """Return whether a default schedule should run after a missed cron window."""
-
-    schedule_id = str(row.get("id") or "")
-    if schedule_id not in {CURRENT_EOD_SCHEDULE_ID, "eod_finalize_2130"}:
-        return False
-
-    scheduled_at = _cron_scheduled_at_today(str(row.get("cron") or ""), now_china)
-    if scheduled_at is None or now_china < scheduled_at:
-        return False
-    last_started = _as_aware_datetime(row.get("last_started_at"))
-    if last_started is None:
-        return True
-    if last_started.astimezone(scheduled_at.tzinfo) < scheduled_at:
-        return True
-
-    return False
 
 
 def _run_schedule_action(
