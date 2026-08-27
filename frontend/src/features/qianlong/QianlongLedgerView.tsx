@@ -31,15 +31,18 @@ export function QianlongLedgerView({
 
   const rows = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
-    return ledgerDays.flatMap((day) =>
-      day.trades
-        .filter((t) =>
-          !kw
-          || t.vt_symbol.toLowerCase().includes(kw)
-          || (t.name ?? "").toLowerCase().includes(kw),
-        )
-        .map((t) => ({ day, trade: t })),
-    );
+    const merged: { day: QianlongLedgerDay; trade: QianlongLedgerTrade | null }[] = [];
+    for (const day of ledgerDays) {
+      const matches = day.trades.filter((t) =>
+        !kw
+        || t.vt_symbol.toLowerCase().includes(kw)
+        || (t.name ?? "").toLowerCase().includes(kw),
+      );
+      // 零开张日(建池但无信号触及)渲染为占位行,证明当日已覆盖
+      if (!matches.length && !kw) merged.push({ day, trade: null });
+      else for (const t of matches) merged.push({ day, trade: t });
+    }
+    return merged;
   }, [ledgerDays, keyword]);
 
   const summary = useMemo(() => {
@@ -143,10 +146,22 @@ export function QianlongLedgerView({
               </tr>
             </thead>
             <tbody className="divide-y">
-              {rows.map(({ day, trade }) => (
-                <LedgerRow key={`${day.trade_date}-${trade.vt_symbol}`}
-                  day={day.trade_date} trade={trade} />
-              ))}
+              {rows.map(({ day, trade }) =>
+                trade === null ? (
+                  <tr key={`zero-${day.trade_date}`}>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-xs tabular-nums">
+                      <div>{day.trade_date.slice(5)}</div>
+                      <div className="text-muted-foreground">{WEEKDAYS[new Date(`${day.trade_date}T00:00:00`).getDay()]}</div>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-muted-foreground" colSpan={8}>
+                      建池但当日无信号触及 +8%（未开张）
+                    </td>
+                  </tr>
+                ) : (
+                  <LedgerRow key={`${day.trade_date}-${trade.vt_symbol}`}
+                    day={day.trade_date} trade={trade} />
+                ),
+              )}
             </tbody>
           </table>
         </div>

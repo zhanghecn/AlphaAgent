@@ -96,6 +96,20 @@ def load_pool(trade_date: date) -> list[dict[str, object]]:
     return [dict(r) for r in rows]
 
 
+def load_pool_exec_dates() -> list[date]:
+    """全部「曾建过池」的执行日(升序)。
+
+    交割单用它补「建池但零开张」的日子——池存在而当日无信号触及,
+    是策略的正常状态,入册以证明覆盖完整。
+    """
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        rows = session.execute(
+            select(schema.qianlong_pool_entries.c.trade_date).distinct()
+        ).scalars().all()
+    return sorted(rows)
+
+
 def latest_pool_date() -> date | None:
     schema.ensure_schema_once(get_engine())
     with session_scope() as session:

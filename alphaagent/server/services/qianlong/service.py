@@ -279,6 +279,12 @@ def get_ledger(month: str | None = None) -> dict[str, object]:
     selected = month or (months[0]["month"] if months else None)
     if selected:
         days = [d for d in days if str(d.get("trade_date") or "").startswith(selected)]
+    try:
+        pool_dates = [d.isoformat() for d in repository.load_pool_exec_dates()]
+    except Exception as exc:  # noqa: BLE001 — 补零失败退回纯成交视图
+        logger.warning("load pool exec dates failed: %s", exc)
+        pool_dates = []
+    days = _merge_zero_trade_days(days, pool_dates, month_prefix=selected)
     return {
         "status": "ok",
         "is_backtest": True,
@@ -288,6 +294,29 @@ def get_ledger(month: str | None = None) -> dict[str, object]:
         "months": months,
         "ledger_days": days,
     }
+
+
+def _merge_zero_trade_days(
+    days: list[dict[str, object]],
+    pool_exec_dates: list[str],
+    *,
+    month_prefix: str | None,
+) -> list[dict[str, object]]:
+    """「建过池但零开张」的交易日以 0 笔入册(最新在前)。
+
+    潜龙首板多数日子不触发,空仓日是策略叙事的一部分;入册让使用者能
+    确认系统覆盖到该日(如 2026-08-26 全池零触发),而非数据缺失。
+    只补已建池的执行日,休市日自然缺席;月度汇总在合并前已完成,
+    零行不影响任何统计。
+    """
+    existing = {str(d.get("trade_date")) for d in days}
+    zeros = [
+        {"trade_date": d, "trades": [], "count": 0, "win": 0, "avg_ret_pct": None}
+        for d in pool_exec_dates
+        if d not in existing
+        and (month_prefix is None or d.startswith(month_prefix))
+    ]
+    return sorted([*days, *zeros], key=lambda item: str(item["trade_date"]), reverse=True)
 
 
 def _month_summaries(days: list[dict[str, object]]) -> list[dict[str, object]]:
