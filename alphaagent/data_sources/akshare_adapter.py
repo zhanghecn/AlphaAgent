@@ -48,6 +48,8 @@ FULL_MARKET_PAGE_SIZE = 200
 FULL_MARKET_MAX_WORKERS = 6
 FULL_MARKET_OHLCV_SPOT_PAGE_SIZE = 100
 FULL_MARKET_OHLCV_SPOT_MAX_WORKERS = 6
+# 东财 clist 接口分页上限(降级源用满页以减少往返)
+EASTMONEY_OHLCV_SPOT_PAGE_SIZE = 200
 FULL_MARKET_OHLCV_SPOT_MIN_COVERAGE_RATIO = 0.99
 FULL_MARKET_OHLCV_SPOT_REQUEST_TIMEOUT_SECONDS = 20
 FULL_MARKET_OHLCV_SPOT_FETCH_TIMEOUT_SECONDS = 90
@@ -403,14 +405,38 @@ class AkShareAdapter:
         *,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
-        """Return a complete Sina A-share spot snapshot with intraday OHLCV."""
+        """Return a complete Sina A-share spot snapshot with intraday OHLCV.
+
+        新浪通道被封(HTTP 456 等)时自动降级到东财 clist 快照;
+        出口 schema 与单位口径(成交量=股)保持一致,消费方无需感知来源。
+        """
 
         workers = min(
             max(int(max_workers), 1),
             FULL_MARKET_OHLCV_SPOT_MAX_WORKERS,
         )
-        cache_key = f"all_stock_ohlcv_spot:{workers}"
-        loader = lambda: self._all_stock_ohlcv_spot_uncached(max_workers=workers)
+        try:
+            return self._cached_ohlcv_spot(
+                f"all_stock_ohlcv_spot:{workers}",
+                force_refresh,
+                lambda: self._all_stock_ohlcv_spot_uncached(max_workers=workers),
+            )
+        except AkShareSourceError as exc:
+            logger.warning(
+                "sina ohlcv spot unavailable (%s); falling back to eastmoney", exc)
+            return self._cached_ohlcv_spot(
+                f"all_stock_ohlcv_spot:eastmoney:{workers}",
+                force_refresh,
+                lambda: self._all_stock_ohlcv_spot_eastmoney_uncached(
+                    max_workers=workers),
+            )
+
+    def _cached_ohlcv_spot(
+        self,
+        cache_key: str,
+        force_refresh: bool,
+        loader: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
         if force_refresh:
             return _FULL_MARKET_OHLCV_SPOT_CACHE.refresh(
                 cache_key,
@@ -422,6 +448,54 @@ class AkShareAdapter:
             FULL_MARKET_TTL_SECONDS,
             loader,
         )
+
+    def _all_stock_ohlcv_spot_eastmoney_uncached(
+        self,
+        *,
+        max_workers: int,
+    ) -> dict[str, Any]:
+        """东财 clist 全市场快照(新浪被禁时的降级源)。
+
+        分页拉取后归一成新浪版出口 schema:volume 手→股(×100,整数无损),
+        quote_observed_at → trade_time(上海时区完整日期时间)。
+        """
+
+        def fetch_page(page: int) -> dict[str, Any]:
+            payload = _eastmoney_all_a_page(
+                page=page,
+                page_size=EASTMONEY_OHLCV_SPOT_PAGE_SIZE,
+                sort="change_pct",
+            )
+            if not _eastmoney_stock_page_is_fresh(payload):
+                raise AkShareSourceError("EastMoney ohlcv fallback page is stale")
+            return payload
+
+        first = fetch_page(1)
+        total = first.get("total")
+        rows: dict[str, dict[str, Any]] = {}
+        for raw in first["items"]:
+            item = _eastmoney_ohlcv_row_to_spot(raw)
+            if item:
+                rows[item["vt_symbol"]] = item
+        if total and int(total) > len(first["items"]):
+            expected_pages = math.ceil(int(total) / EASTMONEY_OHLCV_SPOT_PAGE_SIZE)
+            with ThreadPoolExecutor(
+                max_workers=min(max(int(max_workers), 1), FULL_MARKET_OHLCV_SPOT_MAX_WORKERS),
+                thread_name_prefix="eastmoney-ohlcv-spot",
+            ) as executor:
+                for payload in executor.map(fetch_page, range(2, expected_pages + 1)):
+                    for raw in payload["items"]:
+                        item = _eastmoney_ohlcv_row_to_spot(raw)
+                        if item:
+                            rows[item["vt_symbol"]] = item
+        captured_at = datetime.now(timezone.utc)
+        return {
+            "trade_date": captured_at.astimezone(SHANGHAI).date().isoformat(),
+            "updated_at": captured_at.isoformat(),
+            "items": list(rows.values()),
+            "total": len(rows),
+            "source": "eastmoney.clist.ohlcv_fallback",
+        }
 
     def _all_stock_ohlcv_spot_uncached(
         self,
@@ -2409,6 +2483,43 @@ def _format_tencent_trade_time(value: Any) -> str | None:
     if len(text) < 14:
         return text or None
     return f"{text[:4]}-{text[4:6]}-{text[6:8]} {text[8:10]}:{text[10:12]}:{text[12:14]}"
+
+
+def _eastmoney_ohlcv_row_to_spot(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """东财研究页单行 → 新浪 ohlcv spot 出口口径。
+
+    volume 手→股(×100,手为整数故无损),quote_observed_at → 上海时区
+    完整日期时间(与新浪 ticktime 同格式,供消费方做当日新鲜度判定)。
+    """
+
+    vt_symbol = str(row.get("vt_symbol") or "")
+    last_price = _number(row.get("last_price"))
+    volume_lots = _number(row.get("volume"))
+    observed_at = row.get("quote_observed_at")
+    try:
+        trade_time = (
+            datetime.fromisoformat(str(observed_at))
+            .astimezone(SHANGHAI)
+            .strftime("%Y-%m-%d %H:%M:%S")
+        )
+    except (TypeError, ValueError):
+        return None
+    if not vt_symbol or last_price is None or not trade_time:
+        return None
+    return {
+        "symbol": str(row.get("symbol") or ""),
+        "exchange": str(row.get("exchange") or ""),
+        "vt_symbol": vt_symbol,
+        "name": str(row.get("name") or ""),
+        "last_price": last_price,
+        "open_price": _number(row.get("open_price")),
+        "high_price": _number(row.get("high_price")),
+        "low_price": _number(row.get("low_price")),
+        "volume": volume_lots * 100 if volume_lots else 0.0,
+        "turnover": _number(row.get("turnover")),
+        "trade_time": trade_time,
+        "source": "eastmoney.clist.ohlcv_fallback",
+    }
 
 
 def _eastmoney_stock_kline(

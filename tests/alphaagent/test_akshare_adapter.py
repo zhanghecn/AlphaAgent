@@ -706,6 +706,105 @@ def test_all_stock_ohlcv_spot_rejects_unavailable_sina_count(monkeypatch) -> Non
         adapter_module.AkShareAdapter()._all_stock_ohlcv_spot_uncached(max_workers=1)
 
 
+def test_all_stock_ohlcv_spot_falls_back_to_eastmoney_when_sina_blocked(
+    monkeypatch,
+) -> None:
+    """新浪被反爬封禁(HTTP 456)时全市场快照自动降级到东财 clist 通道。
+
+    出口 schema 与新浪版对齐:volume 保持「股」口径(东财为手,×100 归一),
+    trade_time 为完整日期时间以支撑消费方的新鲜度判定。
+    """
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    adapter_module._FULL_MARKET_OHLCV_SPOT_CACHE.clear()
+
+    def blocked_sina_count(_node):
+        raise AkShareSourceError("Sina A-share stock count unavailable")
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_sina_sector_member_count",
+        blocked_sina_count,
+    )
+
+    def make_row(index: int) -> dict[str, object]:
+        exchange = "SSE" if index % 2 == 0 else "SZSE"
+        return {
+            "symbol": f"{600000 + index}",
+            "exchange": exchange,
+            "vt_symbol": f"{600000 + index}.{exchange}",
+            "name": f"股票{index}",
+            "last_price": 10.5 + index / 100,
+            "open_price": 10.2,
+            "high_price": 10.7,
+            "low_price": 10.1,
+            # 东财快照 volume 单位为「手」
+            "volume": 63955 + index,
+            "turnover": 96069391.67 + index,
+            "quote_observed_at": "2026-08-27T03:29:03+00:00",
+        }
+
+    rows = [make_row(index) for index in range(250)]
+    pages = {page: rows[(page - 1) * 200 : page * 200] for page in (1, 2)}
+    requested_pages: list[int] = []
+
+    def fake_page(page: int, page_size: int, sort: str, order: str = "desc"):
+        requested_pages.append(page)
+        return {
+            "items": pages[page],
+            "page": page,
+            "page_size": page_size,
+            "total": len(rows),
+            "source": "eastmoney.push2delay.clist",
+            "updated_at": "2026-08-27T03:29:05+00:00",
+        }
+
+    monkeypatch.setattr(adapter_module, "_eastmoney_all_a_page", fake_page)
+
+    payload = adapter_module.AkShareAdapter().all_stock_ohlcv_spot(max_workers=2)
+
+    assert sorted(requested_pages) == [1, 2]
+    assert payload["source"] == "eastmoney.clist.ohlcv_fallback"
+    assert payload["total"] == 250
+    items = {item["vt_symbol"]: item for item in payload["items"]}
+    assert set(items) == {f"{600000 + index}.{'SSE' if index % 2 == 0 else 'SZSE'}" for index in range(250)}
+    row = items["600000.SSE"]
+    assert row["last_price"] == 10.5
+    assert row["open_price"] == 10.2
+    assert row["trade_time"] == "2026-08-27 11:29:03"
+    # 手 → 股归一(×100),消费方的 ÷100 换算保持不变
+    assert row["volume"] == float(63955 * 100)
+
+
+def test_all_stock_ohlcv_spot_eastmoney_fallback_rejects_stale_page(monkeypatch) -> None:
+    """降级页面观测时间过期(非交易时段外仍陈旧)时显式失败,不产出假快照。"""
+    import alphaagent.data_sources.akshare_adapter as adapter_module
+
+    adapter_module._FULL_MARKET_OHLCV_SPOT_CACHE.clear()
+
+    def blocked_sina_count(_node):
+        raise AkShareSourceError("Sina A-share stock count unavailable")
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_sina_sector_member_count",
+        blocked_sina_count,
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "_eastmoney_all_a_page",
+        lambda *_args, **_kwargs: {"items": [], "total": 0},
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "_eastmoney_stock_page_is_fresh",
+        lambda _payload: False,
+    )
+
+    with pytest.raises(AkShareSourceError, match="stale"):
+        adapter_module.AkShareAdapter().all_stock_ohlcv_spot(max_workers=1)
+
+
 def test_all_stock_ohlcv_spot_force_refresh_bypasses_cached_snapshot(monkeypatch) -> None:
     import alphaagent.data_sources.akshare_adapter as adapter_module
 
