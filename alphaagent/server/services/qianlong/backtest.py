@@ -1,15 +1,16 @@
-"""潜龙首板回测引擎(v7.0 无未来函数版):日线口径全量回放 + 三槽模拟仓 + 物化报告。
+"""潜龙首板回测引擎(v8.0 纯净版):日线口径全量回放 + 三槽模拟仓 + 物化报告。
 
-v7.0 方法论修正(2026-08-27):移除全部前视。
+v8.0(2026-08-27):买入决策彻底移除收盘信息——「收盘量比<1.5」过滤删除,
+入场=盘中触及价×1.005。数字比历史版本难看是特性:先暴露真实期望,
+优化(分钟收住确认/时段分层)为后续课题。
 - 池 = 底盘形态 A|B,全部由 T-1 收盘数据构成(无未来)
 - 触发 = 当日最高价曾达到 昨收×1.08(盘中事实);高开≥8% 用开盘价判(盘时可判)
-- 一字板 = 开盘即顶格近似(原全天最低价口径属未来信息,已废)
-- 确认与买入 = 当日尾盘:全日量比 <1.5 在 14:55 已可确证,以收盘价×1.005 成交
-  (旧「触发价×1.005」+收盘量比过滤组合在决策时序上不成立,已废除)
+- 一字板 = 开盘即顶格近似(盘时可判)
+- 入场 = 触及价 ×1.005(不使用任何当日收盘后才知的信息)
 - 卖出:未封板/未连板 → 次日开盘;连板 → 断板日开盘(逐日演化,无未来)
-- 已删:「|隔夜缺口|>11% 除权剔除」——按持有结局丢样本属翻看答案
+- 已删:收盘量比准入(未来函数)、|隔夜缺口|>11% 除权剔除(按结局丢样本)、
+  全天最低价一字判定(未来信息)
 模拟仓:3 槽位,B 类优先,退出日确认盈亏;当月 -5% 熔断停开。
-盘中实盘工具(live_scan)不受本口径影响,其确认逻辑本就只用当时信息。
 """
 
 from __future__ import annotations
@@ -208,10 +209,10 @@ def build_events() -> pd.DataFrame:
     bars["trigger_price"] = bars["close_price_tm1"] * (1 + c.TRIGGER_PCT)
     # 触发是盘中事实:当日最高价曾达到 +8%(在哪一刻触及不需要知道)
     bars["triggered"] = bars["high_price"] >= bars["trigger_price"] - 1e-9
-    # v7.0 无未来函数口径:入场=当日尾盘(全日量比确认后)按收盘价成交。
-    # 决策时刻=14:55 附近,此时 全日量比/最高价触及/高开 均为既成事实;
-    # 原「触发价×滑点」入场依赖预知收盘量比,已在 v7.0 移除。
-    bars["entry"] = bars["close_price"] * (1 + c.ENTRY_SLIPPAGE)
+    # v8.0 入场=盘中触及价(冲高时刻可成交的价格),买入决策不使用任何
+    # 当日收盘后才知的信息;高开分支为防御(GAP_SKIP 已剔高开≥8%)。
+    bars["entry"] = np.where(bars["open_price"] > bars["trigger_price"],
+                             bars["open_price"], bars["trigger_price"]) * (1 + c.ENTRY_SLIPPAGE)
     bars["sealed"] = bars["lu_T"]
     bars["cap_yi"] = bars.vt_symbol.map(cap_map)
     bars["gap_open"] = bars["open_price"] / bars["close_price_tm1"] - 1
@@ -259,8 +260,10 @@ def build_events() -> pd.DataFrame:
         bars["vt_symbol"], sort=False).ffill()
     bars["lastbig7_off_tm1"] = (day_no - last_big_day).groupby(
         bars["vt_symbol"], sort=False).shift(1)
-    pool = ((~bars["lu_tm1"]) & (cond_a | cond_b)
-            & (bars["vol_ratio"] < c.BACKTEST_VOL_RATIO_MAX))
+    # v8.0:删除收盘量比过滤——收盘信息不得参与入场决策(未来函数)。
+    # 盘中量比读数对单笔收益无判别力(分钟实验 rho≈0),优化(分钟收住确认/时段)
+    # 属后续课题;当前口径先如实暴露无过滤的原始期望。
+    pool = (~bars["lu_tm1"]) & (cond_a | cond_b)
     ev = bars[(bars.trade_date >= REPLAY_START) & bars["triggered"] & pool
               & ~bars["oneword_strict"]
               & (bars["gap_open"] < c.GAP_SKIP)].copy()
@@ -300,11 +303,12 @@ def run_backtest() -> dict[str, object]:
             "to": ev.trade_date.max().date().isoformat(),
             "months": int(ev["month"].nunique()),
         },
-        "caliber": ("v7.0 无未来函数口径:池=T-1底盘形态;事件=当日盘中曾触及+8%;"
-                    "入场=当日尾盘确认全日量比<1.5后按收盘价×1.005接货(决策信息在确认时点"
-                    "全部可得,非事后挑选);一字板按开盘即顶格判定;高开≥8%不做;"
-                    "卖出:未封/未连板次日开盘,连板断板日开盘。日线未复权,"
-                    "除权污染为已知残留风险(旧11%缺口剔除属前视已废)。"),
+        "caliber": ("v8.0 纯净口径:池=T-1底盘形态;事件=当日盘中曾触及+8%;"
+                    "入场=触及价×1.005,买入决策不使用任何当日收盘后才知的信息"
+                    "(收盘量比准入已作为未来函数删除,数字如实偏弱);"
+                    "一字板按开盘即顶格判定;高开≥8%不做;"
+                    "卖出:未封/未连板次日开盘,连板断板日开盘(逐日决策)。"
+                    "日线未复权,除权污染为已知残留风险。"),
         "summary": _stats(ev),
         "chassis_a_subset": _stats(ev[ev["chassis_tag"].isin(["A", "AB"])]),
         "chassis_b_subset": _stats(ev[ev["chassis_tag"].isin(["B", "AB"])]),
