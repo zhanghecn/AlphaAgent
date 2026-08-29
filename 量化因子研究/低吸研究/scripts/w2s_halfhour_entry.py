@@ -37,6 +37,13 @@ DSN = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://
 BUCKETS = ["09:30-10:00", "10:00-10:30", "10:30-11:00", "11:00-11:30",
            "13:00-13:30", "13:30-14:00", "14:00-14:30", "14:30-15:00"]
 
+BUCKETS5 = [f"09:{m:02d}-{f'09:{m+5:02d}' if m + 5 < 60 else '10:00'}" for m in range(30, 60, 5)] + \
+           [f"10:{m:02d}-10:{m+5:02d}" for m in range(0, 30, 5)]   # 5 分钟桶,只覆盖 09:30~10:30
+
+# 竞价档(开盘 gap);A1/A2 产品门禁 0~4%,B 无门禁全域
+GAP_BINS = [-99, 0, 1, 2, 3, 4, 99]
+GAP_LABELS = ["低开<0%", "0~1%", "1~2%", "2~3%", "3~4%", "高开≥4%"]
+
 
 def bucket_of(ts) -> int | None:
     """半小时桶 0..7(全天); 盘前/午休等窗外返回 None."""
@@ -46,6 +53,15 @@ def bucket_of(ts) -> int | None:
         return (m - 570) // 30
     if 780 <= m < 900:            # 13:00 ~ 15:00
         return 4 + (m - 780) // 30
+    return None
+
+
+def bucket5_of(ts) -> int | None:
+    """5 分钟桶 0..11, 只覆盖 09:30~10:30(黄金窗口内部结构); 窗外 None."""
+    t = ts if isinstance(ts, dt.time) else ts.time()
+    m = t.hour * 60 + t.minute
+    if 570 <= m < 630:
+        return (m - 570) // 5
     return None
 
 
@@ -95,6 +111,7 @@ def first_touch(minute: pd.DataFrame, trig: dict, pct: float) -> pd.DataFrame:
         bar = g.iloc[hit[0]]
         rows.append({"vt_symbol": vt, "n1_day": day,
                      "bucket": bucket_of(bar["bar_time"]),
+                     "b5": bucket5_of(bar["bar_time"]),
                      "entry": max(float(bar["open_price"]), pc * (1 + pct)) * 1.005,
                      "ivl": bar["interval"]})
     return pd.DataFrame(rows)
@@ -143,9 +160,32 @@ def build_frame(T, mask, gk, touch, trig_key) -> pd.DataFrame:
         else:
             ret = float(bw.iloc[0])               # 封板及 A1/B 板留断走
         frames.append({"group": gk, "bucket": int(loc.iloc[0]["bucket"]),
+                       "b5": loc.iloc[0]["b5"],
+                       "gap": (r.open_g if pd.notna(r.open_g) else np.nan) * 100,
                        "seal": bool(r.seal), "n2_lim": bool(r.n2_lim),
                        "d1": r.n2_open / entry - 1, "ret": ret})
     return pd.DataFrame(frames)
+
+
+def dim_table(e: pd.DataFrame, dimcol: str, names: list[str], tag: str) -> None:
+    """通用单维分桶表: 行=档位(dimcol 整数索引/NaN), 每组一段。"""
+    print(f"\n== {tag} ==")
+    for gk in ("a1", "a2", "b"):
+        sub = e[(e["group"] == gk) & e[dimcol].notna()]
+        if not len(sub):
+            continue
+        print(f"-- {gk.upper()} (n={len(sub)})  {'档位':<10}{'n':>4}{'封板%':>7}"
+              f"{'D+1均':>8}{'D+1胜':>7}{'再板%':>7}{'ret均':>8}{'ret胜':>7}")
+        for i, name in enumerate(names):
+            r = sub[sub[dimcol] == i]
+            n = len(r)
+            if n == 0:
+                print(f"{name:<14}{n:>4}")
+                continue
+            print(f"{name:<14}{n:>4}{r['seal'].mean()*100:>7.1f}"
+                  f"{r['d1'].mean()*100:>+8.2f}{(r['d1']>0).mean()*100:>7.1f}"
+                  f"{r['n2_lim'].mean()*100:>7.1f}{r['ret'].mean()*100:>+8.2f}"
+                  f"{(r['ret']>0).mean()*100:>7.1f}")
 
 
 def main() -> None:
@@ -186,13 +226,23 @@ def main() -> None:
           f"  (缺口=无分钟数据或未触)")
 
     key7 = lambda r: n1.get((r.vt_symbol, r.trade_date))   # noqa: E731
+    all7 = []
     for gk, label in (("a1", "A1(产品池, 触7直买)"), ("a2", "A2(产品池, 触7直买口径)"),
                       ("b", "B(产品池, 触7直买)")):
         m = build_frame(T, masks[gk], gk, touch7, key7)
         print(f"\n入表 {gk.upper()}: {len(m)} 笔 (分钟定位成功 × 全天桶内 × n2有数据)")
         group_table(m, label)
+        all7.append(m)
     m9 = build_frame(T, a2_prod, "a2", touch9, key7)
     group_table(m9, "A2 产品口径对照(触+9%直买)")
+
+    # ── 竞价档 × 首触5分钟桶(用户 2026-08-26 追加: 什么情况下/什么时间点打) ──
+    allm = pd.concat(all7, ignore_index=True)
+    gd = allm.dropna(subset=["gap"]).copy()
+    gd["gapbin"] = np.digitize(gd["gap"], [0, 1, 2, 3, 4])
+    dim_table(gd, "gapbin", GAP_LABELS, "竞价档 × 组 (开盘gap; A1/A2 门禁0~4, B 全域)")
+    b5 = allm.copy()
+    dim_table(b5, "b5", BUCKETS5, "首触5分钟桶 × 组 (只覆盖 09:30~10:30 黄金窗口)")
     print("\n列义: 封板%=当日封死即连板概率  D+1=次日开盘/entry-1(隔夜溢价)  "
           "再板%=次日继续涨停  ret=产品口径卖出(A2未封当日卖/其余板留断走)")
     iv = touch7["ivl"].value_counts().to_dict() if len(touch7) else {}
