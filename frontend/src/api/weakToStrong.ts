@@ -212,6 +212,7 @@ export interface W2sSessionTableRow {
   n2_lim: number;
   ret: number;
   ret_win: number;
+  tag?: "avoid";
 }
 
 export interface W2sSessionWindow {
@@ -219,6 +220,8 @@ export interface W2sSessionWindow {
   rows: W2sSessionWindowRow[];
   table_columns?: string[];
   table_rows?: W2sSessionTableRow[];
+  auction_rows?: W2sSessionTableRow[];
+  auction_note?: string;
   warning: string;
   research_note: string;
 }

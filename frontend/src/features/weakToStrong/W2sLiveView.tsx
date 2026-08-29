@@ -171,6 +171,11 @@ export function W2sLiveView({
                     </span>
                   </div>
                 ))}
+                {sessionWindow.auction_note ? (
+                  <p className="text-[11px] text-muted-foreground/90">
+                    竞价:{sessionWindow.auction_note}
+                  </p>
+                ) : null}
                 <p className="text-[11px] text-muted-foreground/80">{sessionWindow.research_note}</p>
               </div>
             ) : null}

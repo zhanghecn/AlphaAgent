@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchW2sRules, type W2sGroupKey } from "@/api/weakToStrong";
+import { fetchW2sRules, type W2sGroupKey, type W2sRulesPayload } from "@/api/weakToStrong";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
@@ -19,6 +19,111 @@ const GROUP_ORDER: W2sGroupKey[] = ["a1", "a2", "b"];
 
 function pctTone(value: number) {
   return value >= 0 ? "text-rise" : "text-fall";
+}
+
+const SESSION_TABLE_COLS = ["组", "时段", "n", "封板%", "D+1均%", "D+1胜%", "再板%", "收益均%", "收益胜%"];
+
+/** 时段/竞价共用统计表; matchWindow 时按时段列标出手期, tag=avoid 标回避。 */
+function SessionStatTable({
+  rows,
+  columns,
+  column2Label,
+  groupLabels,
+  matchWindowRows,
+}: {
+  rows: NonNullable<W2sRulesPayload["session_window"]>["table_rows"];
+  columns: string[];
+  column2Label: string;
+  groupLabels: Record<W2sGroupKey, string>;
+  matchWindowRows?: { group: W2sGroupKey; window: string }[];
+}) {
+  if (!rows?.length) return null;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[680px] text-sm">
+        <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+          <tr>
+            {columns.map((col, idx) => (
+              <th
+                key={col}
+                className={cn(
+                  "px-3 py-2 font-medium",
+                  idx < 2 ? "text-left" : "text-right",
+                )}
+              >
+                {idx === 1 ? column2Label : col}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const isAll = row.bucket === "全部";
+            const style = GROUP_STYLES[row.group] ?? GROUP_STYLES.pool;
+            const winRow = matchWindowRows?.find((r) => r.group === row.group);
+            const isWindow = matchWindowRows && !isAll && winRow?.window === row.bucket;
+            const isAvoid = row.tag === "avoid";
+            return (
+              <tr
+                key={`${row.group}-${row.bucket}`}
+                className={cn(
+                  "border-b last:border-b-0",
+                  isAll && "bg-muted/20 font-medium",
+                  isWindow && "border-l-2 border-l-rise bg-rise/5",
+                  isAvoid && "border-l-2 border-l-fall bg-fall/5",
+                  !isAll && !isWindow && !isAvoid && "hover:bg-muted/30",
+                )}
+              >
+                <td className="px-3 py-2">
+                  {isAll ? (
+                    <span className="text-xs text-foreground">{groupLabels[row.group]}</span>
+                  ) : (
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${style.badge}`}
+                    >
+                      {style.label}
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-2 font-mono text-xs tabular-nums">
+                  {row.bucket}
+                  {isWindow ? (
+                    <span className="ml-2 rounded bg-rise/15 px-1.5 py-0.5 font-sans text-[10px] font-medium text-rise">
+                      出手期
+                    </span>
+                  ) : null}
+                  {isAvoid ? (
+                    <span className="ml-2 rounded bg-fall/15 px-1.5 py-0.5 font-sans text-[10px] font-medium text-fall">
+                      回避
+                    </span>
+                  ) : null}
+                </td>
+                <td className="px-3 py-2 text-right font-mono tabular-nums">{row.n}</td>
+                <td className="px-3 py-2 text-right font-mono tabular-nums">
+                  {row.seal.toFixed(1)}
+                </td>
+                <td className={cn("px-3 py-2 text-right font-mono tabular-nums", pctTone(row.d1))}>
+                  {row.d1 >= 0 ? "+" : ""}{row.d1.toFixed(2)}
+                </td>
+                <td className="px-3 py-2 text-right font-mono tabular-nums">
+                  {row.d1_win.toFixed(1)}
+                </td>
+                <td className="px-3 py-2 text-right font-mono tabular-nums">
+                  {row.n2_lim.toFixed(1)}
+                </td>
+                <td className={cn("px-3 py-2 text-right font-mono tabular-nums", pctTone(row.ret))}>
+                  {row.ret >= 0 ? "+" : ""}{row.ret.toFixed(2)}
+                </td>
+                <td className="px-3 py-2 text-right font-mono tabular-nums">
+                  {row.ret_win.toFixed(1)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
@@ -86,92 +191,32 @@ export function W2sGuideView() {
             什么时候打 · 时段窗口(分钟级首触 +7% 半小时分桶研究)
           </div>
           <p className="mb-3 text-xs text-muted-foreground">{rules.session_window.headline}</p>
-          {rules.session_window.table_rows?.length ? (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[680px] text-sm">
-                <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
-                  <tr>
-                    {(rules.session_window.table_columns ?? []).map((col) => (
-                      <th
-                        key={col}
-                        className={cn(
-                          "px-3 py-2 font-medium",
-                          col === "组" || col === "时段" ? "text-left" : "text-right",
-                        )}
-                      >
-                        {col}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rules.session_window.table_rows.map((row) => {
-                    const isAll = row.bucket === "全部";
-                    const style = GROUP_STYLES[row.group] ?? GROUP_STYLES.pool;
-                    const winRow = rules.session_window.rows.find((r) => r.group === row.group);
-                    const isWindow = !isAll && winRow?.window === row.bucket;
-                    return (
-                      <tr
-                        key={`${row.group}-${row.bucket}`}
-                        className={cn(
-                          "border-b last:border-b-0",
-                          isAll && "bg-muted/20 font-medium",
-                          isWindow && "border-l-2 border-l-rise bg-rise/5",
-                          !isAll && !isWindow && "hover:bg-muted/30",
-                        )}
-                      >
-                        <td className="px-3 py-2">
-                          {isAll ? (
-                            <span className="text-xs text-foreground">
-                              {rules.group_labels[row.group]}
-                            </span>
-                          ) : (
-                            <span
-                              className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${style.badge}`}
-                            >
-                              {style.label}
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 font-mono text-xs tabular-nums">
-                          {row.bucket}
-                          {isWindow ? (
-                            <span className="ml-2 rounded bg-rise/15 px-1.5 py-0.5 font-sans text-[10px] font-medium text-rise">
-                              出手期
-                            </span>
-                          ) : null}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono tabular-nums">{row.n}</td>
-                        <td className="px-3 py-2 text-right font-mono tabular-nums">
-                          {row.seal.toFixed(1)}
-                        </td>
-                        <td className={cn("px-3 py-2 text-right font-mono tabular-nums", pctTone(row.d1))}>
-                          {row.d1 >= 0 ? "+" : ""}{row.d1.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono tabular-nums">
-                          {row.d1_win.toFixed(1)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono tabular-nums">
-                          {row.n2_lim.toFixed(1)}
-                        </td>
-                        <td className={cn("px-3 py-2 text-right font-mono tabular-nums", pctTone(row.ret))}>
-                          {row.ret >= 0 ? "+" : ""}{row.ret.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono tabular-nums">
-                          {row.ret_win.toFixed(1)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              <p className="mt-1.5 text-[11px] text-muted-foreground/80">
-                绿色标记行 = 该组出手期(黄金窗口);其余时段仅作对照——警示条所列晚到时段应回避。
-                口径:D+1均% = 次日开盘/买入价-1(隔夜溢价,不持有);收益均% = 产品实际卖出
-                (A2未封当日尾盘卖,封板票及A1/B板留断走)——封板票连板肥尾只在收益列,
-                故 B 组 D+1 为负而收益为正是正常的(钱在板留里,不在隔夜里)。
-              </p>
-            </div>
+          <SessionStatTable
+            rows={rules.session_window.table_rows}
+            columns={SESSION_TABLE_COLS}
+            column2Label="时段"
+            groupLabels={rules.group_labels}
+            matchWindowRows={rules.session_window.rows}
+          />
+          <p className="mt-1.5 text-[11px] text-muted-foreground/80">
+            绿色标记行 = 该组出手期(黄金窗口);其余时段仅作对照——警示条所列晚到时段应回避。
+            口径:D+1均% = 次日开盘/买入价-1(隔夜溢价,不持有);收益均% = 产品实际卖出
+            (A2未封当日尾盘卖,封板票及A1/B板留断走)——封板票连板肥尾只在收益列,
+            故 B 组 D+1 为负而收益为正是正常的(钱在板留里,不在隔夜里)。
+          </p>
+          <div className="mt-4 mb-1 text-xs font-semibold text-foreground">
+            竞价档 × 组(开盘高低开与打板结果;A1/A2 门禁 0~4%,B 全域)
+          </div>
+          <SessionStatTable
+            rows={rules.session_window.auction_rows}
+            columns={SESSION_TABLE_COLS}
+            column2Label="竞价"
+            groupLabels={rules.group_labels}
+          />
+          {rules.session_window.auction_note ? (
+            <p className="mt-1.5 text-[11px] text-muted-foreground/80">
+              {rules.session_window.auction_note}
+            </p>
           ) : null}
           <div className="mt-3 space-y-1.5">
             {rules.session_window.rows.map((row) => (
