@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""V4白名单 → 可直接使用条件句的翻译验证(问财/同花顺近似版回测, 复用U1方法论).
+"""U型补涨打板(原趋势弱转强V4)白名单 → 可直接使用条件句的翻译验证(问财/同花顺近似版回测).
 
-主人需求: 「基本条件 + 白名单条件N」逐层给出可粘贴条件句并量化近似代价.
+主人需求: 「基本条件 + 白名单条件N」逐组给出可粘贴条件句并量化近似代价.
 锚(问财经口径): 最后一次涨停=今日之前最近的涨停日; 顶=涨停当日收盘价(连板日high=close恒等);
   上涨停后最低/最高收盘 = 断板期(不含今日)收盘; 弹回=昨收/最低-1; 近3日新低=低点位置近似.
-层1 蹲类(并集): 基本条件 + 昨收较涨停日收盘跌幅>4%(排除新高贴顶) + (弹回>=3% 或 最低收盘不在近3日)(排除阴跌到点)
-层1细分: U型蹲=蹲>12%+弹>6%+低点不在近3日; 横盘平台=振幅<=10%+跌幅>12%; L趴底=蹲>12%+弹<3%
-层2 首阳: 阳基本 + 跌幅>4% + 最低收盘在近3日 + 弹回<3%
-层3 孤板穿插: 4+阴基本 + 近20日涨停次数5~10(大波4+夹板1~2的近似)
-层4 2板穿插: 4+阳基本 + 近10日最大连板=2(拆窗表达)
-对照: 研究版(w2s_v4_final.py 层1-4)数字.
+2板阴 蹲类(并集): 基本条件 + 昨收较涨停日收盘跌幅>4%(排除新高贴顶) + (弹回>=3% 或 最低收盘不在近3日)(排除阴跌到点)
+2板阴细分: U型蹲=蹲>12%+弹>6%+低点不在近3日; 横盘平台=振幅<=10%+跌幅>12%; L趴底=蹲>12%+弹<3%
+2板阳 首阳: 阳基本 + 跌幅>4% + 最低收盘在近3日 + 弹回<3%
+4+阴 孤板穿插: 4+阴基本 + 近20日涨停次数5~10(大波4+夹板1~2的近似);
+  定稿再加剔「中坑8~15%×已回顶」(半伤硬拉二次出货顶, 研究版34→27笔+4.01→+5.56)
+4+阳 2板穿插: 4+阳基本 + 近10日最大连板=2(拆窗表达)
+对照: 研究版(w2s_v4_final.py 四组)数字.
 """
 import sys
 
@@ -151,7 +152,7 @@ def main():
         return False
 
     print("=" * 96)
-    print("① 层①: 2板补涨阴基本 + 蹲类白名单五层版(含坑宽6-15+未收顶上; 研究版层① 123笔+4.26)")
+    print("① 2板补涨阴基本 + U坑蹲类白名单(坑宽6-15+未收顶上; 研究版 123笔+4.26)")
     base_a = bars[bars["cA"] & cond_ok]
     keep_s = [r.Index for r in base_a.itertuples() if qiwen_pick(r, "L1S")]
     keep_s2 = [r.Index for r in base_a.itertuples() if qiwen_pick(r, "L1S2")]
@@ -164,26 +165,26 @@ def main():
         backtest(keep, lab)
     backtest(sorted(set(keep_s) | set(keep_s2)), "★A1∪A2并集(两板块并用)")
 
-    print("\n①' 层②': 2板补涨阳基本 + 蹲类×均线纠缠态(研究版 118笔+2.96)")
+    print("\n①' 2板补涨阳·通道二: 基本 + 蹲类坑中×均线纠缠态(研究版 118笔+2.96)")
     base_b0 = bars[bars["cB"] & cond_ok]
     for mode, lab in (("L1T", "基本+蹲类+纠缠态(含或表达)"),
                       ("L1TS", "纠缠态清晰版·无或(距顶>4%+弹3~16%+纠缠)")):
         keep = [r.Index for r in base_b0.itertuples() if qiwen_pick(r, mode)]
         backtest(keep, lab)
 
-    print("\n② 层2: 2板补涨阳基本条件 + 阴跌到点首阳(研究版127笔+1.55)")
+    print("\n② 2板补涨阳·通道一: 基本 + 阴跌到点坑底首阳×未收顶上(研究版定稿 74笔+3.02)")
     base_b = bars[bars["cB"] & cond_ok]
     keep = [r.Index for r in base_b.itertuples() if qiwen_pick(r, "L2")]
     backtest(keep, "基本+首阳(跌幅>4%+最低在近3日+弹<3%)")
 
-    print("\n③ 层3: 4+补涨阴基本条件 + 孤立板穿插(研究版111笔+1.55)")
+    print("\n③ 4+补涨阴基本 + 孤立板穿插×全多头×U坑存在×剔中坑回顶(研究版定稿 27笔+5.56)")
     base_c = bars[bars["cC"] & cond_ok]
     for lab, m in (("基本+近20日涨停次数5~10", bars["cnt20"].between(5, 10)),
                    ("基本+涨停次数5~8", bars["cnt20"].between(5, 8))):
         keep = base_c[m.reindex(base_c.index).fillna(False)]
         backtest(keep.index, lab)
     # 锚版: 最后一次涨停为孤立板(前日未涨停)且其前有>=4连波 → 近似「大波后有夹板」
-    def iso_pick(r, need_dip=False):
+    def iso_pick(r, need_dip=False, no_midbrk=False):
         sid = int(r.sid)
         i = p2i[sid][int(r.pos)]
         arr = zt_by[sid]
@@ -194,9 +195,15 @@ def main():
             return False
         if not (j == 0 or not arr[j - 1]):      # 最后涨停须是孤立板(前日未涨停)
             return False
-        if need_dip:                            # 蹲过: 涨停后最低收盘距涨停日收盘>4%
+        if need_dip:                            # U坑存在: 涨停后最低收盘距涨停日收盘>4%
             seg_c = cl_by[sid][j + 1:i]
-            return len(seg_c) > 0 and seg_c.min() / cl_by[sid][j] - 1 <= -0.04
+            if not len(seg_c) or seg_c.min() / cl_by[sid][j] - 1 > -0.04:
+                return False
+            if no_midbrk:                       # 剔中坑8~15%×已回顶(昨收距顶<4%)=二次出货顶
+                low_dd = seg_c.min() / cl_by[sid][j] - 1
+                pull = cl_by[sid][i - 1] / cl_by[sid][j] - 1
+                if pull > -0.04 and -0.15 < low_dd <= -0.08:
+                    return False
         return True
     keep = [r.Index for r in base_c.itertuples() if iso_pick(r)]
     backtest(keep, "基本+最后一次涨停为孤立板")
@@ -204,13 +211,16 @@ def main():
     backtest(keep, "基本+孤立板+全多头(5>10>20>30日线)")
     keep = [r.Index for r in base_c.itertuples()
             if iso_pick(r, need_dip=True) and r.ma_st == "+++"]
-    backtest(keep, "基本+孤立板+全多头+蹲过(涨停后最低收盘较涨停日收盘跌超4%)")
+    backtest(keep, "基本+孤立板+全多头+U坑存在(涨停后最低收盘较涨停日收盘跌超4%)")
+    keep = [r.Index for r in base_c.itertuples()
+            if iso_pick(r, need_dip=True, no_midbrk=True) and r.ma_st == "+++"]
+    backtest(keep, "★定稿+剔中坑8~15%已回顶(昨收距顶<4%)")
     m_plus = (bars["ma_st"] == "+++").reindex(base_c.index).fillna(False)
     backtest(base_c[m_plus].index, "对照·基本+全多头(无孤立板锚)")
     keep2 = [r.Index for r in base_c.itertuples() if iso_pick(r) and r.ma_st != "+++"]
     backtest(keep2, "对照·孤立板锚无全多头")
 
-    print("\n④ 层4: 4+补涨阳基本条件 + 2板小波穿插(研究版45笔+2.45)")
+    print("\n④ 4+补涨阳基本 + 2板小波穿插(研究版 45笔+2.45)")
     base_d = bars[bars["cD"] & cond_ok]
     m = (bars["mx10"] == 2).reindex(base_d.index).fillna(False)
     backtest(base_d[m].index, "基本+近10日最大连板=2")
