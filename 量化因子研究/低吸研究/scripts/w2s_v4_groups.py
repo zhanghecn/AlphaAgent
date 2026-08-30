@@ -337,6 +337,34 @@ def main():
             return False
         return bool((c[j + 1:i] >= c[j]).any())
 
+    # 4+夹层票锚修正(2026-08-30体检发现): 最近段=2/3板小波时, build_base的坑深/位置是相对
+    # 小波顶算的 → 大波深坑漏算被误判「无U」(实测32笔夹层票+5.20). 重算为相对大波(≥4段)顶.
+    # 只影响展示列与位置分类, 不动出手逻辑(层③要求seg_h>=4锚本就=大波; 层④只看seg_h==2).
+    big4_by = {sid: grp[["last_pos", "high_price"]].to_numpy()
+               for sid, grp in segs[segs["height"] >= 4].groupby("sid", sort=False)}
+
+    def bigtop_fix(tg):
+        m = tg.index[tg["seg_h"] < 4]
+        for ix in m:
+            r = tg.loc[ix]
+            sid, pos = int(r["sid"]), int(r["pos"])
+            arr = big4_by.get(sid)
+            if arr is None:
+                continue
+            li = arr[:, 0].searchsorted(pos, side="left")
+            if li == 0:
+                continue
+            lp2, ph2 = int(arr[li - 1, 0]), float(arr[li - 1, 1])
+            i = p2i[sid][pos]
+            mid = cl_by[sid][lp2 + 1:i]
+            if not len(mid):
+                continue
+            low = mid.min()
+            tg.loc[ix, "low_dd"] = low / ph2 - 1
+            tg.loc[ix, "pull"] = r["prev_close"] / ph2 - 1
+            tg.loc[ix, "reb"] = r["prev_close"] / low - 1
+            tg.loc[ix, "gap"] = pos - lp2
+
     all_t = []
     for name, c in GROUPS:
         tg, drop = build_base(bars, segs, conds=(c,))
@@ -346,6 +374,8 @@ def main():
         tg["date"] = tg["trade_date"].dt.strftime("%Y-%m-%d")
         tg["grp"] = name
         tg["topped"] = [topped_of(s, p) for s, p in zip(tg["sid"], tg["pos"])]
+        if name.startswith("4板"):
+            bigtop_fix(tg)
         tg["is_wv"] = [(s, p) in wave_keys for s, p in zip(tg["sid"], tg["pos"])]
         # 好差票判定按实际盈亏(主人定调 2026-08-30): 差票=D+1收盘亏(炸板后次日收复也算好)
         tg["bad"] = tg["r_d1c"] <= 0
@@ -444,15 +474,21 @@ def main():
         gdir = os.path.join(OUT, "好差票验证", name)
         os.makedirs(gdir, exist_ok=True)
         for ym, sub in t[t["grp"] == name].groupby("ym"):
+            nou = sub[sub["位置"] == "无U"]            # 主人定调: 库只留U形态, 无U任何层都不买
+            sub = sub[sub["位置"] != "无U"]
+            if not len(sub):
+                continue
             bad, good = sub[sub["bad"]], sub[~sub["bad"]]
             hit = sub[sub["档位"] == "出手"]
             lines = [f"# {name} · {ym} · 好差票（U坑坐标）", "",
-                     f"触发 {len(sub)} 笔 | 差票 {len(bad)}（炸板 {int((sub['res'] == '炸板').sum())}"
+                     f"U形态 {len(sub)} 笔 | 差票 {len(bad)}（炸板 {int((sub['res'] == '炸板').sum())}"
                      f" + 封D1负 {int((sub['res'] == '封D1负').sum())}） | 好票 {len(good)}（连板 "
                      f"{int((sub['res'] == '连板').sum())}） | 差票率 {len(bad) / len(sub) * 100:.0f}%"
                      f" | ✅五层命中 {len(hit)} 笔"
                      + (f"（板留均 {hit['r_bh'].mean() * 100:+.2f}% 差票 "
-                        f"{hit['bad'].mean() * 100:.0f}%）" if len(hit) else ""), "",
+                        f"{hit['bad'].mean() * 100:.0f}%）" if len(hit) else "")
+                     + (f" ｜ 另有无U票 {len(nou)} 笔未列入（板留均 {nou['r_bh'].mean() * 100:+.2f}%"
+                        f"——一直新高没洗盘，任何层都不买）" if len(nou) else ""), "",
                      "**出手条件（U坑 + 均线）**"] \
                     + [f"- {line}" for line in WHITELIST[name]] \
                     + ["",
@@ -484,8 +520,8 @@ def main():
             with open(os.path.join(gdir, f"{ym}.md"), "w", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")
         # _索引
-        idx_rows = ["组,月,触发,炸板,封D1负,好票,连板,差票率%"]
-        gi = t[t["grp"] == name]
+        idx_rows = ["组,月,U形态,炸板,封D1负,好票,连板,差票率%"]
+        gi = t[(t["grp"] == name) & (t["位置"] != "无U")]
         for ym, sub in gi.groupby("ym"):
             idx_rows.append(f"{name},{ym},{len(sub)},"
                             f"{int((sub['res'] == '炸板').sum())},{int((sub['res'] == '封D1负').sum())},"
@@ -503,7 +539,7 @@ def main():
              "单元格=n / 板留均 / 板留胜率。坑深=断板期最低收盘距上波顶；U突破贴顶=昨收距顶>-4%。"
              "出手列=五层白名单命中。", ""]
     for name, _ in GROUPS:
-        sub = t[t["grp"] == name].copy()
+        sub = t[(t["grp"] == name) & (t["位置"] != "无U")].copy()   # 矩阵同库: 只留U形态
         dd = pd.cut(-sub["low_dd"], [0, 0.08, 0.15, 0.25, 99], labels=DD_LABS[:4])
         dd = dd.cat.add_categories(DD_LABS[4]).fillna(DD_LABS[4])
         sub["坑深档"] = dd
