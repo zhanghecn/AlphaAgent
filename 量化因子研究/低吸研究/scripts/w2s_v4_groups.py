@@ -38,22 +38,25 @@ OUT = "/app/w2s_v4_out"
 # 地基纯中文名(主人要求不用英文缩写; U/V/L型为形状描述保留)
 BASE_CN = {"HIGH": "新高贴顶", "FLAT": "横盘平台", "U": "U型蹲", "V": "V末反",
            "MID": "中位浅调", "LB": "L趴底", "DN": "阴跌到点"}
-# 白名单五层定稿(2026-08-29 融合版, 主人拍板; 2026-08-30 统一U坑呈现: 档位只分 出手/未命中):
-#   层①  2板阴×蹲类×弹回≤16%×坑宽6-15   211笔+3.00 分年全正
-#   层②  2板阳×阴跌到点首阳              127笔+1.55 分年全正
-#   层②' 2板阳×蹲类×均线纠缠态(-++/+)     118笔+2.96 胜率61% 分年全正
-#   层③  4+阴×孤立板穿插×全多头+++        50笔+2.05 分年全正
-#   层④  4+阳×2板小波穿插                 45笔+2.45(狙击格)
-#   并集551笔+2.53 胜率54% 分年全正+5.29/+1.95/+3.06/+1.57
-# U坑参数(主人统一模型): 坑深=low_dd, 坑宽=gap, 距顶=pull, 弹回=reb, 均线态=ma_st.
+# 白名单五层定稿(2026-08-29 融合版, 主人拍板; 2026-08-30 统一U坑呈现: 档位只分 出手/未命中;
+#   2026-08-30 伪U规则追补(易德龙个案→全量验证): 层①②加「断板期收盘价从未站回顶上方」,
+#   层① 211→123笔 +3.00→+4.26 / 层② 127→74笔 +1.55→+3.02 均分年全正; 2板阳曾收顶上53笔-0.51负;
+#   层③方向相反(妖股曾收顶上+4.91是强势整理)不加):
+#   层①  2板阴×蹲类×弹回≤16%×坑宽6-15×未收顶上   123笔+4.26 分年全正
+#   层②  2板阳×阴跌到点首阳×未收顶上              74笔+3.02 分年全正
+#   层②' 2板阳×蹲类×均线纠缠态(-++/+)             118笔+2.96 胜率61% 分年全正
+#   层③  4+阴×孤立板穿插×全多头+++×蹲过           34笔+4.01 胜率65% 分年全正
+#   层④  4+阳×2板小波穿插                         45笔+2.45(狙击格)
 WHITELIST = {
     "2板补涨阴": [
         "U坑条件：昨收距上波顶>4%（人在坑里）；坑宽6~15天；弹回3%~16%（U坑右侧,已弹起未弹飞）",
+        "伪U排除：断板期收盘价从未站回最后一次涨停日收盘价上方（站回过=高位震荡贴顶，非洗盘坑）",
         "（坑底票弹回<3%未启动、出坑票距顶-4%以内，均不选）",
     ],
     "2板补涨阳": [
-        "U坑条件（两条通道都要）：昨收距上波顶>4%；通道一坑底：弹回<3%且最低收盘在最近3日（首阳）；",
-        "通道二坑中：弹回3%~16% + 均线纠缠态（5/10与10/20日线上下相反）",
+        "U坑条件（两条通道都要）：昨收距上波顶>4%；且断板期收盘价从未站回顶上方（伪U排除）；",
+        "通道一坑底：弹回<3%且最低收盘在最近3日（首阳）；",
+        "通道二坑中：弹回3%~16% + 均线纠缠态（5/10与10/20日线上下相反，此通道未收顶上可放宽）",
     ],
     "4板补涨阴": [
         "U坑条件：坑深>4%（断板期最低收盘距顶跌超4%，蹲过才作数——无坑持续新高的不选）",
@@ -86,17 +89,18 @@ def pos_of(low_dd, pull):
     return "坑内"
 
 
-def tier_of(grp, base, seg_h=99, n_lim_mid=0, reb=0.0, gap=99, st="", dd=0.0):
-    """五层出手判定 → (是否出手, 命中通道标签). st=均线排列态, gap=断板天数, dd=坑深."""
+def tier_of(grp, base, seg_h=99, n_lim_mid=0, reb=0.0, gap=99, st="", dd=0.0, topped=True):
+    """五层出手判定 → (是否出手, 命中通道标签). st=均线排列态, gap=断板天数, dd=坑深,
+    topped=断板期曾收在顶上方(伪U, 层①②要求 topped=False; 层②'③④不用)."""
     tangle = st in ("-++", "+--")
     if grp == "2板补涨阴":
-        if base in ("U", "MID", "FLAT", "V", "LB"):
+        if base in ("U", "MID", "FLAT", "V", "LB") and not topped:
             fly = reb == reb and reb > 0.16
             if not fly and 6 <= gap <= 15:
                 return True, "U坑"
         return False, ""
     if grp == "2板补涨阳":
-        if base == "DN":
+        if base == "DN" and not topped:
             return True, "坑底首阳"
         if base in ("U", "MID", "FLAT", "V", "LB") and tangle:
             return True, "坑中纠缠"
@@ -110,6 +114,81 @@ def tier_of(grp, base, seg_h=99, n_lim_mid=0, reb=0.0, gap=99, st="", dd=0.0):
     if sandwich_of(seg_h, n_lim_mid) == "2板小波穿插":   # 4板补涨阳
         return True, "夹层"
     return False, ""
+
+
+def describe_row(r):
+    """每行形态人话解读（主人：数值看不懂，要文字描述）. 出手/未出手理由由 fail_reasons 给."""
+    dd, pu, rb, gp, st = r["low_dd"], r["pull"], r["reb"], r["gap"], r["ma_st"]
+    pos, sw = r["位置"], r["夹层"]
+    parts = [f"上波{r['seg_h']:.0f}板"]
+    if r["grp"].startswith("4板"):
+        parts = [f"大波4+后·最近段{r['seg_h']:.0f}板"]
+    if pos == "无坑":
+        parts.append("断板后一直在顶上新高、没洗过盘")
+    elif pos == "出坑":
+        parts.append(f"曾跌{-dd * 100:.0f}%坑、又爬回顶上")
+    else:
+        parts.append(f"跌{-dd * 100:.0f}%深坑、蹲{gp:.0f}天")
+        if rb == rb:
+            if rb < 0.03:
+                parts.append("贴坑底还没弹")
+            elif rb <= 0.16:
+                parts.append(f"坑底弹起{rb * 100:.0f}%")
+            else:
+                parts.append(f"已弹飞{rb * 100:.0f}%")
+    parts.append(f"昨收{'阴' if '阴' in r['grp'] else '阳'}（{r['p_chg'] * 100:+.1f}%）")
+    if r["topped"]:
+        parts.append("断板期曾收回顶上")
+    if st:
+        parts.append("均线" + {"+++": "全多头", "---": "全空", "-++": "纠缠·短压中多",
+                               "+--": "纠缠·短修中空"}.get(st, st))
+    if r["grp"].startswith("4板"):
+        if sw == "2板小波穿插":
+            parts.append("最近段即2板小波穿插")
+        elif sw == "孤立板穿插":
+            parts.append("大波断板期有孤立板")
+    return "·".join(parts)
+
+
+def fail_reasons(r):
+    """未命中时给出卡在哪条（与 tier_of 五层口径一致）."""
+    g, base = r["grp"], r["base"]
+    dd, rb, gp, st = r["low_dd"], r["reb"], r["gap"], r["ma_st"]
+    pos, sw = r["位置"], r["夹层"]
+    out = []
+    if g == "2板补涨阴":
+        if pos == "无坑":
+            out.append("无坑新高票不进U坑体系")
+        elif pos == "出坑":
+            out.append("已出坑贴顶")
+        elif base == "DN":
+            out.append("阴跌到点贴坑底没弹、未启动")
+        elif r["topped"]:
+            out.append("断板期曾收回顶上方（高位震荡伪U、非洗盘坑）")
+        else:
+            if rb == rb and rb > 0.16:
+                out.append(f"弹回{rb * 100:.0f}%超16%已弹飞")
+            if not (6 <= gp <= 15):
+                out.append(f"坑宽{gp:.0f}天不在6~15")
+    elif g == "2板补涨阳":
+        if pos == "无坑":
+            out.append("无坑新高票不进U坑体系")
+        elif pos == "出坑":
+            out.append("已出坑贴顶")
+        elif base == "DN" and r["topped"]:
+            out.append("断板期曾收回顶上方（高位震荡伪U、非洗盘坑）")
+        elif st not in ("-++", "+--"):
+            out.append("均线非纠缠态")
+    elif g == "4板补涨阴":
+        if not (dd == dd and dd <= -0.04):
+            out.append("无坑没蹲过")
+        if sw != "孤立板穿插":
+            out.append("断板期无孤立板穿插")
+        if st != "+++":
+            out.append("均线非全多头")
+    elif sw != "2板小波穿插":
+        out.append("无2板小波穿插")
+    return out or ["条件不齐"]
 
 
 def v3_group_map(clusters, waves):
@@ -240,6 +319,23 @@ def main():
     # ══ ②③ 四组触发回测 + 地基 ══
     print("\n" + "=" * 96)
     print("== ② 四组全市场触发回测(D0触板买涨停价, 排一字; 均值/中位) ==")
+    # 断板期曾收顶上判定用(伪U规则, 2026-08-30追补): 锚=昨日前最后一次涨停日
+    cl_by = {sid: grp["close_price"].to_numpy() for sid, grp in bars.groupby("sid", sort=False)}
+    zt_by = {sid: grp["is_lim"].to_numpy() for sid, grp in bars.groupby("sid", sort=False)}
+    p2i = {sid: {int(p): i for i, p in enumerate(grp["pos"])}
+           for sid, grp in bars.groupby("sid", sort=False)}
+
+    def topped_of(sid, pos):
+        """断板期内是否有收盘价 >= 最后一次涨停日收盘价(站回过顶上方)."""
+        i = p2i[int(sid)][int(pos)]
+        c, zt = cl_by[int(sid)], zt_by[int(sid)]
+        j = i - 1
+        while j >= 0 and not zt[j]:
+            j -= 1
+        if j < 0:
+            return False
+        return bool((c[j + 1:i] >= c[j]).any())
+
     all_t = []
     for name, c in GROUPS:
         tg, drop = build_base(bars, segs, conds=(c,))
@@ -248,6 +344,7 @@ def main():
         tg["ym"] = tg["trade_date"].dt.strftime("%Y-%m")
         tg["date"] = tg["trade_date"].dt.strftime("%Y-%m-%d")
         tg["grp"] = name
+        tg["topped"] = [topped_of(s, p) for s, p in zip(tg["sid"], tg["pos"])]
         tg["is_wv"] = [(s, p) in wave_keys for s, p in zip(tg["sid"], tg["pos"])]
         # 好差票判定按实际盈亏(主人定调 2026-08-30): 差票=D+1收盘亏(炸板后次日收复也算好)
         tg["bad"] = tg["r_d1c"] <= 0
@@ -277,10 +374,10 @@ def main():
         if n_mix:
             print(f"  [对照] 已排除昨日涨停混入 {n_mix} 笔 (真实板留全负, 见docstring)")
         # 五层出手口径: 出手 / 未命中 两档统计 + 命中通道
-        _res = [tier_of(name, b, h, nm, rb, gp, ms, dd)
-                for b, h, nm, rb, gp, ms, dd
+        _res = [tier_of(name, b, h, nm, rb, gp, ms, dd, tp)
+                for b, h, nm, rb, gp, ms, dd, tp
                 in zip(tg["base"], tg["seg_h"], tg["n_lim_mid"], tg["reb"],
-                       tg["gap"], tg["ma_st"], tg["low_dd"])]
+                       tg["gap"], tg["ma_st"], tg["low_dd"], tg["topped"])]
         tg["档位"] = ["出手" if ok else "未命中" for ok, _ in _res]
         tg["通道"] = [ch for _, ch in _res]
         for tier in ("出手", "未命中"):
@@ -309,17 +406,17 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     # 全量csv(地基纯中文 + 档位列)
     if "档位" not in t.columns:
-        _res = [tier_of(g, b, h, nm, rb, gp, ms, dd) for g, b, h, nm, rb, gp, ms, dd
+        _res = [tier_of(g, b, h, nm, rb, gp, ms, dd, tp) for g, b, h, nm, rb, gp, ms, dd, tp
                 in zip(t["grp"], t["base"], t["seg_h"], t["n_lim_mid"], t["reb"],
-                       t["gap"], t["ma_st"], t["low_dd"])]
+                       t["gap"], t["ma_st"], t["low_dd"], t["topped"])]
         t["档位"] = ["出手" if ok else "未命中" for ok, _ in _res]
         t["通道"] = [ch for _, ch in _res]
     t["位置"] = [pos_of(dd, pu) for dd, pu in zip(t["low_dd"], t["pull"])]
     t["夹层"] = [sandwich_of(h, nm) for h, nm in zip(t["seg_h"], t["n_lim_mid"])]
     t.loc[~t["grp"].str.startswith("4板"), "夹层"] = ""
     t["出手"] = t["档位"] == "出手"
-    cols = ["vt_symbol", "name", "date", "ym", "grp", "出手", "通道", "位置", "夹层", "res", "r_d1o",
-            "r_d1c", "r_bh", "pull", "low_dd", "reb", "gap", "ma_st", "seg_h", "p_chg",
+    cols = ["vt_symbol", "name", "date", "ym", "grp", "出手", "通道", "位置", "夹层", "topped", "res",
+            "r_d1o", "r_d1c", "r_bh", "pull", "low_dd", "reb", "gap", "ma_st", "seg_h", "p_chg",
             "p_ush", "mkt_prev", "is_wv", "v3grp", "is_lim", "n1_lim", "prev_lim"]
     exp = t[cols].copy()
     for c in ("r_d1o", "r_d1c", "r_bh", "pull", "low_dd", "reb", "p_chg", "p_ush"):
@@ -327,22 +424,21 @@ def main():
     exp = exp.rename(columns={"r_d1o": "D1开%", "r_d1c": "D1收%", "r_bh": "板留%",
                               "pull": "距顶%", "low_dd": "坑深%", "reb": "弹回%",
                               "p_chg": "昨幅%", "p_ush": "昨上影%", "mkt_prev": "昨涨停家",
-                              "seg_h": "上波高", "gap": "坑宽", "grp": "组"})
+                              "seg_h": "上波高", "gap": "坑宽", "grp": "组",
+                              "topped": "曾收顶上"})
     exp.to_csv(os.path.join(OUT, "V4四组全量.csv"), index=False, encoding="utf-8-sig")
 
-    # 好差票md: 组/年月, 只分差票/好票两段, 行内✅标命中通道; U坑参数呈现(统一坑模型)
-    def _row(r):
-        return (f"| {r['vt_symbol']} | {r['name']} | {r['date']} | "
-                f"{('✅' + r['通道']) if r['档位'] == '出手' else ''} "
-                f"| {r['res']} | {r['r_d1o'] * 100:+.1f} | {r['r_d1c'] * 100:+.1f} | {r['r_bh'] * 100:+.1f} "
-                f"| {r['low_dd'] * 100:+.1f} | {r['位置']} | {r['gap']:.0f} | {r['pull'] * 100:+.1f} "
-                f"| {r['reb'] * 100:+.1f} | {r['ma_st'] or '—'} | {r['seg_h']:.0f} "
-                f"| {r['p_chg'] * 100:+.1f} | {r['mkt_prev']:.0f} | {r['v3grp']} | "
-                f"{'✓' if r['is_wv'] else ''} |")
+    # 好差票md: 组/年月, 只分差票/好票两段; 每笔=文字小节(主人: 不要表格, 文字分组换行)
+    def _block(r):
+        hit = f"✅出手「{r['通道']}」" if r["档位"] == "出手" else "✘未出手"
+        lines = [f"- **{r['vt_symbol']} {r['name']} · {r['date']} · {hit} · {r['res']}**",
+                 f"  - 形态：{describe_row(r)}"]
+        if r["档位"] != "出手":
+            lines.append(f"  - 未出手原因：{'；'.join(fail_reasons(r))}")
+        lines.append(f"  - 结果：D+1开盘 {r['r_d1o'] * 100:+.1f}%、收盘 {r['r_d1c'] * 100:+.1f}%"
+                     f"；持有到首次断板 {r['r_bh'] * 100:+.1f}%")
+        return lines
 
-    HDR = ("| 代码 | 名称 | D0 | 命中 | 结果 | D1开% | D1收% | 板留% | 坑深% | 位置 | 坑宽 | 距顶% "
-           "| 弹回% | 均线态 | 上波高 | 昨幅% | 昨涨停家 | V3组 | V3波 |")
-    SEP = "|" + "---|" * 19
     for name, _ in GROUPS:
         gdir = os.path.join(OUT, "好差票验证", name)
         os.makedirs(gdir, exist_ok=True)
@@ -360,28 +456,29 @@ def main():
                     + [f"- {line}" for line in WHITELIST[name]] \
                     + ["",
                      "**好差票判定**",
+                     "- 本文件列当月全部触发票：好票/差票=事后结果，✅出手/✘未出手=白名单买不买；",
+                     "  差票段的✘=拦对了（过滤器挡掉的坑），好票段的✘=漏掉的机会",
                      "- 买入口径：D0 盘中触及涨停价买入；开盘即涨停（一字）买不进，剔除",
                      "- 差票：D+1 收盘价低于涨停买价（实亏才算差；炸板后次日收复的算好票）",
                      "- 好票：D+1 收盘不亏；「结果」列的炸板/封板/连板只是当日封板过程，不决定好差",
-                     "- 板留%：按涨停价买入、持有到首次断板日收盘卖出；D1开%/D1收% = 次日开盘/收盘相对买价",
+                     "- 持有到首次断板 = 按涨停价买入、首次断板日收盘卖出",
                      "",
-                     "**U坑口径**",
-                     "- 坑深%：断板期最低收盘价距上波顶",
-                     "- 位置：坑内（昨收距顶≤-4%，U 进行时=买点区）/ 出坑（蹲过又爬回顶上，U 已走完）/",
-                     "  无坑（断板期最低收盘也在顶上方，一直新高从未洗盘，不属于 U 体系）",
-                     "- 坑宽：断板交易日数",
-                     "- 距顶%：昨收距上波顶",
-                     "- 弹回%：昨收距坑底",
-                     "- 均线态：5/10/20/30 日线相对位置符号（+++ 全多头；-++ 短压中多；+-- 短修中空）",
+                     "**形态解读口径**",
+                     "- 坑形：跌X%深坑蹲N天=坑内（U 进行时=买点区）；曾跌坑又爬回顶上=出坑（U 已走完）；",
+                     "  一直在顶上新高=无坑（从未洗盘，不属于 U 体系）",
+                     "- 弹回：昨收距坑底；<3%=贴坑底没弹（未启动），>16%=已弹飞（变相新高）",
+                     "- 曾收顶上：断板期有收盘价站回过最后一次涨停日收盘价上方=高位震荡伪U"
+                     "（层①②排除项；4+妖股相反，是强势整理）",
+                     "- 均线：全多头=5>10>20>30日线；纠缠=短压中多（-++）或短修中空（+--）",
                      ""]
             for lab, pool, asc in (("差票", bad, True), ("好票", good, False)):
                 if not len(pool):
                     continue
                 lines += [f"## {lab} — {len(pool)} 笔"
                           + (f"（✅命中 {int((pool['档位'] == '出手').sum())}）"
-                             if (pool["档位"] == "出手").any() else ""), "", HDR, SEP]
+                             if (pool["档位"] == "出手").any() else ""), ""]
                 for _, r in pool.sort_values("r_d1c", ascending=asc).iterrows():
-                    lines.append(_row(r))
+                    lines += _block(r)
                 lines.append("")
             with open(os.path.join(gdir, f"{ym}.md"), "w", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")

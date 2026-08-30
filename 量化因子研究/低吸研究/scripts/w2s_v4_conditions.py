@@ -122,16 +122,17 @@ def main():
         reb = pc_ / low_c - 1
         amp = seg_c.max() / low_c - 1
         near3_low = seg_c[-3:].min() <= low_c if len(seg_c) >= 3 else True
+        topped = bool((seg_c >= top).any())   # 伪U: 断板期曾收在顶上方(层①②排除, 2026-08-30)
         n2 = i - j
         if not (2 <= n2 <= 20):
             return False
-        if mode == "L1":                      # 蹲类并集: 排除贴顶+排阴跌+弹回≤16%(五层版含坑宽)
+        if mode == "L1":                      # 蹲类并集: 排除贴顶+排阴跌+弹回≤16%+坑宽+未收顶上
             return (pull <= -0.04 and reb <= 0.16 and (reb >= 0.03 or not near3_low)
-                    and 6 <= n2 <= 15)
+                    and 6 <= n2 <= 15 and not topped)
         if mode == "L1S":                     # U坑清晰版(主人定调: 无"或", 单句): 已弹起>3%替"或"表达
-            return pull <= -0.04 and 0.03 <= reb <= 0.16 and 6 <= n2 <= 15
+            return pull <= -0.04 and 0.03 <= reb <= 0.16 and 6 <= n2 <= 15 and not topped
         if mode == "L1S2":                    # 清晰版2: "低点已过去"单句(近5日最低>全程最低)
-            return (pull <= -0.04 and reb <= 0.16 and 6 <= n2 <= 15
+            return (pull <= -0.04 and reb <= 0.16 and 6 <= n2 <= 15 and not topped
                     and len(seg_c) >= 5 and seg_c[-5:].min() > low_c)
         if mode == "L1T":                     # 蹲类纠缠态(层②'): L1去坑宽 + 均线纠缠(精确)
             return (pull <= -0.04 and reb <= 0.16 and (reb >= 0.03 or not near3_low)
@@ -140,18 +141,20 @@ def main():
             return (pull <= -0.04 and 0.03 <= reb <= 0.16
                     and r.ma_st in ("-++", "+--"))
         if mode == "L1U":                     # U型蹲细分(弹6~16%)
-            return (low_c / top - 1 <= -0.12) and 0.06 <= reb <= 0.16 and not near3_low
+            return (low_c / top - 1 <= -0.12) and 0.06 <= reb <= 0.16 and not near3_low and not topped
         if mode == "L1F":                     # 横盘平台细分(五层版含坑宽)
-            return amp <= 0.10 and pull <= -0.12 and 6 <= n2 <= 15
+            return amp <= 0.10 and pull <= -0.12 and 6 <= n2 <= 15 and not topped
         if mode == "L1L":                     # L趴底细分
-            return (low_c / top - 1 <= -0.12) and (reb < 0.03)
+            return (low_c / top - 1 <= -0.12) and (reb < 0.03) and not topped
         if mode == "L2":                      # 阴跌到点(首阳)
-            return pull <= -0.04 and near3_low and reb < 0.03
+            return pull <= -0.04 and near3_low and reb < 0.03 and not topped
         return False
 
     print("=" * 96)
-    print("① 层①: 2板补涨阴基本 + 蹲类白名单五层版(含坑宽6-15; 研究版层① 211笔+3.00)")
+    print("① 层①: 2板补涨阴基本 + 蹲类白名单五层版(含坑宽6-15+未收顶上; 研究版层① 123笔+4.26)")
     base_a = bars[bars["cA"] & cond_ok]
+    keep_s = [r.Index for r in base_a.itertuples() if qiwen_pick(r, "L1S")]
+    keep_s2 = [r.Index for r in base_a.itertuples() if qiwen_pick(r, "L1S2")]
     for mode, lab in (("L1", "基本+蹲类并集+坑宽6-15(距最后涨停6~15天)"),
                       ("L1S", "U坑清晰版·无或(距顶>4%+弹3~16%+坑宽6-15)"),
                       ("L1S2", "清晰版2·低点已过(距顶>4%+近5日未创新低+弹≤16%+坑宽6-15)"),
@@ -159,6 +162,7 @@ def main():
                       ("L1L", "基本+L趴底(蹲>12%+弹<3%)")):
         keep = [r.Index for r in base_a.itertuples() if qiwen_pick(r, mode)]
         backtest(keep, lab)
+    backtest(sorted(set(keep_s) | set(keep_s2)), "★A1∪A2并集(两板块并用)")
 
     print("\n①' 层②': 2板补涨阳基本 + 蹲类×均线纠缠态(研究版 118笔+2.96)")
     base_b0 = bars[bars["cB"] & cond_ok]

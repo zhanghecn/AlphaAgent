@@ -47,21 +47,39 @@ def main():
                    & (bars["p_ush"] < 0.04) & ~bars["prev_lim"]).fillna(False).astype(bool)
 
     tgs = {}
+    # 断板期曾收顶上判定(伪U规则, 层①②用): 锚=昨日前最后一次涨停日
+    cl_by = {sid: grp["close_price"].to_numpy() for sid, grp in bars.groupby("sid", sort=False)}
+    zt_by = {sid: grp["is_lim"].to_numpy() for sid, grp in bars.groupby("sid", sort=False)}
+    p2i = {sid: {int(p): i for i, p in enumerate(grp["pos"])}
+           for sid, grp in bars.groupby("sid", sort=False)}
+
+    def _topped(sid, pos):
+        i = p2i[int(sid)][int(pos)]
+        c, zt = cl_by[int(sid)], zt_by[int(sid)]
+        j = i - 1
+        while j >= 0 and not zt[j]:
+            j -= 1
+        if j < 0:
+            return False
+        return bool((c[j + 1:i] >= c[j]).any())
+
     for tag, c in (("1", "c4a"), ("2", "c4b"), ("3", "c4c"), ("4", "c4d")):
         tg, _ = build_base(bars, segs, conds=(c,))
         tg = add_outcome(tg, bars)
         tg["bad"] = tg["res"].isin(["炸板", "封D1负"])
         tg["ym"] = tg["trade_date"].dt.strftime("%Y-%m")
+        tg["topped"] = [_topped(s, p) for s, p in zip(tg["sid"], tg["pos"])]
         tgs[tag] = tg
 
-    # 白名单五层(2026-08-29融合定稿, 主人拍板; w2s_v4_fusion.py/maxray.py):
-    #   层① 2板阴×蹲类×弹回≤16%×坑宽6-15 | 层② 2板阳×DN首阳 | 层②' 2板阳×蹲类×纠缠态
-    #   层③ 4+阴×孤立板穿插×全多头 | 层④ 4+阳×2板小波穿插(不变)
+    # 白名单五层(2026-08-29融合定稿, 主人拍板; 08-30追补: 层①②加「断板期未收顶上方」伪U排除):
+    #   层① 2板阴×蹲类×弹回≤16%×坑宽6-15×未收顶上 | 层② 2板阳×DN首阳×未收顶上 | 层②' 纠缠态不变
+    #   层③ 4+阴×孤立板穿插×全多头×蹲过 | 层④ 4+阳×2板小波穿插(不变)
     L = {}
     L["层①·2板阴蹲类×坑宽6-15"] = tgs["1"][tgs["1"]["base"].isin(["U", "MID", "FLAT", "V", "LB"])
                                             & ~(tgs["1"]["reb"] > 0.16)
-                                            & tgs["1"]["gap"].between(6, 15)]
-    L["层②·2板阳首阳"] = tgs["2"][tgs["2"]["base"] == "DN"]
+                                            & tgs["1"]["gap"].between(6, 15)
+                                            & ~tgs["1"]["topped"]]
+    L["层②·2板阳首阳"] = tgs["2"][(tgs["2"]["base"] == "DN") & ~tgs["2"]["topped"]]
     L["层②'·2板阳纠缠态"] = tgs["2"][tgs["2"]["base"].isin(["U", "MID", "FLAT", "V", "LB"])
                                      & tgs["2"]["ma_st"].isin(["-++", "+--"])]
     nm3 = tgs["3"]["n_lim_mid"]
