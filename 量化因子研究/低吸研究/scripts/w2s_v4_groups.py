@@ -474,8 +474,10 @@ def main():
         gdir = os.path.join(OUT, "好差票验证", name)
         os.makedirs(gdir, exist_ok=True)
         for ym, sub in t[t["grp"] == name].groupby("ym"):
-            nou = sub[sub["位置"] == "无U"]            # 主人定调: 库只留U形态, 无U任何层都不买
-            sub = sub[sub["位置"] != "无U"]
+            # 主人定调: 库只留U形态; 但出手票永远列出(库是验证出手对不对的册子)——
+            # 层④12笔无U夹层(+3.32胜率75%)=大波后高位横盘直接起小波的强势结构, 属U体系外例外
+            nou = sub[(sub["位置"] == "无U") & (sub["档位"] != "出手")]
+            sub = sub[(sub["位置"] != "无U") | (sub["档位"] == "出手")]
             if not len(sub):
                 continue
             bad, good = sub[sub["bad"]], sub[~sub["bad"]]
@@ -487,8 +489,8 @@ def main():
                      f" | ✅五层命中 {len(hit)} 笔"
                      + (f"（板留均 {hit['r_bh'].mean() * 100:+.2f}% 差票 "
                         f"{hit['bad'].mean() * 100:.0f}%）" if len(hit) else "")
-                     + (f" ｜ 另有无U票 {len(nou)} 笔未列入（板留均 {nou['r_bh'].mean() * 100:+.2f}%"
-                        f"——一直新高没洗盘，任何层都不买）" if len(nou) else ""), "",
+                     + (f" ｜ 另有无U票 {len(nou)} 笔未列入（均未出手，板留均 {nou['r_bh'].mean() * 100:+.2f}%"
+                        f"——一直新高没洗盘）" if len(nou) else ""), "",
                      "**出手条件（U坑 + 均线）**"] \
                     + [f"- {line}" for line in WHITELIST[name]] \
                     + ["",
@@ -502,7 +504,7 @@ def main():
                      "",
                      "**形态解读口径**",
                      "- U三状态：跌X%深坑蹲N天=U坑内（买点区）；U坑X%已爬回顶上=U突破（起二波）；",
-                     "  一直在顶上新高=无U（从未洗盘，任何层都不买）",
+                     "  一直在顶上新高=无U（从未洗盘，层①②③不买；层④夹层结构例外，无U也列出）",
                      "- 弹回：昨收距坑底；<3%=贴坑底没弹（未启动），>16%=已弹飞（变相新高）",
                      "- 曾收顶上：断板期有收盘价站回过最后一次涨停日收盘价上方=高位震荡伪U"
                      "（层①②排除项；4+妖股相反，是强势整理）",
