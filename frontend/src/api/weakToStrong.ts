@@ -1,31 +1,41 @@
 import { apiClient } from "./client";
 
-// ── 趋势弱转强(二板弱转强打板)产品线 API 契约 ──
-// 策略口径 = w2s-v2(量化因子研究/低吸研究/趋势低吸研究-弱转强v2.md 定稿)。
+// ── U型补涨打板(V3 三组体系升级 V4)产品线 API 契约 ──
+// 策略口径 = w2s-v4.0(量化因子研究/低吸研究/U型补涨打板.md 定稿)。
+// 买点 = 断板后再启动首个涨停板板上买(触板买涨停价,一字排除);
+// 池 = 触发池全量(雷达),白名单出手标记 actionable。
 
-export type W2sGroupKey = "a1" | "a2" | "b";
+export type W2sGroupKey = "yin2" | "yang2a" | "yang2b" | "yin4" | "yang4";
 
 export interface W2sLiveEntry {
   vt_symbol: string;
   name: string | null;
   group_key: W2sGroupKey;
+  actionable: boolean;
   prev_close: number | null;
   trigger_price: number | null;
   limit_price: number | null;
   chg_tm1: number | null;
-  lshadow_tm1: number | null;
   ushadow_tm1: number | null;
   yang_tm1: boolean | null;
-  vol_rel5_tm1: number | null;
-  amp_tm1: number | null;
-  turnover_tm1: number | null;
-  base20_tm1: number | null;
-  last_streak: number | null;
+  base: string | null;
+  base_label: string | null;
+  pos3: "无U" | "U坑内" | "U突破" | null;
+  /** 坑深%(断板期最低收盘距上波顶,负值) */
+  low_dd: number | null;
+  /** 距顶%(信号日收盘距上波顶,负值) */
+  pull: number | null;
+  /** 弹回%(信号日收盘距坑底弹回幅度) */
+  reb: number | null;
+  ma_st: string | null;
+  n_lim_mid: number | null;
+  topped: boolean | null;
+  d23ok: boolean | null;
+  seg_h: number | null;
   gap_days: number | null;
-  halted: boolean;
   status:
     | "watching" | "touched" | "entered" | "holding" | "pending_exit" | "closed"
-    | "skipped_gap" | "halted" | "no_trigger";
+    | "skipped_gap" | "no_trigger";
   gap_open_pct: number | null;
   touched_at: string | null;
   entry_price: number | null;
@@ -38,15 +48,8 @@ export interface W2sLiveEntry {
   exit_price: number | null;
   exit_reason:
     | "next_close_fail" | "break_close" | "max_hold_close" | "open_end"
-    | "same_day_fail" | null;
+    | null;
   ret_pct: number | null;
-}
-
-export interface W2sMarketHalt {
-  halted: boolean;
-  mkt_lim_tm1: number | null;
-  threshold: number;
-  note: string;
 }
 
 export interface W2sLivePayload {
@@ -57,11 +60,13 @@ export interface W2sLivePayload {
   rules_version: string;
   counts: {
     pool: number;
+    actionable: number;
     signals: number;
     by_group: Record<string, number>;
     by_status: Record<string, number>;
   };
-  market_halt: W2sMarketHalt;
+  /** 昨日主板非ST涨停家数(信息项,V4 无大盘停手) */
+  mkt_lim_tm1: number | null;
   group_labels: Record<W2sGroupKey, string>;
   last_scan: { finished_at: string | null; status: string; message: string | null } | null;
   entries: W2sLiveEntry[];
@@ -79,16 +84,13 @@ export interface W2sStats {
 
 export interface W2sAnchorStats {
   n: number;
-  seal: number;
-  avg_pct: number;
-  win: number;
-  streak2: number;
   bw_pct: number;
+  bw_win: number;
 }
 
 export interface W2sAnchorCheck {
   n_diff: number;
-  avg_diff: number;
+  bw_diff: number;
   win_diff: number;
   pass: boolean;
 }
@@ -108,14 +110,17 @@ export interface W2sBacktestReport {
   coverage: { from: string; to: string; months: number };
   caliber: string;
   group_labels: Record<W2sGroupKey, string>;
+  /** 单一口径(板上买·板留断走):key = 五组 + "all" */
   summary: Record<string, W2sStats>;
-  yearly: Record<W2sGroupKey, ({ year: string } & W2sStats)[]>;
-  monthly: Record<W2sGroupKey, ({ month: string } & W2sStats)[]>;
-  curves: Record<W2sGroupKey, { date: string; cum_pct: number }[]>;
+  yearly: Record<string, ({ year: string } & W2sStats)[]>;
+  monthly: Record<string, ({ month: string } & W2sStats)[]>;
+  curves: Record<string, { date: string; cum_pct: number }[]>;
   anchors: Record<string, W2sAnchorStats>;
   anchor_tolerances: Record<string, number>;
   anchor_check: Record<string, W2sAnchorCheck | string>;
   case_gates: W2sCaseGate[];
+  /** 触发池(雷达)全量 vs 白名单出手笔数:key = 五组 + "all" */
+  radar: Record<string, { trigger_n: number; actionable_n: number }>;
   built_at?: string | null;
 }
 
@@ -190,40 +195,9 @@ export interface W2sRuleItem {
 }
 
 export interface W2sRuleGroup {
-  group: "pool" | "a1" | "a2" | "b" | "buy" | "sell";
+  group: "pool" | W2sGroupKey | "buy" | "sell";
   title: string;
   items: W2sRuleItem[];
-}
-
-export interface W2sSessionWindowRow {
-  group: W2sGroupKey;
-  window: string;
-  share: string;
-  note: string;
-}
-
-export interface W2sSessionTableRow {
-  group: W2sGroupKey;
-  bucket: string;
-  n: number;
-  seal: number;
-  d1: number;
-  d1_win: number;
-  n2_lim: number;
-  ret: number;
-  ret_win: number;
-  tag?: "avoid";
-}
-
-export interface W2sSessionWindow {
-  headline: string;
-  rows: W2sSessionWindowRow[];
-  table_columns?: string[];
-  table_rows?: W2sSessionTableRow[];
-  auction_rows?: W2sSessionTableRow[];
-  auction_note?: string;
-  warning: string;
-  research_note: string;
 }
 
 export interface W2sRulesPayload {
@@ -235,7 +209,6 @@ export interface W2sRulesPayload {
   ths_pool_conditions: Record<W2sGroupKey, string>;
   ths_pool_note: string;
   intraday_playbook: string[];
-  session_window: W2sSessionWindow;
   anchors: Record<string, W2sAnchorStats>;
   anchor_tolerances: Record<string, number>;
   case_gates: Omit<W2sCaseGate, "actual_groups" | "pass">[];

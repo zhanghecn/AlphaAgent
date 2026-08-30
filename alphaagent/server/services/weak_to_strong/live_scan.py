@@ -1,12 +1,11 @@
-"""趋势弱转强盘中每分钟扫描:竞价过滤(A1/A2)→ +7%/+9% 触发直接打。
+"""U型补涨打板盘中每分钟扫描:板上买触发(四组统一,无竞价过滤/停手)。
 
-口径(与定稿 v3.0 盘中规则对应):
-- 扫描窗口 09:30~15:00 全日(研究未设时段限制,反包板午后同样有效)
-- A1/A2:首次扫描以现货开盘价定竞价幅度,0%~+4% 范围外 → skipped_gap 当日不再跟踪
-- A1/B:现价 ≥ 触发价(昨收×1.07)→ 立即模拟买入(触及即买,无确认),买入价 = 触发价
-- A2:现价 ≥ 触发价(昨收×1.09)→ 立即模拟买入(+9% 准封板确认,封死 +10% 不追);
-  买入后 14:50 起现价仍未封涨停价 → 标记 pending_exit(未封当日尾盘卖,EOD 定版)
-- 大盘停手日(昨日主板非ST涨停 >110 家)整池 halted,只展示不触发
+口径(U型补涨打板定稿 v4.0 盘中规则):
+- 扫描窗口 09:30~15:00 全日(研究未设时段限制)
+- 只对 actionable(白名单出手)的池票触发;触发池其余票是雷达,不写信号
+- 一字排除:首次见到开盘价 ≥ 涨停价(一字/开盘即板)→ skipped_gap 当日不再跟踪
+- 触发:现价 ≥ 涨停价(触发价=涨停价)→ 立即模拟买入,买入价 = 涨停价
+- 卖出由 EOD 定版(板留断走:买入次日起首个未涨停日收盘)
 - 现货快照 freshness 以 trade_time 日期兜底(节假日不交易不产生假信号)
 """
 
@@ -27,14 +26,13 @@ from alphaagent.server.services.weak_to_strong import contracts, repository
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 _ADVISORY_LOCK_KEY = 726102
-A2_EOD_EXIT_START = time(*contracts.A2_EOD_EXIT_CHECK)  # A2 未封当日尾盘卖检查窗口
 MIN_SPOT_FRESH_SYMBOLS = 3000    # 现货新鲜度门槛(全市场应有量级)
 
 _TERMINAL_STATUSES = {"skipped_gap", "halted", "no_trigger", "closed"}
 
 
 class LiveScanAlreadyRunningError(RuntimeError):
-    """趋势弱转强盘中扫描已有任务在执行。"""
+    """U型补涨打板盘中扫描已有任务在执行。"""
 
 
 def in_scan_window(now: datetime) -> bool:
@@ -83,7 +81,6 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
         return {"status": "skipped", "message": "现货快照非今日数据"}
 
     signals = repository.load_signal_map(today)
-    a2_eod_exit_open = now.timetz().replace(tzinfo=None) >= A2_EOD_EXIT_START
     touched = entered = 0
     writes: list[tuple[tuple[str, str], dict[str, object]]] = []
 
@@ -91,6 +88,8 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
         vt = str(entry["vt_symbol"])
         group_key = str(entry["group_key"])
         key = (vt, group_key)
+        if not bool(entry.get("actionable")):
+            continue  # 雷达票(触发池全量)只展示不触发,不写信号
         sig = signals.get(key)
         status = str(sig.get("status")) if sig else "watching"
         if status in _TERMINAL_STATUSES:
@@ -100,12 +99,6 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
             "trigger_price": entry.get("trigger_price"),
             "rules_version": contracts.W2S_RULES_VERSION,
         }
-        # 大盘停手:整池只标记一次,不跟踪不触发
-        if bool(entry.get("halted")):
-            if status == "watching":
-                patch["status"] = "halted"
-                writes.append((key, patch))
-            continue
         item = items.get(vt)
         if item is None:
             continue
@@ -115,25 +108,21 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
         if volume <= 0 or last_price is None or last_price <= 0:
             continue  # 停牌/未交易
         prev_close = float(entry["prev_close"])
-        trigger = float(entry["trigger_price"])
+        trigger = float(entry["trigger_price"])   # = 涨停价(板上买)
         limit_price = float(entry.get("limit_price") or 0.0)
         patch["last_price"] = last_price
         patch["change_pct"] = round((last_price / prev_close - 1) * 100, 3)
 
-        # A1/A2 竞价过滤:首次见到开盘价定 gap,范围外当日终态
-        if group_key in ("a1", "a2") and status == "watching":
-            gap_open = (open_price / prev_close - 1) if open_price and open_price > 0 else None
-            if gap_open is not None:
-                patch["gap_open"] = round(gap_open, 5)
-                if not contracts.AUCTION_GAP_MIN <= gap_open <= contracts.AUCTION_GAP_MAX:
-                    patch["status"] = "skipped_gap"
-                    writes.append((key, patch))
-                    continue
-        elif status == "watching" and open_price and open_price > 0:
+        # 一字排除:首次见到开盘价即涨停 → 买不进,当日终态
+        if status == "watching" and open_price and open_price > 0:
             patch["gap_open"] = round(open_price / prev_close - 1, 5)
+            if limit_price > 0 and open_price >= limit_price - 1e-6:
+                patch["status"] = "skipped_gap"
+                writes.append((key, patch))
+                continue
 
-        if status in {"watching"}:
-            # A1/B +7% 触及直接打;A2 +9% 准封板触及直接打(封死 +10% 买不到,不追)
+        if status == "watching":
+            # 板上买:现价触及涨停价立即打(触及即买,无确认)
             if last_price >= trigger:
                 patch["status"] = "entered"
                 patch["touched_at"] = now
@@ -141,10 +130,6 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
                 patch["entry_time"] = now
                 touched += 1
                 entered += 1
-        elif (group_key == "a2" and status == "entered" and a2_eod_exit_open
-              and limit_price > 0 and last_price < limit_price - 1e-6):
-            # A2 未封当日走:14:50 后仍未封涨停 → 尾盘卖出(EOD 按收盘价定版 same_day_fail)
-            patch["status"] = "pending_exit"
         writes.append((key, patch))
 
     for key, patch in writes:

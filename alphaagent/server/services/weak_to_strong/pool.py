@@ -1,20 +1,26 @@
-"""趋势弱转强盘前池计算:全部条件来自 T-1 收盘数据(无未来函数)。
+"""U型补涨打板盘前池计算:全部条件来自 T-1 收盘数据(无未来函数)。
 
-口径与 量化因子研究/低吸研究/scripts/w2s_replay.py 研究管线一致(定稿 v3.0):
-  基本条件: 主板非ST非退 / 前10个交易日内出现过≥2连板 / 昨日未涨停 / 昨日换手 3%~60%
-  组划分: 最近一次≥2连板高度==2 → A 组;>=4 且距连板末日≥3个交易日 → B 组;=3 弃
-  A1: 跌>3% + 下影线<2% + (量比0.7~1.2 或 振幅≥12%) + 换手8~20% + 近20日涨幅<30%
-  A2: 昨日收阳 + 上影线<2%(同花顺标准口径,与「昨日收阳」组合=收盘贴全日高点)
-      + 换手8~20% + 近20日涨幅<30%;盘中触 +9% 限价买(准封板确认)
-  B:  跌>3% + 下影线<2% + (量比0.7~1.2 或 振幅≥12%) + 换手5~25%
+口径 = 量化因子研究/低吸研究/U型补涨打板.md 定稿(2026-08-30, 原趋势弱转强V4):
+  触发池(四组基本条件):
+    2板补涨阴: 前20日最大连板=2 + 昨收阴 + 昨幅>-9% + 昨上影<4% + 昨日未涨停
+    2板补涨阳: 前20日最大连板=2 + 昨收阳 + 昨幅>-3% + 昨上影<4% + 昨日未涨停
+    4+补涨阴:  前20日最大连板>=4 + 昨收阴 + 昨幅>-8% + 昨上影<4% + 昨日未涨停
+    4+补涨阳:  前20日最大连板>=4 + 昨收阳 + 昨幅>-3% + 昨上影<4% + 昨日未涨停
+  出手白名单(u_shape.actionable_of): 2板阴=U坑蹲类×弹回≤16%×坑宽6-15×未收顶上;
+    2板阳=坑底首阳×未收顶上 或 坑中纠缠×下探中; 4+阴=孤板×全多头×U坑存在×剔中坑回顶;
+    4+阳=2板小波穿插(夹层)。
+  池=触发池全量(雷达)+actionable 出手标记; 盘中只对 actionable 票开买入触发。
+  买入=板上买(触板买涨停价, 一字排除); 卖出=板留断走(T+1起首个未涨停日收盘)。
 涨停判定与研究浮点口径一致(主板非ST:涨停价 = round(昨收×1.10+1e-9, 2),收盘等于即封板);
 连板序列在本窗口内自建,与 stock_limit_up_daily(detector 口径)对主板非ST等价。
+指数对齐:研究事件行=D0(触板日),本模块信号行=T-1(=研究D-1);
+  mx20/均线在信号日无 shift(=研究 shift(1) 于 D0);坑宽 gap_d0=(信号日+1)-末板=研究 gap。
 """
 
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -24,10 +30,10 @@ from sqlalchemy import func, select
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, session_scope
 from alphaagent.server.services.a_share_universe import is_eligible_main_board
-from alphaagent.server.services.weak_to_strong import contracts
+from alphaagent.server.services.weak_to_strong import contracts, u_shape
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-_LOOKBACK_CAL_DAYS = 130  # ≈90 个交易日,覆盖 h60pre(60)+ret20(20)+连板窗口(10)+余量
+_LOOKBACK_CAL_DAYS = 130  # ≈90 个交易日,覆盖 ma30(30)+mx20(20)+段锚+余量
 
 
 def latest_daily_date() -> date | None:
@@ -47,11 +53,55 @@ def next_weekday(day: date) -> date:
     return nxt
 
 
+def derive_daily(bars: pd.DataFrame) -> pd.DataFrame:
+    """日线派生列(pool/backtest 共用基础件;U模型部分在 u_shape 按候选行算)。"""
+    bars = bars.copy()
+    bars.sort_values(["vt_symbol", "trade_date"], inplace=True, ignore_index=True)
+    g = bars.groupby("vt_symbol", sort=False)
+    bars["prev_close"] = g["close_price"].shift(1)
+    bars["pos"] = g.cumcount()
+    # 涨停判定:主板非ST 10%,与研究浮点口径一致;窗口内 pos>=5 才参与判定
+    # (对齐研究"上市>5日"口径:对老股无影响,只挡窗口内新上市票的伪连板)
+    limit_px = np.round(bars["prev_close"] * 1.10 + 1e-9, 2)
+    elig_lim = bars["prev_close"].notna() & (bars["prev_close"] > 0) & (bars["pos"] >= 5)
+    bars["is_lim"] = elig_lim & ((bars["close_price"] - limit_px).abs() <= 1e-6)
+    is_lim_i = bars["is_lim"].astype("int8")
+    brk = (~bars["is_lim"]).groupby(bars["vt_symbol"], sort=False).cumsum()
+    bars["streak"] = is_lim_i.groupby([bars["vt_symbol"], brk], sort=False).cumsum()
+    bars["chg"] = (bars["close_price"] / bars["prev_close"] - 1) * 100
+    high_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).max(axis=1)
+    bars["ushadow"] = (bars["high_price"] - high_oc) / bars["prev_close"] * 100
+    bars["yang"] = bars["close_price"] > bars["open_price"]
+    bars["yin"] = bars["close_price"] < bars["open_price"]
+    # 前20日最大连板(信号日口径=研究 mx20: rolling(20) 无 shift 于 T-1 行)
+    gs = g["streak"]
+    bars["mx20"] = gs.transform(lambda s: s.rolling(contracts.MX_WINDOW, min_periods=1).max())
+    return bars
+
+
+def group_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """四组基本条件布尔 mask(作用于信号日行;返回五组 key,yang2 两通道此处合并为 yang2*)。"""
+    c = contracts
+    common = (~df["is_lim"]) & (df["ushadow"] < c.USHADOW_MAX)
+    return {
+        "yin2": (common & (df["mx20"] == 2) & df["yin"] & (df["chg"] > c.YIN_CHG_MIN)),
+        "yang2*": (common & (df["mx20"] == 2) & df["yang"] & (df["chg"] > c.YANG_CHG_MIN)),
+        "yin4": (common & (df["mx20"] >= 4) & df["yin"] & (df["chg"] > c.YIN4_CHG_MIN)),
+        "yang4": (common & (df["mx20"] >= 4) & df["yang"] & (df["chg"] > c.YANG_CHG_MIN)),
+    }
+
+
+def split_yang2_channel(f: dict) -> str:
+    """2板阳触发按地基分道(显示桶): DN→坑底首阳通道, 其余→坑中纠缠通道。"""
+    return u_shape.GROUP_YANG2A if f["base"] == "DN" else u_shape.GROUP_YANG2B
+
+
 def compute_pool(data_date: date | None = None) -> dict[str, object]:
-    """以 data_date(默认最新日线日)为 T-1 计算次日三组池。
+    """以 data_date(默认最新日线日)为 T-1 计算次日四组池(触发全量+出手标记)。
 
     返回 {data_date, exec_date, rules_version, mkt_lim_tm1, entries, filter_stats}。
-    entries 每行含 group_key/prev_close/trigger_price/limit_price 及全部条件快照值。
+    entries 每行含 group_key(五组)/actionable/prev_close/trigger_price(=limit_price)/
+    limit_price 及 U 模型快照(base/pos3/low_dd/pull/reb/ma_st/n_lim_mid/topped/d23ok/seg_h)。
     """
     engine = get_engine()
     if data_date is None:
@@ -70,8 +120,6 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             schema.stock_daily_bars.c.high_price,
             schema.stock_daily_bars.c.low_price,
             schema.stock_daily_bars.c.close_price,
-            schema.stock_daily_bars.c.volume,
-            schema.stock_daily_bars.c.turnover_rate,
         ).where(schema.stock_daily_bars.c.trade_date >= window_start,
                 schema.stock_daily_bars.c.trade_date <= data_date),
         engine,
@@ -93,114 +141,90 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
 
     bars = bars[bars["vt_symbol"].isin(set(eligible["vt_symbol"]))].copy()
     bars["trade_date"] = pd.to_datetime(bars["trade_date"])
-    bars.sort_values(["vt_symbol", "trade_date"], inplace=True, ignore_index=True)
-    g = bars.groupby("vt_symbol", sort=False)
-    bars["prev_close"] = g["close_price"].shift(1)
-    bars["pos"] = g.cumcount()
-    # 涨停判定:主板非ST 10%,与研究浮点口径一致;窗口内 pos>=5 才参与判定
-    # (对齐研究"上市>5日"口径:对老股无影响,只挡窗口内新上市票的伪连板)
-    limit_px = np.round(bars["prev_close"] * 1.10 + 1e-9, 2)
-    elig_lim = bars["prev_close"].notna() & (bars["prev_close"] > 0) & (bars["pos"] >= 5)
-    bars["is_lim"] = elig_lim & ((bars["close_price"] - limit_px).abs() <= 1e-6)
-    is_lim_i = bars["is_lim"].astype("int8")
-    brk = (~bars["is_lim"]).groupby(bars["vt_symbol"], sort=False).cumsum()
-    bars["streak"] = is_lim_i.groupby([bars["vt_symbol"], brk], sort=False).cumsum()
-    bars["chg"] = (bars["close_price"] / bars["prev_close"] - 1) * 100
-    bars["chg_d2"] = g["chg"].shift(1)  # 前日涨跌幅(v2.2:前日也须收跌)
-    low_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).min(axis=1)
-    bars["lshadow"] = (low_oc - bars["low_price"]) / bars["prev_close"] * 100
-    # v3.0 A2:昨日收阳 + 同花顺标准上影线(最高-实体顶)/昨收
-    high_oc = pd.concat([bars["open_price"], bars["close_price"]], axis=1).max(axis=1)
-    bars["ushadow"] = (bars["high_price"] - high_oc) / bars["prev_close"] * 100
-    bars["yang"] = bars["close_price"] > bars["open_price"]
-    bars["amp"] = (bars["high_price"] - bars["low_price"]) / bars["prev_close"] * 100
-    bars["ret20"] = g["close_price"].transform(lambda s: (s / s.shift(20) - 1) * 100)
-    gv = g["volume"]
-    bars["vol_ma5"] = gv.transform(lambda s: s.rolling(5, min_periods=3).mean())
-    bars["vol_rel5"] = bars["volume"] / bars["vol_ma5"]
-    gs = g["streak"]
-    bars["s2max10"] = gs.transform(lambda s: s.rolling(10, min_periods=1).max())
-    last2 = bars["pos"].where(bars["streak"] >= 2)
-    bars["last2"] = last2.groupby(bars["vt_symbol"], sort=False).ffill()
-    bars["gap2"] = bars["pos"] - bars["last2"]
-    bars["last_streak"] = (bars["streak"].where(bars["streak"] >= 2)
-                           .groupby(bars["vt_symbol"], sort=False).ffill())
-    # v2.1 位置条件:首板日收盘不得创 60 日新高(突破过顶不做)
-    bars["h60pre"] = g["high_price"].transform(
-        lambda s: s.rolling(contracts.HIGH60_LOOKBACK, min_periods=20).max().shift(1))
-    bars["ss_pos"] = bars["last2"] - bars["last_streak"] + 1
-    lk = (bars[["vt_symbol", "pos", "close_price", "h60pre"]]
-          .rename(columns={"pos": "ss_pos", "close_price": "fb_close", "h60pre": "fb_h60"}))
-    bars = bars.merge(lk, on=["vt_symbol", "ss_pos"], how="left")
-    bars.sort_values(["vt_symbol", "trade_date"], inplace=True)
-    bars["brk60"] = bars["fb_close"] >= bars["fb_h60"] - 1e-9  # NaN → False(历史不足视为未创)
+    bars = derive_daily(bars)
 
-    # 昨日大盘涨停家数(主板非ST宇宙,研究口径)
+    # 昨日大盘涨停家数(主板非ST宇宙,信息展示用;V4 无停手规则)
     mkt_lim = int(bars.loc[bars["trade_date"] == pd.Timestamp(data_date), "is_lim"].sum())
+    stats["mkt_lim_tm1"] = mkt_lim
 
     last = bars.groupby("vt_symbol", sort=False).tail(1).copy()
     last = last[last["trade_date"] == pd.Timestamp(data_date)]
     stats["with_bars_on_date"] = int(len(last))
 
-    c = contracts
-    base = (last["turnover_rate"].between(c.TURNOVER_BASE_MIN, c.TURNOVER_BASE_MAX)
-            & (last["s2max10"] >= 2) & (last["gap2"] >= 1) & (~last["is_lim"]))
-    grp_a = last["last_streak"] == c.GROUP_A_STREAK
-    grp_b = (last["last_streak"] >= c.GROUP_B_MIN_STREAK) & (last["gap2"] >= c.GROUP_B_MIN_GAP)
-    cc = (last["vol_rel5"].between(c.VOL_REL5_MIN, c.VOL_REL5_MAX)
-          | (last["amp"] >= c.AMP_MIN))
-    panic = (last["chg"] <= c.PANIC_CHG_MAX) & (last["lshadow"] < c.LOWER_SHADOW_MAX)
-    masks = {
-        "a1": (base & grp_a & panic & cc
-               & last["turnover_rate"].between(c.A1_TURNOVER_MIN, c.A1_TURNOVER_MAX)
-               & (last["ret20"] < c.BASE20_MAX)
-               & (~last["brk60"])
-               & (last["chg_d2"] < 0)),
-        "a2": (base & grp_a & last["yang"]
-               & (last["ushadow"] < c.UPPER_SHADOW_MAX)
-               & last["turnover_rate"].between(c.A2_TURNOVER_MIN, c.A2_TURNOVER_MAX)
-               & (last["ret20"] < c.BASE20_MAX)),
-        "b": (base & grp_b & panic & cc
-              & last["turnover_rate"].between(c.B_TURNOVER_MIN, c.B_TURNOVER_MAX)),
-    }
-    stats["pool_a1"] = int(masks["a1"].sum())
-    stats["pool_a2"] = int(masks["a2"].sum())
-    stats["pool_b"] = int(masks["b"].sum())
-    stats["mkt_lim_tm1"] = mkt_lim
+    masks = group_masks(last)
+    hit = masks["yin2"] | masks["yang2*"] | masks["yin4"] | masks["yang4"]
+    cand = last[hit]
+    stats["trigger_pool"] = int(len(cand))
 
-    halted = mkt_lim > c.MKT_LIM_HALT
+    # 候选股的 U 模型数组(u_features 按行算)
+    arr_by: dict[str, dict[str, object]] = {}
+    for vt, grp in bars[bars["vt_symbol"].isin(set(cand["vt_symbol"]))].groupby(
+            "vt_symbol", sort=False):
+        arr_by[str(vt)] = {
+            "close": grp["close_price"].to_numpy(dtype=float),
+            "high": grp["high_price"].to_numpy(dtype=float),
+            "is_lim": grp["is_lim"].to_numpy(dtype=bool),
+            "streak": grp["streak"].to_numpy(dtype=float),
+        }
+
     entries: list[dict[str, object]] = []
-    for group_key, mask in masks.items():
-        for row in last[mask].itertuples():
-            prev_close = float(row.close_price)
-            limit_price = round(prev_close * 1.10 + 1e-9, 2)
-            trigger_pct = c.A2_TRIGGER_PCT if group_key == "a2" else c.TRIGGER_PCT
-            trigger_price = round(prev_close * (1 + trigger_pct) + 1e-9, 4)
-            entries.append({
-                "vt_symbol": str(row.vt_symbol),
-                "group_key": group_key,
-                "name": str(name_map.get(row.vt_symbol) or ""),
-                "prev_close": prev_close,
-                "trigger_price": trigger_price,
-                "limit_price": limit_price,
-                "chg_tm1": _f(row.chg),
-                "lshadow_tm1": _f(row.lshadow),
-                "ushadow_tm1": _f(row.ushadow),
-                "yang_tm1": bool(row.yang),
-                "vol_rel5_tm1": _f(row.vol_rel5),
-                "amp_tm1": _f(row.amp),
-                "turnover_tm1": _f(row.turnover_rate),
-                "base20_tm1": _f(row.ret20),
-                "last_streak": _i(row.last_streak),
-                "gap_days": _i(row.gap2),
-                "mkt_lim_tm1": mkt_lim,
-                "halted": halted,
-            })
+    n_actionable = 0
+    for row in cand.itertuples():
+        vt = str(row.vt_symbol)
+        arr = arr_by[vt]
+        # bigtop 锚修正只对 4+组启用(研究口径: 2板组锚就是2板段, 不做大波重算)
+        is4 = bool(masks["yin4"].loc[row.Index] or masks["yang4"].loc[row.Index])
+        f = u_shape.u_features(arr["close"], arr["high"], arr["is_lim"],
+                               arr["streak"], int(row.pos), bigtop=is4)
+        if f is None:
+            continue
+        if masks["yin2"].loc[row.Index]:
+            group_key = u_shape.GROUP_YIN2
+        elif masks["yin4"].loc[row.Index]:
+            group_key = u_shape.GROUP_YIN4
+        elif masks["yang4"].loc[row.Index]:
+            group_key = u_shape.GROUP_YANG4
+        else:  # 2板阳: 按地基分道到五组 key
+            group_key = split_yang2_channel(f)
+        actionable = u_shape.actionable_of(group_key, f)
+        n_actionable += int(actionable)
+        prev_close = float(row.close_price)
+        limit_price = round(prev_close * 1.10 + 1e-9, 2)
+        entries.append({
+            "vt_symbol": vt,
+            "group_key": group_key,
+            "name": str(name_map.get(vt) or ""),
+            "actionable": actionable,
+            "prev_close": prev_close,
+            "trigger_price": limit_price,   # 板上买: 触发价=涨停价
+            "limit_price": limit_price,
+            "chg_tm1": _f(row.chg),
+            "ushadow_tm1": _f(row.ushadow),
+            "yang_tm1": bool(row.yang),
+            "base": f["base"],
+            "base_label": u_shape.BASE_NAME.get(f["base"], f["base"]),
+            "pos3": f["pos3"],
+            "low_dd": _f(round(f["low_dd"] * 100, 2)),
+            "pull": _f(round(f["pull"] * 100, 2)),
+            "reb": _f(round(f["reb"] * 100, 2)),
+            "ma_st": f["ma_st"],
+            "n_lim_mid": int(f["n_lim_mid"]),
+            "topped": bool(f["topped"]),
+            "d23ok": bool(f["d23ok"]),
+            "seg_h": int(f["seg_h"]),
+            "gap_days": int(f["gap_d0"]),
+            "mkt_lim_tm1": mkt_lim,
+        })
+    stats["actionable"] = n_actionable
+    for gk in contracts.GROUP_KEYS:
+        stats[f"pool_{gk}"] = sum(1 for e in entries if e["group_key"] == gk)
+        stats[f"act_{gk}"] = sum(1 for e in entries
+                                 if e["group_key"] == gk and e["actionable"])
     entries.sort(key=lambda e: (str(e["group_key"]), str(e["vt_symbol"])))
     return {
         "data_date": data_date.isoformat(),
         "exec_date": next_weekday(data_date).isoformat(),
-        "rules_version": c.W2S_RULES_VERSION,
+        "rules_version": contracts.W2S_RULES_VERSION,
         "mkt_lim_tm1": mkt_lim,
         "entries": entries,
         "filter_stats": stats,
@@ -213,11 +237,3 @@ def _f(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
-
-
-def _i(value: object) -> int | None:
-    try:
-        number = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return int(number) if math.isfinite(number) else None

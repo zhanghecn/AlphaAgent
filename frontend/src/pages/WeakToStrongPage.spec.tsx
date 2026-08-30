@@ -23,49 +23,56 @@ const LIVE_PAYLOAD: W2sLivePayload = {
   trade_date: "2026-08-24",
   stale: false,
   session_stage: "morning",
-  rules_version: "w2s-v2.2",
+  rules_version: "w2s-v4.0",
   counts: {
     pool: 2,
-    signals: 2,
-    by_group: { a1: 1, b: 1 },
+    actionable: 1,
+    signals: 1,
+    by_group: { yin2: 1, yang4: 1 },
     by_status: { watching: 1, holding: 1 },
   },
-  market_halt: {
-    halted: true,
-    mkt_lim_tm1: 121,
-    threshold: 110,
-    note: "昨日主板非ST涨停家数超阈值 → 今日整池停手",
+  mkt_lim_tm1: 121,
+  group_labels: {
+    yin2: "2板阴·U坑",
+    yang2a: "2板阳·坑底首阳",
+    yang2b: "2板阳·坑中纠缠",
+    yin4: "4+阴·孤板多头",
+    yang4: "4+阳·2板穿插",
   },
-  group_labels: { a1: "A1 恐慌出清", a2: "A2 强势整理", b: "B 高位弱转强" },
   last_scan: null,
   entries: [
     {
       vt_symbol: "000592.SZSE",
       name: "平潭发展",
-      group_key: "a1",
+      group_key: "yin2",
+      actionable: true,
       prev_close: 3.75,
-      trigger_price: 4.0125,
+      trigger_price: 4.125,
       limit_price: 4.13,
       chg_tm1: -5.1,
-      lshadow_tm1: 0.76,
-      ushadow_tm1: null,
-      yang_tm1: null,
-      vol_rel5_tm1: 0.96,
-      amp_tm1: 6.3,
-      turnover_tm1: 15.6,
-      base20_tm1: 9.0,
-      last_streak: 2,
-      gap_days: 2,
-      halted: true,
-      status: "halted",
+      ushadow_tm1: 1.2,
+      yang_tm1: false,
+      base: "u_dip",
+      base_label: "U型蹲",
+      pos3: "U坑内",
+      low_dd: -12.3,
+      pull: -8.1,
+      reb: 5.2,
+      ma_st: null,
+      n_lim_mid: null,
+      topped: false,
+      d23ok: null,
+      seg_h: null,
+      gap_days: 8,
+      status: "holding",
       gap_open_pct: 0.8,
-      touched_at: null,
-      entry_price: null,
-      entry_time: null,
-      last_price: 3.78,
-      change_pct: 0.8,
-      sealed: null,
-      streak_h: null,
+      touched_at: "2026-08-21T09:42:00+08:00",
+      entry_price: 4.125,
+      entry_time: "2026-08-21T09:42:00+08:00",
+      last_price: 4.54,
+      change_pct: 10.0,
+      sealed: true,
+      streak_h: 2,
       exit_date: null,
       exit_price: null,
       exit_reason: null,
@@ -74,30 +81,35 @@ const LIVE_PAYLOAD: W2sLivePayload = {
     {
       vt_symbol: "600683.SSE",
       name: "京投发展",
-      group_key: "b",
+      group_key: "yang4",
+      actionable: false,
       prev_close: 5.0,
-      trigger_price: 5.35,
+      trigger_price: 5.5,
       limit_price: 5.5,
       chg_tm1: -6.2,
-      lshadow_tm1: 1.1,
-      ushadow_tm1: null,
-      yang_tm1: null,
-      vol_rel5_tm1: 0.9,
-      amp_tm1: 8.1,
-      turnover_tm1: 12.0,
-      base20_tm1: 10.0,
-      last_streak: 4,
+      ushadow_tm1: 1.1,
+      yang_tm1: false,
+      base: null,
+      base_label: null,
+      pos3: "无U",
+      low_dd: -2.1,
+      pull: -1.3,
+      reb: null,
+      ma_st: "+++",
+      n_lim_mid: 0,
+      topped: null,
+      d23ok: null,
+      seg_h: 2,
       gap_days: 4,
-      halted: true,
-      status: "holding",
+      status: "watching",
       gap_open_pct: 1.2,
-      touched_at: "2026-08-24T10:01:00+08:00",
-      entry_price: 5.35,
-      entry_time: "2026-08-24T10:01:00+08:00",
-      last_price: 5.5,
-      change_pct: 10.0,
-      sealed: true,
-      streak_h: 2,
+      touched_at: null,
+      entry_price: null,
+      entry_time: null,
+      last_price: 5.06,
+      change_pct: 1.2,
+      sealed: null,
+      streak_h: null,
       exit_date: null,
       exit_price: null,
       exit_reason: null,
@@ -113,7 +125,7 @@ describe("WeakToStrongPage live refresh cadence", () => {
 });
 
 describe("W2sLiveView", () => {
-  it("renders group badges, halt banner and status labels", () => {
+  it("renders group badges, actionable marks and status labels", () => {
     const html = renderToStaticMarkup(
       withProviders(
         <W2sLiveView
@@ -124,12 +136,16 @@ describe("W2sLiveView", () => {
         />,
       ),
     );
-    expect(html).toContain("A1 恐慌出清");
-    expect(html).toContain("B 高位弱转强");
-    expect(html).toContain("大盘停手日");
-    expect(html).toContain("停手日·不做");
+    expect(html).toContain("U型补涨打板 · 实时推荐");
+    expect(html).toContain("2板阴");
+    expect(html).toContain("2板阴·U坑");
+    expect(html).toContain("4+阳");
+    expect(html).toContain("✅出手");
+    expect(html).toContain("无U");
     expect(html).toContain("持有中");
     expect(html).toContain("平潭发展");
+    expect(html).not.toContain("大盘停手日");
+    expect(html).not.toContain("停手日·不做");
   });
 });
 
@@ -152,9 +168,9 @@ describe("W2sLedgerView", () => {
               {
                 vt_symbol: "000592.SZSE",
                 name: "平潭发展",
-                group: "a1",
-                group_label: "A1 恐慌出清",
-                entry_price: 4.0125,
+                group: "yin2",
+                group_label: "2板阴·U坑",
+                entry_price: 4.125,
                 gap_open_pct: 0.8,
                 sealed: true,
                 streak_h: 5,
@@ -171,16 +187,16 @@ describe("W2sLedgerView", () => {
     );
     expect(html).toContain("断板日收盘卖");
     expect(html).toContain("5 板");
-    expect(html).toContain("A1");
+    expect(html).toContain("2板阴");
   });
 });
 
 describe("ShortTermResearchPage", () => {
-  it("registers 趋势弱转强 as the third research tab", () => {
+  it("registers U型补涨打板 as a research tab", () => {
     const html = renderToStaticMarkup(
       withProviders(<ShortTermResearchPage />, ["/short-term?research=weak-to-strong"]),
     );
-    expect(html).toContain("趋势弱转强");
+    expect(html).toContain("U型补涨打板");
     expect(html).toContain("潜龙首板");
     expect(html).toContain("低吸");
   });

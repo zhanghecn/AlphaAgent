@@ -401,7 +401,9 @@ def main():
         tg["grp"] = name
         tg["topped"] = [topped_of(s, p) for s, p in zip(tg["sid"], tg["pos"])]
         r23 = [d23_of(s, p) for s, p in zip(tg["sid"], tg["pos"])]
-        tg["d23ok"] = [(a is True) and (b is False) for a, b in r23]
+        # ⚠️ a 是 numpy.bool_ 不是 Python bool: 必须 bool() 包装, 「a is True」对 np.True_ 恒 False
+        # (2026-08-30 事故: 曾致通道二出手票在库里全灭; 共进股份个案抓出)
+        tg["d23ok"] = [bool(a) and not bool(b) for a, b in r23]
         if name.startswith("4板"):
             bigtop_fix(tg)
         tg["is_wv"] = [(s, p) in wave_keys for s, p in zip(tg["sid"], tg["pos"])]

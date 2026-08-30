@@ -8,26 +8,28 @@ import { cn, formatPct, formatPrice } from "@/lib/utils";
 const EXIT_REASON_LABELS: Record<string, string> = {
   next_close_fail: "次日未涨停·收盘卖",
   break_close: "断板日收盘卖",
-  max_hold_close: "15日兜底·收盘卖",
-  same_day_fail: "当日未封·尾盘卖",
+  max_hold_close: "20日兜底·收盘卖",
   open_end: "持有中",
 };
 
+const GROUP_KEYS = ["yin2", "yang2a", "yang2b", "yin4", "yang4"] as const;
+
 const GROUP_BADGES: Record<W2sGroupKey, { label: string; className: string }> = {
-  a1: { label: "A1", className: "bg-primary/15 text-primary" },
-  a2: { label: "A2", className: "bg-rise/15 text-rise" },
-  b: { label: "B", className: "bg-amber-500/15 text-amber-500" },
+  yin2: { label: "2板阴", className: "bg-primary/15 text-primary" },
+  yang2a: { label: "首阳", className: "bg-rise/15 text-rise" },
+  yang2b: { label: "纠缠", className: "bg-orange-500/15 text-orange-500" },
+  yin4: { label: "4+阴", className: "bg-violet-500/15 text-violet-500" },
+  yang4: { label: "4+阳", className: "bg-amber-500/15 text-amber-500" },
 };
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-/** 趋势弱转强历史交割单:横向平铺列表(全部触发信号逐笔,不限仓位),支持月份/组/搜票筛选。 */
+/** U型补涨打板历史交割单:横向平铺列表(全部出手信号逐笔,不限仓位),支持月份/组/搜票筛选。 */
 export function W2sLedgerView({
   ledgerDays,
   months,
   month,
   onMonthChange,
-  caliber,
 }: {
   ledgerDays: W2sLedgerDay[];
   months: W2sLedgerMonth[];
@@ -62,10 +64,10 @@ export function W2sLedgerView({
   }
 
   return (
-    <section aria-label="趋势弱转强历史交割单" className="rounded-lg border">
+    <section aria-label="U型补涨打板历史交割单" className="rounded-lg border">
       <div className="border-b px-4 py-2 text-xs text-muted-foreground">
-        回测模拟口径(非实盘):{caliber ?? "日线口径,无滑点"}
-        ;全部触发信号逐笔,不限仓位。实时前推成交随产品上线逐日沉淀。
+        回测模拟口径(非实盘):板上买(触板买涨停价,一字排除),板留断走
+        ;全部出手信号逐笔,不限仓位。实时前推成交随产品上线逐日沉淀。
       </div>
 
       <GroupSummaryBar summaries={groupSummaries} />
@@ -87,7 +89,7 @@ export function W2sLedgerView({
           </select>
         </label>
         <span className="inline-flex border">
-          {(["all", "a1", "a2", "b"] as const).map((gk) => (
+          {(["all", ...GROUP_KEYS] as const).map((gk) => (
             <button
               key={gk}
               type="button"
@@ -147,7 +149,7 @@ export function W2sLedgerView({
 }
 
 function LedgerRow({ day, trade }: { day: string; trade: W2sLedgerTrade }) {
-  const badge = GROUP_BADGES[trade.group] ?? GROUP_BADGES.a1;
+  const badge = GROUP_BADGES[trade.group] ?? GROUP_BADGES.yin2;
   const weekday = WEEKDAYS[new Date(`${day}T00:00:00`).getDay()];
   return (
     <tr>
@@ -200,12 +202,10 @@ interface GroupSummary {
 }
 
 function summarizeByGroup(days: W2sLedgerDay[]): Record<W2sGroupKey, GroupSummary> {
-  const result: Record<W2sGroupKey, GroupSummary> = {
-    a1: { count: 0, wins: 0, avgPct: null, totalPct: null },
-    a2: { count: 0, wins: 0, avgPct: null, totalPct: null },
-    b: { count: 0, wins: 0, avgPct: null, totalPct: null },
-  };
-  for (const key of ["a1", "a2", "b"] as const) {
+  const result = Object.fromEntries(
+    GROUP_KEYS.map((k) => [k, { count: 0, wins: 0, avgPct: null, totalPct: null }]),
+  ) as Record<W2sGroupKey, GroupSummary>;
+  for (const key of GROUP_KEYS) {
     let sum = 0;
     for (const day of days) {
       for (const t of day.trades) {
@@ -225,8 +225,8 @@ function summarizeByGroup(days: W2sLedgerDay[]): Record<W2sGroupKey, GroupSummar
 
 function GroupSummaryBar({ summaries }: { summaries: Record<W2sGroupKey, GroupSummary> }) {
   return (
-    <div className="grid grid-cols-3 gap-px border-b bg-border">
-      {(["a1", "a2", "b"] as const).map((key) => {
+    <div className="grid grid-cols-2 gap-px border-b bg-border md:grid-cols-5">
+      {GROUP_KEYS.map((key) => {
         const badge = GROUP_BADGES[key];
         const s = summaries[key];
         const winRate = s.count > 0 ? (s.wins / s.count) * 100 : null;

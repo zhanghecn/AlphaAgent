@@ -1,4 +1,4 @@
-"""趋势弱转强持久层:池/信号/扫描轨道/回测报告的读写。"""
+"""U型补涨打板持久层:池/信号/扫描轨道/回测报告的读写。"""
 
 from __future__ import annotations
 
@@ -13,24 +13,37 @@ from alphaagent.server.db.session import get_engine, session_scope
 
 _SIGNAL_PK = ("trade_date", "vt_symbol", "group_key")
 
-# v3.0 新增列:create_all 不给已存在的表补列(参照 API Perf 教训),幂等补列
-_TABLE_V3_COLUMNS = {
+# create_all 不给已存在的表补列(参照 API Perf 教训),幂等补列
+_TABLE_EXTRA_COLUMNS = {
     "w2s_pool_entries": {
         "ushadow_tm1": "DOUBLE PRECISION",
         "yang_tm1": "BOOLEAN",
+        # v4(U型补涨打板)U模型快照列
+        "actionable": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "base": "VARCHAR(8)",
+        "base_label": "VARCHAR(8)",
+        "pos3": "VARCHAR(8)",
+        "low_dd": "DOUBLE PRECISION",
+        "pull": "DOUBLE PRECISION",
+        "reb": "DOUBLE PRECISION",
+        "ma_st": "VARCHAR(4)",
+        "n_lim_mid": "INTEGER",
+        "topped": "BOOLEAN",
+        "d23ok": "BOOLEAN",
+        "seg_h": "INTEGER",
     },
 }
 _columns_ensured = False
 
 
-def _ensure_v3_columns() -> None:
+def _ensure_extra_columns() -> None:
     global _columns_ensured
     if _columns_ensured:
         return
     engine = get_engine()
     if engine.dialect.name == "postgresql":
         with engine.begin() as connection:
-            for table, cols in _TABLE_V3_COLUMNS.items():
+            for table, cols in _TABLE_EXTRA_COLUMNS.items():
                 for name, ddl in cols.items():
                     connection.execute(text(
                         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"))
@@ -42,7 +55,7 @@ def _ensure_v3_columns() -> None:
 def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_version: str) -> int:
     """整覆写某执行日的池(先删后插,幂等)。"""
     schema.ensure_schema_once(get_engine())
-    _ensure_v3_columns()
+    _ensure_extra_columns()
     now = datetime.now(timezone.utc)
     with session_scope() as session:
         session.execute(
@@ -56,21 +69,27 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_versio
                     vt_symbol=str(e["vt_symbol"]),
                     group_key=str(e["group_key"]),
                     name=str(e.get("name") or ""),
+                    actionable=bool(e.get("actionable")),
                     prev_close=e.get("prev_close"),
                     trigger_price=e.get("trigger_price"),
                     limit_price=e.get("limit_price"),
                     chg_tm1=e.get("chg_tm1"),
-                    lshadow_tm1=e.get("lshadow_tm1"),
                     ushadow_tm1=e.get("ushadow_tm1"),
                     yang_tm1=e.get("yang_tm1"),
-                    vol_rel5_tm1=e.get("vol_rel5_tm1"),
-                    amp_tm1=e.get("amp_tm1"),
-                    turnover_tm1=e.get("turnover_tm1"),
-                    base20_tm1=e.get("base20_tm1"),
-                    last_streak=e.get("last_streak"),
+                    base=e.get("base"),
+                    base_label=e.get("base_label"),
+                    pos3=e.get("pos3"),
+                    low_dd=e.get("low_dd"),
+                    pull=e.get("pull"),
+                    reb=e.get("reb"),
+                    ma_st=e.get("ma_st"),
+                    n_lim_mid=e.get("n_lim_mid"),
+                    topped=e.get("topped"),
+                    d23ok=e.get("d23ok"),
+                    seg_h=e.get("seg_h"),
                     gap_days=e.get("gap_days"),
                     mkt_lim_tm1=e.get("mkt_lim_tm1"),
-                    halted=bool(e.get("halted")),
+                    halted=False,
                     rules_version=rules_version,
                     updated_at=now,
                 )
@@ -80,7 +99,7 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_versio
 
 def load_pool(trade_date: date) -> list[dict[str, object]]:
     schema.ensure_schema_once(get_engine())
-    _ensure_v3_columns()
+    _ensure_extra_columns()
     with session_scope() as session:
         rows = session.execute(
             select(schema.w2s_pool_entries)

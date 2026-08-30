@@ -1887,32 +1887,46 @@ Index(
     qianlong_backtest_rebuild_runs.c.requested_at,
 )
 
-# ── 趋势弱转强(二板弱转强打板)产品线 ──
-# 策略口径 = 量化因子研究/低吸研究/趋势低吸研究-弱转强v2.md 定稿 v2,一字不改。
-# 盘前池:每个执行交易日一行/股/组,全部条件来自 T-1 收盘数据。
+# ── U型补涨打板(原趋势弱转强)产品线 ──
+# 策略口径 = 量化因子研究/低吸研究/U型补涨打板.md 定稿(2026-08-30,原弱转强V4)。
+# 盘前池:每个执行交易日一行/股/组,全部条件来自 T-1 收盘数据;池=触发池全量(雷达),
+# actionable=四组白名单出手标记。
 w2s_pool_entries = Table(
     "w2s_pool_entries",
     metadata,
     Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
     Column("vt_symbol", String(32), primary_key=True),
-    Column("group_key", String(8), primary_key=True),  # a1/a2/b
+    Column("group_key", String(8), primary_key=True),  # yin2/yang2a/yang2b/yin4/yang4
     Column("name", String(80), nullable=False),
+    Column("actionable", Boolean, nullable=False, server_default="false"),  # 白名单出手
     Column("prev_close", Float, nullable=False),   # T-1 收盘
-    Column("trigger_price", Float, nullable=False),  # A1/B=昨收×1.07;A2=昨收×1.09(v3)
+    Column("trigger_price", Float, nullable=False),  # 板上买:触发价=涨停价(v4)
     Column("limit_price", Float, nullable=True),
     # 条件快照值(T-1)
     Column("chg_tm1", Float, nullable=True),       # 昨日涨幅 %
-    Column("lshadow_tm1", Float, nullable=True),   # 昨日下影线 %
-    Column("ushadow_tm1", Float, nullable=True),   # 昨日上影线 %(同花顺标准口径,A2 v3 条件)
-    Column("yang_tm1", Boolean, nullable=True),    # 昨日收阳(A2 v3 条件)
-    Column("vol_rel5_tm1", Float, nullable=True),  # 昨日量比(量÷5日均量)
-    Column("amp_tm1", Float, nullable=True),       # 昨日振幅 %
-    Column("turnover_tm1", Float, nullable=True),  # 昨日换手 %
-    Column("base20_tm1", Float, nullable=True),    # 底座(20日涨幅) %
-    Column("last_streak", Integer, nullable=True), # 前段连板高度(最近一次≥2连板)
-    Column("gap_days", Integer, nullable=True),    # 距连板末日交易日数
-    Column("mkt_lim_tm1", Integer, nullable=True), # 昨日大盘(主板非ST)涨停家数
-    Column("halted", Boolean, nullable=False, server_default="false"),  # 大盘停手(>110)
+    Column("lshadow_tm1", Float, nullable=True),   # 昨日下影线 %(v4 已弃用,留列兼容)
+    Column("ushadow_tm1", Float, nullable=True),   # 昨日上影线 %
+    Column("yang_tm1", Boolean, nullable=True),    # 昨日收阳
+    Column("vol_rel5_tm1", Float, nullable=True),  # 昨日量比(v4 已弃用,留列兼容)
+    Column("amp_tm1", Float, nullable=True),       # 昨日振幅 %(v4 已弃用,留列兼容)
+    Column("turnover_tm1", Float, nullable=True),  # 昨日换手 %(v4 已弃用,留列兼容)
+    Column("base20_tm1", Float, nullable=True),    # 底座20日涨幅 %(v4 已弃用,留列兼容)
+    Column("last_streak", Integer, nullable=True), # v3 列(弃用)→ 用 seg_h
+    Column("gap_days", Integer, nullable=True),    # 坑宽(D0-末板,研究 gap 口径)
+    # U模型快照(v4 新增)
+    Column("base", String(8), nullable=True),      # 地基形态 HIGH/FLAT/U/V/MID/LB/DN
+    Column("base_label", String(8), nullable=True),  # 地基中文名
+    Column("pos3", String(8), nullable=True),      # U三状态 无U/U坑内/U突破
+    Column("low_dd", Float, nullable=True),        # 坑深 %(断板期最低收盘距顶)
+    Column("pull", Float, nullable=True),          # 昨收距顶 %
+    Column("reb", Float, nullable=True),           # 弹回 %(昨收距坑底)
+    Column("ma_st", String(4), nullable=True),     # 均线排列态 +++/−++/+--
+    Column("n_lim_mid", Integer, nullable=True),   # 断板期孤立涨停日数
+    Column("topped", Boolean, nullable=True),      # 断板期曾收顶上(伪U)
+    Column("d23ok", Boolean, nullable=True),       # 下探中(D-2收<D-3收且D-3非涨停)
+    Column("seg_h", Integer, nullable=True),       # 最近≥2板段高度
+    Column("mkt_lim_tm1", Integer, nullable=True), # 昨日大盘(主板非ST)涨停家数(信息项)
+    Column("halted", Boolean, nullable=False, server_default="false"),  # v3 停手(v4 废弃恒false)
     Column("rules_version", String(80), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),

@@ -10,7 +10,7 @@ type ResearchTab = "first-board" | "low-suction" | "weak-to-strong";
 
 const RESEARCH_TABS = [
   { value: "first-board", label: "潜龙首板", icon: Rocket },
-  { value: "weak-to-strong", label: "趋势弱转强", icon: Zap },
+  { value: "weak-to-strong", label: "U型补涨打板", icon: Zap },
   { value: "low-suction", label: "低吸", icon: FlaskConical },
 ] as const;
 

@@ -11,16 +11,20 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const GROUPS: W2sGroupKey[] = ["a1", "a2", "b"];
+const GROUPS: W2sGroupKey[] = ["yin2", "yang2a", "yang2b", "yin4", "yang4"];
 const GROUP_SHORT: Record<W2sGroupKey, string> = {
-  a1: "A1 恐慌出清",
-  a2: "A2 强势整理",
-  b: "B 高位弱转强",
+  yin2: "2板阴·U坑",
+  yang2a: "2板阳·首阳",
+  yang2b: "2板阳·纠缠",
+  yin4: "4+阴·孤板",
+  yang4: "4+阳·穿插",
 };
 const GROUP_TONE: Record<W2sGroupKey, string> = {
-  a1: "stroke-primary",
-  a2: "stroke-rise",
-  b: "stroke-amber-500",
+  yin2: "stroke-primary",
+  yang2a: "stroke-rise",
+  yang2b: "stroke-orange-500",
+  yin4: "stroke-violet-500",
+  yang4: "stroke-amber-500",
 };
 
 export function W2sBacktestView({
@@ -38,7 +42,7 @@ export function W2sBacktestView({
   onRebuild: () => void;
   rebuildError: string | null;
 }) {
-  const [monthlyGroup, setMonthlyGroup] = useState<W2sGroupKey>("a1");
+  const [monthlyGroup, setMonthlyGroup] = useState<W2sGroupKey>("yin2");
   if (!report) {
     return (
       <div className="space-y-3">
@@ -57,7 +61,7 @@ export function W2sBacktestView({
 
       <section className="rounded-lg border p-4 text-xs text-muted-foreground">
         <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1">
-          <span className="text-sm font-semibold text-foreground">回测汇总(产品口径:含盘中规则)</span>
+          <span className="text-sm font-semibold text-foreground">回测汇总(单一口径:板上买·板留断走)</span>
           <span>区间 {report.coverage.from} ~ {report.coverage.to}({report.coverage.months} 个月)</span>
           <span>规则版本 {report.rules_version}</span>
           <span>生成于 {formatGeneratedAt(report.generated_at)}</span>
@@ -71,44 +75,25 @@ export function W2sBacktestView({
           <GroupStatCard
             key={gk}
             title={GROUP_SHORT[gk]}
-            stats={report.summary[`${gk}_product`] ?? { n: 0 }}
-            anchor={anchors[`${gk}_product`]}
-            check={checks[`${gk}_product`]}
+            stats={report.summary[gk] ?? { n: 0 }}
+            anchor={anchors[gk]}
+            check={checks[gk]}
+            radar={report.radar?.[gk]}
           />
         ))}
+        <GroupStatCard
+          title="并集 all"
+          stats={report.summary.all ?? { n: 0 }}
+          anchor={anchors.all}
+          check={checks.all}
+          radar={report.radar?.all}
+        />
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">终版对照(无盘中规则的研究口径)</div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-sm">
-            <thead className="border-b text-xs text-muted-foreground">
-              <tr>
-                <th className="py-2 text-left font-medium">组</th>
-                <th className="py-2 text-right font-medium">笔数</th>
-                <th className="py-2 text-right font-medium">封板率</th>
-                <th className="py-2 text-right font-medium">D+1 平均每笔</th>
-                <th className="py-2 text-right font-medium">胜率</th>
-                <th className="py-2 text-right font-medium">连板率</th>
-                <th className="py-2 text-right font-medium">板留断走</th>
-              </tr>
-            </thead>
-            <tbody>
-              {GROUPS.map((gk) => (
-                <tr key={gk} className="border-b last:border-b-0">
-                  <td className="py-1.5 text-xs">{GROUP_SHORT[gk]}</td>
-                  <StatCells stats={report.summary[gk] ?? { n: 0 }} />
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">逐笔等权累计收益(产品口径,不复利)</div>
+        <div className="mb-2 text-sm font-semibold">逐笔等权累计收益(不复利)</div>
         <GroupCurves report={report} />
-        <div className="mt-1 flex gap-4 text-xs text-muted-foreground">
+        <div className="mt-1 flex flex-wrap gap-4 text-xs text-muted-foreground">
           {GROUPS.map((gk) => (
             <span key={gk} className="flex items-center gap-1">
               <i className={cn("inline-block h-0.5 w-4", GROUP_TONE[gk].replace("stroke-", "bg-"))} />
@@ -119,7 +104,7 @@ export function W2sBacktestView({
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">分年(产品口径)</div>
+        <div className="mb-2 text-sm font-semibold">分年</div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-sm">
             <thead className="border-b text-xs text-muted-foreground">
@@ -148,14 +133,15 @@ export function W2sBacktestView({
           </table>
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          提示:B 组 2023 年样本仅 16 笔、收益最薄;2026 年反包生态整体走弱(A1 仍正但变薄)。
+          提示:4+阳为狙击格,2023/2024 为负靠 2025/2026 撑,月均&lt;1笔轻仓;
+          其余四组 2023-2026 分年全正。
         </p>
       </section>
 
       <section className="rounded-lg border p-4">
         <div className="mb-2 flex items-center gap-2">
           <span className="text-sm font-semibold">月度明细</span>
-          <span className="flex gap-1">
+          <span className="flex flex-wrap gap-1">
             {GROUPS.map((gk) => (
               <button
                 key={gk}
@@ -233,10 +219,10 @@ export function W2sBacktestView({
               {Object.entries(checks)
                 .filter(([, v]) => typeof v === "object" && v !== null)
                 .map(([key, v]) => {
-                  const chk = v as { n_diff: number; avg_diff: number; win_diff: number; pass: boolean };
+                  const chk = v as { n_diff: number; bw_diff: number; win_diff: number; pass: boolean };
                   return (
                     <li key={key} className={chk.pass ? "text-muted-foreground" : "text-amber-500"}>
-                      {key}: Δn {chk.n_diff} / Δ均 {chk.avg_diff} / Δ胜 {chk.win_diff}
+                      {key}: Δn {chk.n_diff} / Δ板留 {chk.bw_diff} / Δ胜 {chk.win_diff}
                       {chk.pass ? "" : " 超容差"}
                     </li>
                   );
@@ -287,11 +273,13 @@ function GroupStatCard({
   stats,
   anchor,
   check,
+  radar,
 }: {
   title: string;
   stats: W2sStats;
   anchor?: W2sAnchorStats;
   check?: unknown;
+  radar?: { trigger_n: number; actionable_n: number };
 }) {
   const chk = (check ?? null) as { pass: boolean } | null;
   return (
@@ -323,6 +311,9 @@ function GroupStatCard({
             <span className="text-muted-foreground/70">(锚 {formatPct(anchor.bw_pct)})</span>
           ) : null}
         </div>
+        {radar ? (
+          <div>雷达触发 {radar.trigger_n} 笔 · 出手 {radar.actionable_n} 笔</div>
+        ) : null}
       </div>
     </div>
   );

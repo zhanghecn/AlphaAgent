@@ -1,4 +1,4 @@
-"""趋势弱转强 API 门面:实时推荐 / 回测报告 / 交割单 / 规则契约。"""
+"""U型补涨打板 API 门面:实时推荐 / 回测报告 / 交割单 / 规则契约。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ _rebuild_running = False
 
 
 class BacktestAlreadyRunningError(RuntimeError):
-    """趋势弱转强回测重算已有任务在执行。"""
+    """U型补涨打板回测重算已有任务在执行。"""
 
 
 # ── 实时推荐 ──
@@ -50,13 +50,14 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
 
     status_counts: dict[str, int] = {}
     group_counts: dict[str, int] = {}
+    actionable_count = 0
     for e in entries:
         sk = str(e["status"])
         status_counts[sk] = status_counts.get(sk, 0) + 1
     for e in pool:
         gk = str(e["group_key"])
         group_counts[gk] = group_counts.get(gk, 0) + 1
-    halted = any(bool(e.get("halted")) for e in pool)
+        actionable_count += int(bool(e.get("actionable")))
     mkt_lim_tm1 = next((e.get("mkt_lim_tm1") for e in pool if e.get("mkt_lim_tm1") is not None), None)
     last_scan = repository.latest_scan_run(target)
     return {
@@ -67,16 +68,12 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
         "rules_version": contracts.W2S_RULES_VERSION,
         "counts": {
             "pool": len(pool),
+            "actionable": actionable_count,
             "signals": len(signals),
             "by_group": group_counts,
             "by_status": status_counts,
         },
-        "market_halt": {
-            "halted": halted,
-            "mkt_lim_tm1": mkt_lim_tm1,
-            "threshold": contracts.MKT_LIM_HALT,
-            "note": "昨日主板非ST涨停家数超阈值 → 今日整池停手",
-        },
+        "mkt_lim_tm1": mkt_lim_tm1,
         "group_labels": contracts.GROUP_LABELS,
         "last_scan": {
             "finished_at": _iso(last_scan.get("finished_at")),
@@ -98,20 +95,25 @@ def _live_row(entry: dict[str, object] | None,
         row.update({
             "vt_symbol": entry["vt_symbol"], "name": entry.get("name"),
             "group_key": entry.get("group_key"),
+            "actionable": bool(entry.get("actionable")),
             "prev_close": entry.get("prev_close"),
             "trigger_price": entry.get("trigger_price"),
             "limit_price": entry.get("limit_price"),
             "chg_tm1": entry.get("chg_tm1"),
-            "lshadow_tm1": entry.get("lshadow_tm1"),
             "ushadow_tm1": entry.get("ushadow_tm1"),
             "yang_tm1": entry.get("yang_tm1"),
-            "vol_rel5_tm1": entry.get("vol_rel5_tm1"),
-            "amp_tm1": entry.get("amp_tm1"),
-            "turnover_tm1": entry.get("turnover_tm1"),
-            "base20_tm1": entry.get("base20_tm1"),
-            "last_streak": entry.get("last_streak"),
+            "base": entry.get("base"),
+            "base_label": entry.get("base_label"),
+            "pos3": entry.get("pos3"),
+            "low_dd": entry.get("low_dd"),
+            "pull": entry.get("pull"),
+            "reb": entry.get("reb"),
+            "ma_st": entry.get("ma_st"),
+            "n_lim_mid": entry.get("n_lim_mid"),
+            "topped": entry.get("topped"),
+            "d23ok": entry.get("d23ok"),
+            "seg_h": entry.get("seg_h"),
             "gap_days": entry.get("gap_days"),
-            "halted": bool(entry.get("halted")),
         })
     if sig:
         row.update({
@@ -135,16 +137,17 @@ def _live_row(entry: dict[str, object] | None,
             "ret_pct": sig.get("ret_pct"),
         })
     row.setdefault("status", "watching")
-    row.setdefault("halted", False)
+    row.setdefault("actionable", False)
     return row
 
 
 def _live_sort_key(row: dict[str, object]) -> tuple:
     order = {"holding": 0, "entered": 0, "touched": 1, "watching": 2, "pending_exit": 3,
              "closed": 4, "no_trigger": 5, "skipped_gap": 6, "halted": 7}
-    group_order = {"a1": 0, "b": 1, "a2": 2}
-    return (order.get(str(row.get("status")), 8),
-            group_order.get(str(row.get("group_key")), 3),
+    group_order = {gk: i for i, gk in enumerate(contracts.GROUP_KEYS)}
+    return (0 if row.get("actionable") else 1,
+            order.get(str(row.get("status")), 8),
+            group_order.get(str(row.get("group_key")), 9),
             float(row.get("gap_open_pct") or 99.0))
 
 
@@ -321,7 +324,6 @@ def get_rules() -> dict[str, object]:
         "ths_pool_conditions": contracts.THS_POOL_CONDITIONS,
         "ths_pool_note": contracts.THS_POOL_NOTE,
         "intraday_playbook": contracts.INTRADAY_PLAYBOOK,
-        "session_window": contracts.SESSION_WINDOW,
         "anchors": contracts.BACKTEST_ANCHORS,
         "anchor_tolerances": contracts.ANCHOR_TOLERANCES,
         "case_gates": contracts.CASE_GATES,
