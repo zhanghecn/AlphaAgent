@@ -135,12 +135,16 @@ def main():
         if mode == "L1S2":                    # 清晰版2: "低点已过去"单句(近5日最低>全程最低)
             return (pull <= -0.04 and reb <= 0.16 and 6 <= n2 <= 15 and not topped
                     and len(seg_c) >= 5 and seg_c[-5:].min() > low_c)
-        if mode == "L1T":                     # 蹲类纠缠态(层②'): L1去坑宽 + 均线纠缠(精确)
+        if mode == "L1T":                     # 蹲类纠缠态(2板阳通道二): L1去坑宽 + 均线纠缠(精确)
             return (pull <= -0.04 and reb <= 0.16 and (reb >= 0.03 or not near3_low)
-                    and r.ma_st in ("-++", "+--"))
+                    and r.ma_st in ("-++", "+--")
+                    and i >= 4 and cl_by[sid][i - 2] < cl_by[sid][i - 3]
+                    and not zt_by[sid][i - 3])
         if mode == "L1TS":                    # 纠缠态清晰版: 弹回>3%单句
             return (pull <= -0.04 and 0.03 <= reb <= 0.16
-                    and r.ma_st in ("-++", "+--"))
+                    and r.ma_st in ("-++", "+--")
+                    and i >= 4 and cl_by[sid][i - 2] < cl_by[sid][i - 3]
+                    and not zt_by[sid][i - 3])
         if mode == "L1U":                     # U型蹲细分(弹6~16%)
             return (low_c / top - 1 <= -0.12) and 0.06 <= reb <= 0.16 and not near3_low and not topped
         if mode == "L1F":                     # 横盘平台细分(五层版含坑宽)
@@ -165,10 +169,10 @@ def main():
         backtest(keep, lab)
     backtest(sorted(set(keep_s) | set(keep_s2)), "★A1∪A2并集(两板块并用)")
 
-    print("\n①' 2板补涨阳·通道二: 基本 + 蹲类坑中×均线纠缠态(研究版 118笔+2.96)")
+    print("\n①' 2板补涨阳·通道二: 基本 + 蹲类坑中×均线纠缠×D-2<D-3且D-3非涨停(研究版定稿 60笔+4.04)")
     base_b0 = bars[bars["cB"] & cond_ok]
-    for mode, lab in (("L1T", "基本+蹲类+纠缠态(含或表达)"),
-                      ("L1TS", "纠缠态清晰版·无或(距顶>4%+弹3~16%+纠缠)")):
+    for mode, lab in (("L1T", "基本+蹲类+纠缠态+下探中(含或表达)"),
+                      ("L1TS", "纠缠态清晰版·无或(距顶>4%+弹3~16%+纠缠+前日收<3日前收+3日前未涨停)")):
         keep = [r.Index for r in base_b0.itertuples() if qiwen_pick(r, mode)]
         backtest(keep, lab)
 

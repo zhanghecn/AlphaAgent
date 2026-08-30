@@ -50,7 +50,8 @@ BASE_CN = {"HIGH": "新高贴顶", "FLAT": "横盘平台", "U": "U型蹲", "V": 
 #   浅擦<8%回顶+5.70/深坑>15%回顶+7.37留) 34→27笔 +4.01→+5.56 逐年变厚):
 #   2板阴  U坑内蹲类×弹回≤16%×坑宽6-15×未收顶上   123笔+4.26 分年全正
 #   2板阳  通道一 阴跌到点坑底首阳×未收顶上        74笔+3.02 分年全正
-#          通道二 蹲类坑中×均线纠缠态(-++/+--)      118笔+2.96 胜率61% 分年全正
+#          通道二 蹲类坑中×均线纠缠×D-2<D-3且D-3非涨停 60笔+4.04 分年全正
+#          (纠缠态加「下探中」主人猜想验证成立收编: 118→60笔 +2.96→+4.04, w2s_diag_d2d3.py)
 #   4+阴   孤立板穿插×全多头+++×U坑存在×剔中坑回顶  27笔+5.56 胜率70% 分年全正
 #   4+阳   2板小波穿插(夹层, 非夹层全维度全灭)      45笔+2.45(狙击格)
 WHITELIST = {
@@ -63,6 +64,7 @@ WHITELIST = {
         "U坑条件（两条通道都要）：昨收距上波顶>4%；且断板期收盘价从未站回顶上方（伪U排除）；",
         "通道一坑底：弹回<3%且最低收盘在最近3日（首阳）；",
         "通道二坑中：弹回3%~16% + 均线纠缠态（5/10与10/20日线上下相反，此通道未收顶上可放宽）",
+        " + 坑里还在下探（前日收盘低于3日前收盘）且3日前未涨停（回调已够3天，非刚从末板下来）",
     ],
     "4板补涨阴": [
         "U坑条件：断板期曾跌出距顶>4%的U（U坑存在；无U持续新高的不选；U坑内/U突破都接受）",
@@ -99,9 +101,10 @@ def pos_of(low_dd, pull):
 
 
 def tier_of(grp, base, seg_h=99, n_lim_mid=0, reb=0.0, gap=99, st="", dd=0.0, topped=True,
-            pu=-9.0):
+            pu=-9.0, d23ok=True):
     """四组出手判定 → (是否出手, 命中通道标签). st=均线排列态, gap=断板天数, dd=坑深, pu=昨收距顶,
-    topped=断板期曾收在顶上方(伪U, 2板系要求 topped=False; 4+不用)."""
+    topped=断板期曾收在顶上方(伪U, 2板系要求 topped=False; 4+不用),
+    d23ok=D-2收<D-3收且D-3非涨停(2板阳通道二要求; 其余组不查)."""
     tangle = st in ("-++", "+--")
     if grp == "2板补涨阴":
         if base in ("U", "MID", "FLAT", "V", "LB") and not topped:
@@ -112,7 +115,7 @@ def tier_of(grp, base, seg_h=99, n_lim_mid=0, reb=0.0, gap=99, st="", dd=0.0, to
     if grp == "2板补涨阳":
         if base == "DN" and not topped:
             return True, "坑底首阳"
-        if base in ("U", "MID", "FLAT", "V", "LB") and tangle:
+        if base in ("U", "MID", "FLAT", "V", "LB") and tangle and d23ok:
             return True, "坑中纠缠"
         return False, ""
     if grp == "4板补涨阴":
@@ -192,6 +195,8 @@ def fail_reasons(r):
             out.append("断板期曾收回顶上方（高位震荡伪U、非洗盘坑）")
         elif st not in ("-++", "+--"):
             out.append("均线非纠缠态")
+        elif not r["d23ok"]:
+            out.append("坑里已走平或回调不足3天（前日收盘未低于3日前，或3日前是涨停末板）")
     elif g == "4板补涨阴":
         if not (dd == dd and dd <= -0.04):
             out.append("无U没洗过盘")
@@ -351,6 +356,13 @@ def main():
             return False
         return bool((c[j + 1:i] >= c[j]).any())
 
+    def d23_of(sid, pos):
+        """→ (D-2收<D-3收, D-3是否涨停=末尾板), i<4数据不足返回 (None,None)按不通过."""
+        i = p2i[int(sid)][int(pos)]
+        if i < 4:
+            return None, None
+        return cl_by[int(sid)][i - 2] < cl_by[int(sid)][i - 3], bool(zt_by[int(sid)][i - 3])
+
     # 4+夹层票锚修正(2026-08-30体检发现): 最近段=2/3板小波时, build_base的坑深/位置是相对
     # 小波顶算的 → 大波深坑漏算被误判「无U」(实测32笔夹层票+5.20). 重算为相对大波(≥4段)顶.
     # 只影响展示列与位置分类, 不动出手逻辑(层③要求seg_h>=4锚本就=大波; 层④只看seg_h==2).
@@ -388,6 +400,8 @@ def main():
         tg["date"] = tg["trade_date"].dt.strftime("%Y-%m-%d")
         tg["grp"] = name
         tg["topped"] = [topped_of(s, p) for s, p in zip(tg["sid"], tg["pos"])]
+        r23 = [d23_of(s, p) for s, p in zip(tg["sid"], tg["pos"])]
+        tg["d23ok"] = [(a is True) and (b is False) for a, b in r23]
         if name.startswith("4板"):
             bigtop_fix(tg)
         tg["is_wv"] = [(s, p) in wave_keys for s, p in zip(tg["sid"], tg["pos"])]
@@ -419,10 +433,11 @@ def main():
         if n_mix:
             print(f"  [对照] 已排除昨日涨停混入 {n_mix} 笔 (真实板留全负, 见docstring)")
         # 四组出手口径: 出手 / 未命中 两档统计 + 命中通道
-        _res = [tier_of(name, b, h, nm, rb, gp, ms, dd, tp, pu)
-                for b, h, nm, rb, gp, ms, dd, tp, pu
+        _res = [tier_of(name, b, h, nm, rb, gp, ms, dd, tp, pu, d23)
+                for b, h, nm, rb, gp, ms, dd, tp, pu, d23
                 in zip(tg["base"], tg["seg_h"], tg["n_lim_mid"], tg["reb"],
-                       tg["gap"], tg["ma_st"], tg["low_dd"], tg["topped"], tg["pull"])]
+                       tg["gap"], tg["ma_st"], tg["low_dd"], tg["topped"], tg["pull"],
+                       tg["d23ok"])]
         tg["档位"] = ["出手" if ok else "未命中" for ok, _ in _res]
         tg["通道"] = [ch for _, ch in _res]
         for tier in ("出手", "未命中"):
@@ -451,10 +466,10 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     # 全量csv(地基纯中文 + 档位列)
     if "档位" not in t.columns:
-        _res = [tier_of(g, b, h, nm, rb, gp, ms, dd, tp, pu)
-                for g, b, h, nm, rb, gp, ms, dd, tp, pu
+        _res = [tier_of(g, b, h, nm, rb, gp, ms, dd, tp, pu, d23)
+                for g, b, h, nm, rb, gp, ms, dd, tp, pu, d23
                 in zip(t["grp"], t["base"], t["seg_h"], t["n_lim_mid"], t["reb"],
-                       t["gap"], t["ma_st"], t["low_dd"], t["topped"], t["pull"])]
+                       t["gap"], t["ma_st"], t["low_dd"], t["topped"], t["pull"], t["d23ok"])]
         t["档位"] = ["出手" if ok else "未命中" for ok, _ in _res]
         t["通道"] = [ch for _, ch in _res]
     t["位置"] = [pos_of(dd, pu) for dd, pu in zip(t["low_dd"], t["pull"])]
