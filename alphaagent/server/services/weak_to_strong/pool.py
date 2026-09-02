@@ -178,6 +178,10 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                                arr["streak"], int(row.pos), bigtop=is4)
         if f is None:
             continue
+        # 标注层: 真U结构识别(坑底前最高收盘为顶+topped时序)——只用于展示快照,
+        # 出手判定仍用 f(定稿阈值按旧尺子校准, w2s_diag_truetop_final.py 实测换尺子摊薄)
+        lab = u_shape.u_struct(arr["close"], arr["high"], arr["is_lim"],
+                               arr["streak"], int(row.pos), bigtop=is4) or f
         if masks["yin2"].loc[row.Index]:
             group_key = u_shape.GROUP_YIN2
         elif masks["yin4"].loc[row.Index]:
@@ -201,15 +205,15 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "chg_tm1": _f(row.chg),
             "ushadow_tm1": _f(row.ushadow),
             "yang_tm1": bool(row.yang),
-            "base": f["base"],
-            "base_label": u_shape.BASE_NAME.get(f["base"], f["base"]),
-            "pos3": f["pos3"],
-            "low_dd": _f(round(f["low_dd"] * 100, 2)),
-            "pull": _f(round(f["pull"] * 100, 2)),
-            "reb": _f(round(f["reb"] * 100, 2)),
+            "base": lab["base"],
+            "base_label": u_shape.BASE_NAME.get(lab["base"], lab["base"]),
+            "pos3": lab["pos3"],
+            "low_dd": _f(round(lab["low_dd"] * 100, 2)),
+            "pull": _f(round(lab["pull"] * 100, 2)),
+            "reb": _f(round(lab["reb"] * 100, 2)),
             "ma_st": f["ma_st"],
             "n_lim_mid": int(f["n_lim_mid"]),
-            "topped": bool(f["topped"]),
+            "topped": bool(lab["topped"]),
             "d23ok": bool(f["d23ok"]),
             "seg_h": int(f["seg_h"]),
             "gap_days": int(f["gap_d0"]),

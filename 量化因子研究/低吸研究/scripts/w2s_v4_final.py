@@ -6,7 +6,7 @@
   2板阳  通道一 阴跌到点坑底首阳×未收顶上 | 通道二 蹲类坑中×均线纠缠态(-++/+--)
          ×D-2收盘<D-3收盘且D-3非涨停(坑里还在下探, 回调够3天; 118→60笔+2.96→+4.04)
   4+阴   孤立板穿插(最近段=大波seg_h>=4 且 断板期孤立板1~2个)×全多头+++×U坑存在×剔中坑8~15%已回顶
-  4+阳   2板小波穿插(seg_h==2), 非夹层全维度全灭不出手
+  4+阳   2板小波穿插(seg_h==2)×剔骑顶区±4%(骑顶=多空未决毒格, 2026-09-01主人拍板)
 """
 import sys
 
@@ -88,8 +88,29 @@ def main():
     #   ②4+阴剔「中坑8~15%×已回顶」毒格=半伤硬拉二次出货顶, 7笔-1.98, 34→27笔+4.01→+5.56逐年变厚
     #   ③2板阳纠缠态加「D-2收<D-3收且D-3非涨停」(主人猜想验证成立, 118→60笔+2.96→+4.04全正保持):
     #   2板阴 U坑蹲类×坑宽6-15×未收顶上 | 2板阳 首阳×未收顶上 | 2板阳 纠缠态×下探中(两通道并行)
-    #   4+阴 孤板×全多头×U坑存在×剔中坑回顶 | 4+阳 2板小波穿插(不变)
+    #   4+阴 孤板×全多头×U坑存在×剔中坑回顶 | 4+阳 2板小波穿插×剔骑顶区±4%
+    # ④4+阳骑顶区剔除(2026-09-01主人拍板): 骑顶判定必须用「大波(≥4段)顶」口径 pull——
+    # build_base 对夹层票(seg_h=2)算的是相对小波顶的 pull, 直接按它剔会错杀(实测剔掉9笔+6.85好票);
+    # 大波顶口径下骑顶区9笔-6.38胜率22%三年全负才是真毒格(与服务侧 actionable_of 一致).
     L = {}
+    big4_by = {sid: grp[["last_pos", "high_price"]].to_numpy()
+               for sid, grp in segs[segs["height"] >= 4].groupby("sid", sort=False)}
+
+    def _big_pull(sid, pos, prev_close):
+        arr = big4_by.get(int(sid))
+        if arr is None:
+            return np.nan
+        li = arr[:, 0].searchsorted(int(pos), side="left")
+        if li == 0:
+            return np.nan
+        return float(prev_close) / float(arr[li - 1, 1]) - 1
+
+    t4 = tgs["4"]
+    pull_big4 = [_big_pull(s, p, pc) if h == 2 else p0
+                 for s, p, pc, h, p0 in zip(t4["sid"], t4["pos"], t4["prev_close"],
+                                            t4["seg_h"], t4["pull"])]
+    rim4 = pd.Series(pull_big4, index=t4.index).between(-0.04, 0.04, inclusive="right")
+    L["4+阳·2板小波穿插"] = t4[(t4["seg_h"] == 2) & ~rim4.fillna(False)]
     L["2板阴·U坑蹲类×坑宽6-15"] = tgs["1"][tgs["1"]["base"].isin(["U", "MID", "FLAT", "V", "LB"])
                                           & ~(tgs["1"]["reb"] > 0.16)
                                           & tgs["1"]["gap"].between(6, 15)
@@ -106,7 +127,6 @@ def main():
                                     & (tgs["3"]["ma_st"] == "+++")
                                     & (tgs["3"]["low_dd"] <= -0.04)   # U坑存在(排无U新高票)
                                     & ~(brk3 & mid3)]                 # 剔中坑已回顶(二次出货顶)
-    L["4+阳·2板小波穿插"] = tgs["4"][tgs["4"]["seg_h"] == 2]
 
     # ══ ① 覆盖率(白名单口径) ══
     print("=" * 96)

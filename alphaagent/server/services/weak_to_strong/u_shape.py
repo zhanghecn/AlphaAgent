@@ -160,6 +160,74 @@ def u_features(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
             "low_dd": low_dd, "pull": pull, "reb": reb, "pos3": pos3}
 
 
+def u_struct(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
+             streak: np.ndarray, i: int, bigtop: bool = False) -> dict | None:
+    """真U形态识别（结构版, 全收盘口径）——标注层专用，判定层勿用。
+
+    与 u_features 的差异（修复「误认为贴顶/伪U」的识别 bug）：
+      顶区 = 坑底日之前的最高收盘（段内+断板期溢出；坑底后的新高是修复不是顶,
+             插针不算——不用 high 用 close）；
+      topped = 坑底日之后曾收回顶区（98%），坑底前的近顶收盘是波峰延续不算；
+      conf = 底确认天数（信号日-坑底日的交易日数, 0=信号日当天还在创新低=左半未起）；
+      pit_days = 断板期收盘 < 顶区×96% 的天数（坑的持续性）。
+    验收：协鑫集成2026-02-03 坑里右墙 / 法尔胜2026-03-10 浅坑回顶 /
+          胜通能源2026-07-09 左半未起 / 川润股份2024-03-12 无坑新高（十票全对）。
+    注意：本函数输出只用于展示/标注（池条目U快照、案例库形态描述）；
+          四组出手判定仍用 u_features（定稿阈值按旧尺子校准，换尺子需整轮重校）。
+    """
+    n = len(close)
+    if i < 1 or i >= n:
+        return None
+    ge2 = np.flatnonzero(streak >= 2)
+    lp = _last_leq(ge2, i - 1)
+    if lp < 0:
+        return None
+    seg_h = int(streak[lp])
+    mid = close[lp + 1: i + 1]
+    if len(mid) == 0:
+        return None
+    b = lp + 1 + int(np.argmin(mid))                     # 坑底日
+    top = float(np.max(close[lp - seg_h + 1: b]))        # 坑底前最高收盘
+    if top <= 0:
+        return None
+    low_dd = float(close[b]) / top - 1
+    pull = float(close[i]) / top - 1
+    reb = float(close[i]) / float(close[b]) - 1
+    conf = i - b
+    pit_days = int((close[lp + 1: i + 1] < top * 0.96).sum())
+    topped = bool((close[b + 1: i + 1] >= top * 0.98).any()) if b < i else False
+
+    info = classify_base(mid, top, float(close[i]))
+    if info is None:
+        return None
+
+    ge4 = np.flatnonzero(streak >= 4)
+    b4p = _last_leq(ge4, i - 1)
+    if bigtop and b4p >= 0 and seg_h < 4:
+        b4_h = int(streak[b4p])
+        mid4 = close[b4p + 1: i + 1]
+        if len(mid4):
+            b4 = b4p + 1 + int(np.argmin(mid4))
+            top4 = float(np.max(close[b4p - b4_h + 1: b4]))
+            low_dd = float(close[b4]) / top4 - 1
+            pull = float(close[i]) / top4 - 1
+            reb = float(close[i]) / float(close[b4]) - 1
+            conf = i - b4
+            pit_days = int((close[b4p + 1: i + 1] < top4 * 0.96).sum())
+            topped = bool((close[b4 + 1: i + 1] >= top4 * 0.98).any()) if b4 < i else False
+
+    if low_dd > -0.04:
+        pos3 = POS_NO_U
+    elif pull > -0.04:
+        pos3 = POS_BREAK
+    else:
+        pos3 = POS_IN
+
+    return {"base": info["base"], "seg_h": seg_h, "low_dd": low_dd, "pull": pull,
+            "reb": reb, "pos3": pos3, "topped": topped, "conf": conf,
+            "pit_days": pit_days}
+
+
 def actionable_of(group_key: str, f: dict) -> bool:
     """四组白名单出手判定（研究 tier_of 移植；f=u_features 返回值）。
 
@@ -167,7 +235,9 @@ def actionable_of(group_key: str, f: dict) -> bool:
     2板阳·首阳：DN × 未收顶上
     2板阳·纠缠：蹲类 × 均线纠缠 × 下探中
     4+阴：孤立板1~2 × 全多头 × U坑存在 × 剔中坑8~15%已回顶
-    4+阳：seg_h==2（2板小波穿插；无U也出手=夹层例外）
+    4+阳：seg_h==2（2板小波穿插；无U也出手=夹层例外）× 剔骑顶区±4%
+          （骑顶=信号日收距大波顶±4%内=多空未决毒格：9笔-6.38胜率22%，
+           2023/2024/2025 三年全负；坑里<-4%与明确站上顶>+4%均保留）
     """
     if group_key == GROUP_YIN2:
         return (f["base"] in SQUAT_BASES and not f["topped"]
@@ -181,5 +251,5 @@ def actionable_of(group_key: str, f: dict) -> bool:
         return (f["seg_h"] >= 4 and 1 <= f["n_lim_mid"] <= 2 and f["ma_st"] == "+++"
                 and f["low_dd"] <= -0.04 and not toxic)
     if group_key == GROUP_YANG4:
-        return f["seg_h"] == 2
+        return f["seg_h"] == 2 and not (-0.04 < f["pull"] <= 0.04)
     return False
