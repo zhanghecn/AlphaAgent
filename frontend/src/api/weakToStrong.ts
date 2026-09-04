@@ -200,13 +200,18 @@ export interface W2sRuleGroup {
   items: W2sRuleItem[];
 }
 
-export interface W2sTouchWindow {
-  group: "yin2" | "yang2" | "yin4" | "yang4";
-  label: string;
+export interface W2sTouchWindowSlot {
   window: string;
   n: number;
   ret: number;
   win: number;
+}
+
+export interface W2sTouchWindow {
+  group: "yin2" | "yang2" | "yin4" | "yang4";
+  label: string;
+  primary: W2sTouchWindowSlot;
+  secondary: W2sTouchWindowSlot;
   note: string;
 }
 

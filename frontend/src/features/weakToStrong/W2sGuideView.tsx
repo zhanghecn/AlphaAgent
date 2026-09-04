@@ -94,12 +94,18 @@ export function W2sGuideView() {
                   <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${style.badge}`}>
                     {tw.label}
                   </span>
-                  <span className="text-[11px] text-muted-foreground">n={tw.n}</span>
                 </div>
-                <div className="font-mono text-lg font-semibold text-foreground">{tw.window}</div>
-                <div className="mt-1 font-mono text-xs text-muted-foreground">
-                  板留均 <span className="text-foreground">+{tw.ret.toFixed(2)}%</span>
-                  　胜率 <span className="text-foreground">{tw.win}%</span>
+                <div className="font-mono text-lg font-semibold text-foreground">
+                  {tw.primary.window}
+                  <span className="ml-1.5 align-middle text-[11px] font-normal text-muted-foreground">
+                    主 n={tw.primary.n}　+{tw.primary.ret.toFixed(2)}% / {tw.primary.win}%
+                  </span>
+                </div>
+                <div className="mt-1 font-mono text-sm text-muted-foreground">
+                  {tw.secondary.window}
+                  <span className="ml-1.5 align-middle text-[11px]">
+                    次 n={tw.secondary.n}　+{tw.secondary.ret.toFixed(2)}% / {tw.secondary.win}%
+                  </span>
                 </div>
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">{tw.note}</p>
               </div>
