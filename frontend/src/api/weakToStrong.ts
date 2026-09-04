@@ -215,6 +215,12 @@ export interface W2sTouchWindow {
   note: string;
 }
 
+export interface W2sTouchWindowHint {
+  label: string;
+  cls: string;
+  hint: string;
+}
+
 export interface W2sRulesPayload {
   rules_version: string;
   group_labels: Record<W2sGroupKey, string>;
@@ -227,7 +233,7 @@ export interface W2sRulesPayload {
   anchors: Record<string, W2sAnchorStats>;
   anchor_tolerances: Record<string, number>;
   case_gates: Omit<W2sCaseGate, "actual_groups" | "pass">[];
-  touch_time_windows: { meta: string; groups: W2sTouchWindow[] };
+  touch_time_windows: { meta: string; class_hints: W2sTouchWindowHint[]; groups: W2sTouchWindow[] };
 }
 
 export function fetchW2sLive(date?: string) {

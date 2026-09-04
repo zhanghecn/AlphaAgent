@@ -85,6 +85,14 @@ export function W2sGuideView() {
           </span>
         </div>
         <p className="mb-3 text-xs text-muted-foreground">{rules.touch_time_windows.meta}</p>
+        <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+          {rules.touch_time_windows.class_hints.map((h) => (
+            <div key={h.cls} className="flex items-baseline gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
+              <span className="shrink-0 font-mono text-sm font-semibold text-primary">{h.label}</span>
+              <span className="text-xs leading-5 text-muted-foreground">{h.hint}</span>
+            </div>
+          ))}
+        </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
           {rules.touch_time_windows.groups.map((tw) => {
             const style = GROUP_STYLES[tw.group === "yang2" ? "yang2a" : tw.group];
