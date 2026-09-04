@@ -144,20 +144,31 @@ def analyze(m: pd.DataFrame, from_csv: bool = False) -> None:
     cnt.columns = ["差票n", "好票n"]
     print(cross.join(cnt).round(1).to_string())
 
-    # ── 主人2026-09-04要求: 阴阳区分开、2板/4+也区分开 ──
-    print("\n" + "=" * 72)
-    print("== ① 阴阳×板高 2×2 大组 × 八桶矩阵 (格= n|板留均%) ==")
-    print("=" * 72)
-    buckets = [b for b, _, _ in BUCKETS]
-    for big in ["2板阴", "2板阳", "4+阴", "4+阳"]:
-        g = m[m["big4"] == big]
-        cells = []
-        for bk in buckets:
-            s = g[g["bucket"] == bk]
+    # ── 主人2026-09-04要求: 2板阴/2板阳/4板阴/4板阳 × 15分钟粒度 ──
+    print("\n" + "=" * 100)
+    print("== ① 四大组(2板阴/2板阳/4+阴/4+阳) × 15分钟粒度 (格= n|板留均%/好票率%) ==")
+    print("=" * 100)
+    bigs = ["2板阴", "2板阳", "4+阴", "4+阳"]
+    times = sorted(m["touch"].unique())
+    header = f"{'触板时刻':<8}" + "".join(f"{b:^24}" for b in bigs) + f"{'合计':^24}"
+    print(header)
+    for t in times:
+        row = f"{t:<8}"
+        for big in bigs + ["合计"]:
+            s = m if big == "合计" else m[m["big4"] == big]
+            s = s[s["touch"] == t]
             r = s["ret_bw"].dropna()
-            cells.append(f"{len(s):3d}|{r.mean()*100:+6.2f}" if len(r) else "   0|    --")
-        print(f"{big}(共{len(g):3d}笔) " + " ".join(cells))
-    print("列序:", " / ".join(buckets))
+            if len(r):
+                wr = (r > 0).mean() * 100
+                row += f"{len(r):>3}|{r.mean()*100:+7.2f}/{wr:3.0f}%".rjust(24)
+            else:
+                row += f"{'--':^24}"
+        print(row)
+    for big in bigs:
+        g = m[m["big4"] == big]
+        r = g["ret_bw"].dropna()
+        print(f"  {big} 合计: n={len(r)} 均{r.mean()*100:+.2f}% 好票率{(r>0).mean()*100:.1f}%")
+    print("注: 时刻=15分钟K周期结束时点(09:45=09:30-09:45触板; 11:15=上午最后一根; 15:00=收盘)")
 
     print("\n== ② 阴系 vs 阳系 × 粗五段 ==")
     m["yy"] = m["big4"].map(YIN_YANG)
