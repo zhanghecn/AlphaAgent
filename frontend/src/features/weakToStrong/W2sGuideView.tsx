@@ -77,6 +77,37 @@ export function W2sGuideView() {
         </ol>
       </section>
 
+      <section className="rounded-lg border p-4" aria-label="首触板时间观察">
+        <div className="mb-1 flex items-center gap-2">
+          <span className="text-sm font-semibold">首触板时间观察 · 各组最佳区间</span>
+          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+            观察参考 · 非规则
+          </span>
+        </div>
+        <p className="mb-3 text-xs text-muted-foreground">{rules.touch_time_windows.meta}</p>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {rules.touch_time_windows.groups.map((tw) => {
+            const style = GROUP_STYLES[tw.group === "yang2" ? "yang2a" : tw.group];
+            return (
+              <div key={tw.group} className="rounded-lg border bg-muted/20 p-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${style.badge}`}>
+                    {tw.label}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground">n={tw.n}</span>
+                </div>
+                <div className="font-mono text-lg font-semibold text-foreground">{tw.window}</div>
+                <div className="mt-1 font-mono text-xs text-muted-foreground">
+                  板留均 <span className="text-foreground">+{tw.ret.toFixed(2)}%</span>
+                  　胜率 <span className="text-foreground">{tw.win}%</span>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">{tw.note}</p>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
       {rules.rules.map((group) => {
         const style = GROUP_STYLES[group.group] ?? GROUP_STYLES.pool;
         return (

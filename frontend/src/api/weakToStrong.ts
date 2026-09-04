@@ -200,6 +200,16 @@ export interface W2sRuleGroup {
   items: W2sRuleItem[];
 }
 
+export interface W2sTouchWindow {
+  group: "yin2" | "yang2" | "yin4" | "yang4";
+  label: string;
+  window: string;
+  n: number;
+  ret: number;
+  win: number;
+  note: string;
+}
+
 export interface W2sRulesPayload {
   rules_version: string;
   group_labels: Record<W2sGroupKey, string>;
@@ -212,6 +222,7 @@ export interface W2sRulesPayload {
   anchors: Record<string, W2sAnchorStats>;
   anchor_tolerances: Record<string, number>;
   case_gates: Omit<W2sCaseGate, "actual_groups" | "pass">[];
+  touch_time_windows: { meta: string; groups: W2sTouchWindow[] };
 }
 
 export function fetchW2sLive(date?: string) {
