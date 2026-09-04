@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""4+补涨阳 专项研究(主人: 先不算夹层seg_h==2): U坑条件×均线条件能否独立成立.
-维度: ①U三状态 ②U坑内×坑深×弹回 ③均线8排列态 ④均线收敛度(s510/s1020乖离) ⑤曾收顶上 ⑥组合格.
+"""4+补涨阳 专项研究(主人: 先不算夹层seg_h==2): 坑条件×均线条件能否独立成立.
+维度: ①坑三状态 ②坑内×坑深×弹回 ③均线8排列态 ④均线收敛度(s510/s1020乖离) ⑤曾收顶上 ⑥组合格.
 """
 import sys
 
@@ -15,10 +15,10 @@ pd.set_option("display.width", 300)
 
 def pos_of(low_dd, pull):
     if low_dd == low_dd and low_dd > -0.04:
-        return "无U"
+        return "无坑"
     if pull == pull and pull > -0.04:
-        return "U突破"
-    return "U坑内"
+        return "已回顶"
+    return "坑内"
 
 
 def stat(s, lab, ind="  "):
@@ -77,16 +77,16 @@ def main():
     stat(tg[tg["seg_h"] == 2], "对照·夹层票(本研究不看)", "")
     stat(pool, "非夹层底池", "")
 
-    print("\n① U三状态:")
-    for p3 in ("无U", "U坑内", "U突破"):
+    print("\n① 坑三状态:")
+    for p3 in ("无坑", "坑内", "已回顶"):
         s = pool[pool["pos3"] == p3]
         stat(s, p3)
-        if p3 != "无U":
+        if p3 != "无坑":
             stat(s[s["topped"]], f"{p3}×曾收顶上", "    ")
             stat(s[~s["topped"]], f"{p3}×未收顶上", "    ")
 
-    print("\n② U坑内 × 坑深 × 弹回:")
-    uin = pool[pool["pos3"] == "U坑内"]
+    print("\n② 坑内 × 坑深 × 弹回:")
+    uin = pool[pool["pos3"] == "坑内"]
     for lo, hi, lab in ((-0.10, -0.04, "浅坑4~10%"), (-0.18, -0.10, "中坑10~18%"),
                         (-9, -0.18, "深坑>18%")):
         s = uin[uin["low_dd"].between(lo, hi, inclusive="right")]
@@ -96,28 +96,28 @@ def main():
             if len(ss):
                 stat(ss, f"{lab}×{rlab}", "    ")
 
-    print("\n③ 均线8排列态 × 底池 / ×U坑内:")
+    print("\n③ 均线8排列态 × 底池 / ×坑内:")
     for st in ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---"):
         s = pool[pool["ma_st"] == st]
         su = uin[uin["ma_st"] == st]
         if len(s) >= 8:
             stat(s, f"{st} 底池")
             if len(su) >= 5:
-                stat(su, f"{st} ×U坑内", "    ")
+                stat(su, f"{st} ×坑内", "    ")
 
-    print("\n④ 均线收敛度(U坑内, s1020=MA10/MA20乖离):")
+    print("\n④ 均线收敛度(坑内, s1020=MA10/MA20乖离):")
     for lo, hi, lab in ((-9, 0.0, "空(10<20)"), (0.0, 0.03, "收敛0~3%"),
                         (0.03, 0.06, "发散3~6%"), (0.06, 99, "很发散>6%")):
         s = uin[uin["s1020"].between(lo, hi, inclusive="right")]
         stat(s, f"s1020 {lab}")
 
-    print("\n⑤ 组合尝试: U坑内 × 深坑>10% × 纠缠态(-++/+--):")
-    stat(uin[(uin["low_dd"] <= -0.10) & uin["ma_st"].isin(["-++", "+--"])], "U坑内×深>10%×纠缠")
-    stat(uin[(uin["low_dd"] <= -0.10) & (uin["s1020"] <= 0.03)], "U坑内×深>10%×收敛(1020≤3%)")
-    stat(uin[uin["reb"].between(0.03, 0.16) & uin["ma_st"].isin(["-++", "+--"])], "U坑内×弹起×纠缠")
-    stat(uin[uin["reb"].between(0.03, 0.16) & ~uin["topped"]], "U坑内×弹起×未收顶上")
-    stat(pool[(pool["pos3"] == "U突破") & ~pool["topped"]], "U突破×未收顶上")
-    stat(pool[(pool["pos3"] == "U突破") & pool["topped"]], "U突破×曾收顶上")
+    print("\n⑤ 组合尝试: 坑内 × 深坑>10% × 纠缠态(-++/+--):")
+    stat(uin[(uin["low_dd"] <= -0.10) & uin["ma_st"].isin(["-++", "+--"])], "坑内×深>10%×纠缠")
+    stat(uin[(uin["low_dd"] <= -0.10) & (uin["s1020"] <= 0.03)], "坑内×深>10%×收敛(1020≤3%)")
+    stat(uin[uin["reb"].between(0.03, 0.16) & uin["ma_st"].isin(["-++", "+--"])], "坑内×弹起×纠缠")
+    stat(uin[uin["reb"].between(0.03, 0.16) & ~uin["topped"]], "坑内×弹起×未收顶上")
+    stat(pool[(pool["pos3"] == "已回顶") & ~pool["topped"]], "已回顶×未收顶上")
+    stat(pool[(pool["pos3"] == "已回顶") & pool["topped"]], "已回顶×曾收顶上")
 
 
 if __name__ == "__main__":

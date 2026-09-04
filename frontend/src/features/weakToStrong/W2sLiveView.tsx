@@ -42,7 +42,7 @@ const EXIT_REASON_LABELS: Record<string, string> = {
 
 /** 五组硬编码映射:label=短标签(徽标/计数条用),full=全标签(悬浮提示用)。 */
 const GROUP_BADGES: Record<W2sGroupKey, { label: string; full: string; className: string }> = {
-  yin2: { label: "2板阴", full: "2板阴·U坑", className: "bg-primary/15 text-primary" },
+  yin2: { label: "2板阴", full: "2板阴·坑蹲", className: "bg-primary/15 text-primary" },
   yang2a: { label: "首阳", full: "2板阳·首阳", className: "bg-rise/15 text-rise" },
   yang2b: { label: "纠缠", full: "2板阳·纠缠", className: "bg-orange-500/15 text-orange-500" },
   yin4: { label: "4+阴", full: "4+阴·孤板", className: "bg-violet-500/15 text-violet-500" },
@@ -84,9 +84,9 @@ export function W2sLiveView({
 
   return (
     <div className="space-y-4">
-      <section aria-label="U型补涨打板实时推荐" className="rounded-lg border">
+      <section aria-label="N型补涨打板实时推荐" className="rounded-lg border">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-3 text-xs text-muted-foreground">
-          <span className="text-sm font-semibold text-foreground">U型补涨打板 · 实时推荐</span>
+          <span className="text-sm font-semibold text-foreground">N型补涨打板 · 实时推荐</span>
           <span className="font-mono tabular-nums">{payload.trade_date}</span>
           <span>{SESSION_LABELS[payload.session_stage] ?? payload.session_stage}</span>
           {payload.stale ? (
@@ -164,7 +164,7 @@ export function W2sLiveView({
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">股票</th>
                   <th className="px-3 py-2 text-left font-medium">组</th>
-                  <th className="px-3 py-2 text-left font-medium">U状态</th>
+                  <th className="px-3 py-2 text-left font-medium">坑位</th>
                   <th className="px-3 py-2 text-right font-medium">昨收</th>
                   <th className="px-3 py-2 text-right font-medium">触发价</th>
                   <th className="px-3 py-2 text-right font-medium">竞价/高开</th>

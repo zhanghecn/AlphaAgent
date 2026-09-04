@@ -33,7 +33,7 @@ const LIVE_PAYLOAD: W2sLivePayload = {
   },
   mkt_lim_tm1: 121,
   group_labels: {
-    yin2: "2板阴·U坑",
+    yin2: "2板阴·坑蹲",
     yang2a: "2板阳·坑底首阳",
     yang2b: "2板阳·坑中纠缠",
     yin4: "4+阴·孤板多头",
@@ -54,7 +54,7 @@ const LIVE_PAYLOAD: W2sLivePayload = {
       yang_tm1: false,
       base: "u_dip",
       base_label: "U型蹲",
-      pos3: "U坑内",
+      pos3: "坑内",
       low_dd: -12.3,
       pull: -8.1,
       reb: 5.2,
@@ -91,7 +91,7 @@ const LIVE_PAYLOAD: W2sLivePayload = {
       yang_tm1: false,
       base: null,
       base_label: null,
-      pos3: "无U",
+      pos3: "无坑",
       low_dd: -2.1,
       pull: -1.3,
       reb: null,
@@ -136,12 +136,12 @@ describe("W2sLiveView", () => {
         />,
       ),
     );
-    expect(html).toContain("U型补涨打板 · 实时推荐");
+    expect(html).toContain("N型补涨打板 · 实时推荐");
     expect(html).toContain("2板阴");
-    expect(html).toContain("2板阴·U坑");
+    expect(html).toContain("2板阴·坑蹲");
     expect(html).toContain("4+阳");
     expect(html).toContain("✅出手");
-    expect(html).toContain("无U");
+    expect(html).toContain("无坑");
     expect(html).toContain("持有中");
     expect(html).toContain("平潭发展");
     expect(html).not.toContain("大盘停手日");
@@ -169,7 +169,7 @@ describe("W2sLedgerView", () => {
                 vt_symbol: "000592.SZSE",
                 name: "平潭发展",
                 group: "yin2",
-                group_label: "2板阴·U坑",
+                group_label: "2板阴·坑蹲",
                 entry_price: 4.125,
                 gap_open_pct: 0.8,
                 sealed: true,
@@ -192,11 +192,11 @@ describe("W2sLedgerView", () => {
 });
 
 describe("ShortTermResearchPage", () => {
-  it("registers U型补涨打板 as a research tab", () => {
+  it("registers N型补涨打板 as a research tab", () => {
     const html = renderToStaticMarkup(
       withProviders(<ShortTermResearchPage />, ["/short-term?research=weak-to-strong"]),
     );
-    expect(html).toContain("U型补涨打板");
+    expect(html).toContain("N型补涨打板");
     expect(html).toContain("潜龙首板");
     expect(html).toContain("低吸");
   });

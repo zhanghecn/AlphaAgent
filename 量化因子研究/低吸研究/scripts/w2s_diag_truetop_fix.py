@@ -4,7 +4,7 @@
 误判根因(协鑫集成002506 2026-02-03信号):
   旧锚=段内max high=3.45(末板一字), 断板期01-27/28溢出到3.80/3.83才是真顶;
   旧topped无时序: 坑底(01-30收3.29)之前的近顶收盘(01-27收3.69)被当"收回顶上".
-  → 信号日收3.44被误判 贴顶+伪U; 真实: 距真顶-10.2%=坑里.
+  → 信号日收3.44被误判 贴顶+曾收顶上; 真实: 距真顶-10.2%=坑里.
 修复:
   真顶 = max(high[段起..信号日]) (含断板期溢出)
   topped = 坑底日(断板期最低收盘)之后, 断板期(含信号日)曾收≥最后涨停日收盘
@@ -131,7 +131,7 @@ def main():
     arr = load_arrays()
     print("══ 单票验证 ══")
     single(arr, "002506.SZSE", pd.Timestamp("2026-02-03").date(), False)   # 协鑫: 应坑内+不topped
-    single(arr, "002819.SZSE", pd.Timestamp("2026-07-07").date(), False)   # 易德龙: 应保持伪U排除
+    single(arr, "002819.SZSE", pd.Timestamp("2026-07-07").date(), False)   # 易德龙: 应保持曾收顶上排除
     single(arr, "603118.SSE", pd.Timestamp("2026-08-04").date(), False)    # 共进: 应保持纠缠出手
 
     print("\n══ 全量新旧对照(复用_build_events骨架, 仅换u_features) ══")

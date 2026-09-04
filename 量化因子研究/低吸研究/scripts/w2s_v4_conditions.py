@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""U型补涨打板(原趋势弱转强V4)白名单 → 可直接使用条件句的翻译验证(问财/同花顺近似版回测).
+"""N型补涨打板(原趋势弱转强V4)白名单 → 可直接使用条件句的翻译验证(问财/同花顺近似版回测).
 
 主人需求: 「基本条件 + 白名单条件N」逐组给出可粘贴条件句并量化近似代价.
 锚(问财经口径): 最后一次涨停=今日之前最近的涨停日; 顶=涨停当日收盘价(连板日high=close恒等);
@@ -123,14 +123,14 @@ def main():
         reb = pc_ / low_c - 1
         amp = seg_c.max() / low_c - 1
         near3_low = seg_c[-3:].min() <= low_c if len(seg_c) >= 3 else True
-        topped = bool((seg_c >= top).any())   # 伪U: 断板期曾收在顶上方(层①②排除, 2026-08-30)
+        topped = bool((seg_c >= top).any())   # 曾收顶上: 断板期曾收在顶上方(层①②排除, 2026-08-30)
         n2 = i - j
         if not (2 <= n2 <= 20):
             return False
         if mode == "L1":                      # 蹲类并集: 排除贴顶+排阴跌+弹回≤16%+坑宽+未收顶上
             return (pull <= -0.04 and reb <= 0.16 and (reb >= 0.03 or not near3_low)
                     and 6 <= n2 <= 15 and not topped)
-        if mode == "L1S":                     # U坑清晰版(主人定调: 无"或", 单句): 已弹起>3%替"或"表达
+        if mode == "L1S":                     # 坑清晰版(主人定调: 无"或", 单句): 已弹起>3%替"或"表达
             return pull <= -0.04 and 0.03 <= reb <= 0.16 and 6 <= n2 <= 15 and not topped
         if mode == "L1S2":                    # 清晰版2: "低点已过去"单句(近5日最低>全程最低)
             return (pull <= -0.04 and reb <= 0.16 and 6 <= n2 <= 15 and not topped
@@ -156,12 +156,12 @@ def main():
         return False
 
     print("=" * 96)
-    print("① 2板补涨阴基本 + U坑蹲类白名单(坑宽6-15+未收顶上; 研究版 123笔+4.26)")
+    print("① 2板补涨阴基本 + 坑内蹲类白名单(坑宽6-15+未收顶上; 研究版 123笔+4.26)")
     base_a = bars[bars["cA"] & cond_ok]
     keep_s = [r.Index for r in base_a.itertuples() if qiwen_pick(r, "L1S")]
     keep_s2 = [r.Index for r in base_a.itertuples() if qiwen_pick(r, "L1S2")]
     for mode, lab in (("L1", "基本+蹲类并集+坑宽6-15(距最后涨停6~15天)"),
-                      ("L1S", "U坑清晰版·无或(距顶>4%+弹3~16%+坑宽6-15)"),
+                      ("L1S", "坑清晰版·无或(距顶>4%+弹3~16%+坑宽6-15)"),
                       ("L1S2", "清晰版2·低点已过(距顶>4%+近5日未创新低+弹≤16%+坑宽6-15)"),
                       ("L1U", "基本+U型蹲(蹲>12%+弹>6%+低点不在近3日)"),
                       ("L1L", "基本+L趴底(蹲>12%+弹<3%)")):
@@ -181,7 +181,7 @@ def main():
     keep = [r.Index for r in base_b.itertuples() if qiwen_pick(r, "L2")]
     backtest(keep, "基本+首阳(跌幅>4%+最低在近3日+弹<3%)")
 
-    print("\n③ 4+补涨阴基本 + 孤立板穿插×全多头×U坑存在×剔中坑回顶(研究版定稿 27笔+5.56)")
+    print("\n③ 4+补涨阴基本 + 孤立板穿插×全多头×洗盘坑存在×剔中坑回顶(研究版定稿 27笔+5.56)")
     base_c = bars[bars["cC"] & cond_ok]
     for lab, m in (("基本+近20日涨停次数5~10", bars["cnt20"].between(5, 10)),
                    ("基本+涨停次数5~8", bars["cnt20"].between(5, 8))):
@@ -199,7 +199,7 @@ def main():
             return False
         if not (j == 0 or not arr[j - 1]):      # 最后涨停须是孤立板(前日未涨停)
             return False
-        if need_dip:                            # U坑存在: 涨停后最低收盘距涨停日收盘>4%
+        if need_dip:                            # 洗盘坑存在: 涨停后最低收盘距涨停日收盘>4%
             seg_c = cl_by[sid][j + 1:i]
             if not len(seg_c) or seg_c.min() / cl_by[sid][j] - 1 > -0.04:
                 return False
@@ -215,7 +215,7 @@ def main():
     backtest(keep, "基本+孤立板+全多头(5>10>20>30日线)")
     keep = [r.Index for r in base_c.itertuples()
             if iso_pick(r, need_dip=True) and r.ma_st == "+++"]
-    backtest(keep, "基本+孤立板+全多头+U坑存在(涨停后最低收盘较涨停日收盘跌超4%)")
+    backtest(keep, "基本+孤立板+全多头+洗盘坑存在(涨停后最低收盘较涨停日收盘跌超4%)")
     keep = [r.Index for r in base_c.itertuples()
             if iso_pick(r, need_dip=True, no_midbrk=True) and r.ma_st == "+++"]
     backtest(keep, "★定稿+剔中坑8~15%已回顶(昨收距顶<4%)")

@@ -1,13 +1,13 @@
-"""U型补涨打板盘前池计算:全部条件来自 T-1 收盘数据(无未来函数)。
+"""N型补涨打板盘前池计算:全部条件来自 T-1 收盘数据(无未来函数)。
 
-口径 = 量化因子研究/低吸研究/U型补涨打板.md 定稿(2026-08-30, 原趋势弱转强V4):
+口径 = 量化因子研究/低吸研究/N型补涨打板.md 定稿(2026-08-30, 原趋势弱转强V4):
   触发池(四组基本条件):
     2板补涨阴: 前20日最大连板=2 + 昨收阴 + 昨幅>-9% + 昨上影<4% + 昨日未涨停
     2板补涨阳: 前20日最大连板=2 + 昨收阳 + 昨幅>-3% + 昨上影<4% + 昨日未涨停
     4+补涨阴:  前20日最大连板>=4 + 昨收阴 + 昨幅>-8% + 昨上影<4% + 昨日未涨停
     4+补涨阳:  前20日最大连板>=4 + 昨收阳 + 昨幅>-3% + 昨上影<4% + 昨日未涨停
-  出手白名单(u_shape.actionable_of): 2板阴=U坑蹲类×弹回≤16%×坑宽6-15×未收顶上;
-    2板阳=坑底首阳×未收顶上 或 坑中纠缠×下探中; 4+阴=孤板×全多头×U坑存在×剔中坑回顶;
+  出手白名单(u_shape.actionable_of): 2板阴=坑内蹲类×弹回≤16%×坑宽6-15×未收顶上;
+    2板阳=坑底首阳×未收顶上 或 坑中纠缠×下探中; 4+阴=孤板×全多头×洗盘坑存在×剔中坑回顶;
     4+阳=2板小波穿插(夹层)。
   池=触发池全量(雷达)+actionable 出手标记; 盘中只对 actionable 票开买入触发。
   买入=板上买(触板买涨停价, 一字排除); 卖出=板留断走(T+1起首个未涨停日收盘)。
@@ -54,7 +54,7 @@ def next_weekday(day: date) -> date:
 
 
 def derive_daily(bars: pd.DataFrame) -> pd.DataFrame:
-    """日线派生列(pool/backtest 共用基础件;U模型部分在 u_shape 按候选行算)。"""
+    """日线派生列(pool/backtest 共用基础件;坑模型部分在 u_shape 按候选行算)。"""
     bars = bars.copy()
     bars.sort_values(["vt_symbol", "trade_date"], inplace=True, ignore_index=True)
     g = bars.groupby("vt_symbol", sort=False)
@@ -101,7 +101,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
 
     返回 {data_date, exec_date, rules_version, mkt_lim_tm1, entries, filter_stats}。
     entries 每行含 group_key(五组)/actionable/prev_close/trigger_price(=limit_price)/
-    limit_price 及 U 模型快照(base/pos3/low_dd/pull/reb/ma_st/n_lim_mid/topped/d23ok/seg_h)。
+    limit_price 及 坑模型快照(base/pos3/low_dd/pull/reb/ma_st/n_lim_mid/topped/d23ok/seg_h)。
     """
     engine = get_engine()
     if data_date is None:
@@ -156,7 +156,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
     cand = last[hit]
     stats["trigger_pool"] = int(len(cand))
 
-    # 候选股的 U 模型数组(u_features 按行算)
+    # 候选股的 坑模型数组(u_features 按行算)
     arr_by: dict[str, dict[str, object]] = {}
     for vt, grp in bars[bars["vt_symbol"].isin(set(cand["vt_symbol"]))].groupby(
             "vt_symbol", sort=False):
@@ -178,7 +178,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                                arr["streak"], int(row.pos), bigtop=is4)
         if f is None:
             continue
-        # 标注层: 真U结构识别(坑底前最高收盘为顶+topped时序)——只用于展示快照,
+        # 标注层: 真坑结构识别(坑底前最高收盘为顶+topped时序)——只用于展示快照,
         # 出手判定仍用 f(定稿阈值按旧尺子校准, w2s_diag_truetop_final.py 实测换尺子摊薄)
         lab = u_shape.u_struct(arr["close"], arr["high"], arr["is_lim"],
                                arr["streak"], int(row.pos), bigtop=is4) or f

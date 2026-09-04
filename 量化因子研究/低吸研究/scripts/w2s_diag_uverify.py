@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """「只留U形态」+「4+夹层锚修复」效果验证:
-① 出手票中位置=无U的有几笔(修复后应为0, 否则库会把该买的票藏起来)
+① 出手票中位置=无坑的有几笔(修复后应为0, 否则库会把该买的票藏起来)
 ② 4+夹层票(seg_h<4)锚修复前后: 位置分布对照 + 收益对照
-③ 修复后4+组无U票收益(确认剩下被剔的真是不洗盘的)
+③ 修复后4+组无坑票收益(确认剩下被剔的真是不洗盘的)
 """
 import sys
 
@@ -17,10 +17,10 @@ pd.set_option("display.width", 300)
 
 def pos_of(low_dd, pull):
     if low_dd == low_dd and low_dd > -0.04:
-        return "无U"
+        return "无坑"
     if pull == pull and pull > -0.04:
-        return "U突破"
-    return "U坑内"
+        return "已回顶"
+    return "坑内"
 
 
 def main():
@@ -102,7 +102,7 @@ def main():
         return tg["seg_h"] == 2
 
     print("=" * 96)
-    print("① 出手票中 位置=无U 的笔数(修复后锚; 应为0否则库藏了该买的票):")
+    print("① 出手票中 位置=无坑 的笔数(修复后锚; 应为0否则库藏了该买的票):")
     for name, tg in tgs.items():
         out = tg[is_out(name, tg)].copy()
         # 4+组出手票位置按修复后锚(夹层seg_h<4用 bigtop)
@@ -114,9 +114,9 @@ def main():
             else:
                 pos3.append(pos_of(r.low_dd, r.pull))
         out["pos3"] = pos3
-        n_nou = int((out["pos3"] == "无U").sum())
-        print(f"  {name}: 出手{len(out)}笔 其中无U {n_nou}笔 | "
-              + " ".join(f"{p}:{int((out['pos3'] == p).sum())}" for p in ("U坑内", "U突破", "无U")))
+        n_nou = int((out["pos3"] == "无坑").sum())
+        print(f"  {name}: 出手{len(out)}笔 其中无坑 {n_nou}笔 | "
+              + " ".join(f"{p}:{int((out['pos3'] == p).sum())}" for p in ("坑内", "已回顶", "无坑")))
 
     print("\n② 4+组夹层票(seg_h<4) 锚修复前后对照:")
     for name in ("4板补涨阴", "4板补涨阳"):
@@ -137,16 +137,16 @@ def main():
         sw["old_pos"], sw["new_pos"], sw["new_dd"] = old_pos, new_pos, new_dd
         print(f"\n── {name} 夹层票 n={len(sw)} 板留均 {sw['r_bh'].mean() * 100:+.2f}:")
         for lab, col in (("修复前(小波顶)", "old_pos"), ("修复后(大波顶)", "new_pos")):
-            desc = " ".join(f"{p}:{int((sw[col] == p).sum())}" for p in ("无U", "U坑内", "U突破"))
+            desc = " ".join(f"{p}:{int((sw[col] == p).sum())}" for p in ("无坑", "坑内", "已回顶"))
             print(f"  {lab}: {desc}")
-        flip = sw[(sw["old_pos"] == "无U") & (sw["new_pos"] != "无U")]
-        print(f"  无U→U 翻正 {len(flip)}笔 板留均 {flip['r_bh'].mean() * 100:+.2f} "
+        flip = sw[(sw["old_pos"] == "无坑") & (sw["new_pos"] != "无坑")]
+        print(f"  无坑→U 翻正 {len(flip)}笔 板留均 {flip['r_bh'].mean() * 100:+.2f} "
               f"坑深中位(大波顶) {flip['new_dd'].median() * 100:+.1f}%")
-        still = sw[sw["new_pos"] == "无U"]
-        print(f"  仍无U {len(still)}笔 板留均 {still['r_bh'].mean() * 100:+.2f} "
+        still = sw[sw["new_pos"] == "无坑"]
+        print(f"  仍无坑 {len(still)}笔 板留均 {still['r_bh'].mean() * 100:+.2f} "
               f"(大波后也没跌出坑=真没洗盘)")
 
-    print("\n③ 修复后 4+组全体无U票(该剔的)收益:")
+    print("\n③ 修复后 4+组全体无坑票(该剔的)收益:")
     for name in ("4板补涨阴", "4板补涨阳"):
         tg = tgs[name]
         pos3 = []
@@ -157,8 +157,8 @@ def main():
             else:
                 pos3.append(pos_of(r.low_dd, r.pull))
         tg["pos3"] = pos3
-        s = tg[tg["pos3"] == "无U"]
-        print(f"  {name}: 无U {len(s)}笔 板留均 {s['r_bh'].mean() * 100:+.2f} "
+        s = tg[tg["pos3"] == "无坑"]
+        print(f"  {name}: 无坑 {len(s)}笔 板留均 {s['r_bh'].mean() * 100:+.2f} "
               f"好票率 {(s['r_d1c'] > 0).mean() * 100:.0f}%")
 
 

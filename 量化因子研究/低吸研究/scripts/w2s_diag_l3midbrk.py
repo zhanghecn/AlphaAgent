@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""层③候选修订验证: 剔除「中坑8~15%×U突破(已回顶)」7笔-1.98毒格后, 层③完整指标与分年.
+"""层③候选修订验证: 剔除「中坑8~15%×已回顶(已回顶)」7笔-1.98毒格后, 层③完整指标与分年.
 对照: 现层③ n=34 +4.01 全正.
 """
 import sys
@@ -46,7 +46,7 @@ def main():
     tg = add_outcome(tg, bars)
     L3 = tg[(tg["seg_h"] >= 4) & tg["n_lim_mid"].between(1, 2)
             & (tg["ma_st"] == "+++") & (tg["low_dd"] <= -0.04)].copy()
-    brk = L3["pull"] > -0.04                      # U突破(已回顶)
+    brk = L3["pull"] > -0.04                      # 已回顶(已回顶)
     mid = L3["low_dd"].between(-0.15, -0.08, inclusive="right")   # 中坑8~15%
     toxic = brk & mid
 

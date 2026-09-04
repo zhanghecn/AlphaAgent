@@ -1,6 +1,6 @@
-"""U型补涨打板回测引擎:日线口径全量回放 + 物化报告。
+"""N型补涨打板回测引擎:日线口径全量回放 + 物化报告。
 
-口径 = 量化因子研究/低吸研究/U型补涨打板.md 定稿(2026-08-30, commit f6737678):
+口径 = 量化因子研究/低吸研究/N型补涨打板.md 定稿(2026-08-30, commit f6737678):
 - 事件 = 信号日(T-1)四组基本条件命中行(触发池全量);出手 = u_shape.actionable_of 白名单
 - 买入(D0=T): 最高价触及涨停价(=T-1收盘×1.10) 且 开盘<涨停价(一字买不进排除);
   买价=涨停价(板上买)
@@ -71,7 +71,7 @@ def run_backtest() -> dict[str, object]:
     return payload
 
 
-# ── 事件池构建(信号日 T-1 行;U模型特征由 u_shape 按行算) ──
+# ── 事件池构建(信号日 T-1 行;坑模型特征由 u_shape 按行算) ──
 
 def _build_events() -> pd.DataFrame:
     engine = get_engine()
@@ -111,7 +111,7 @@ def _build_events() -> pd.DataFrame:
     T = bars[(bars["trade_date"] >= REPLAY_START) & hit].copy()
     T = T[T["n1_close"].notna() & T["n1_high"].notna() & (T["n1_gap"] <= 10)].copy()
 
-    # U模型特征(按事件行;候选量≈数千,行循环与研究 build_base 同构;
+    # 坑模型特征(按事件行;候选量≈数千,行循环与研究 build_base 同构;
     # bigtop 锚修正只对 4+组启用——2板组锚就是2板段, 不做大波重算)
     arr_by: dict[str, dict[str, object]] = {}
     for vt, grp in bars.groupby("vt_symbol", sort=False):

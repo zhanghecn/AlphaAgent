@@ -24,7 +24,7 @@ const GROUP_BADGES: Record<W2sGroupKey, { label: string; className: string }> = 
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-/** U型补涨打板历史交割单:横向平铺列表(全部出手信号逐笔,不限仓位),支持月份/组/搜票筛选。 */
+/** N型补涨打板历史交割单:横向平铺列表(全部出手信号逐笔,不限仓位),支持月份/组/搜票筛选。 */
 export function W2sLedgerView({
   ledgerDays,
   months,
@@ -64,7 +64,7 @@ export function W2sLedgerView({
   }
 
   return (
-    <section aria-label="U型补涨打板历史交割单" className="rounded-lg border">
+    <section aria-label="N型补涨打板历史交割单" className="rounded-lg border">
       <div className="border-b px-4 py-2 text-xs text-muted-foreground">
         回测模拟口径(非实盘):板上买(触板买涨停价,一字排除),板留断走
         ;全部出手信号逐笔,不限仓位。实时前推成交随产品上线逐日沉淀。

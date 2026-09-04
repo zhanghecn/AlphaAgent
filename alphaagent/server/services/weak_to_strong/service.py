@@ -1,4 +1,4 @@
-"""U型补涨打板 API 门面:实时推荐 / 回测报告 / 交割单 / 规则契约。"""
+"""N型补涨打板 API 门面:实时推荐 / 回测报告 / 交割单 / 规则契约。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ _rebuild_running = False
 
 
 class BacktestAlreadyRunningError(RuntimeError):
-    """U型补涨打板回测重算已有任务在执行。"""
+    """N型补涨打板回测重算已有任务在执行。"""
 
 
 # ── 实时推荐 ──

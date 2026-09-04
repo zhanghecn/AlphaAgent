@@ -1,4 +1,4 @@
-"""U型补涨打板持久层:池/信号/扫描轨道/回测报告的读写。"""
+"""N型补涨打板持久层:池/信号/扫描轨道/回测报告的读写。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ _TABLE_EXTRA_COLUMNS = {
     "w2s_pool_entries": {
         "ushadow_tm1": "DOUBLE PRECISION",
         "yang_tm1": "BOOLEAN",
-        # v4(U型补涨打板)U模型快照列
+        # v4(N型补涨打板)坑模型快照列
         "actionable": "BOOLEAN NOT NULL DEFAULT FALSE",
         "base": "VARCHAR(8)",
         "base_label": "VARCHAR(8)",

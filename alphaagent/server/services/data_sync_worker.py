@@ -106,7 +106,7 @@ def _start_low_suction_view_reconcile() -> None:
 
 
 def _start_w2s_report_reconcile() -> None:
-    """后台自检U型补涨打板回测报告版本漂移(版本门禁失效即自动重建,防页面空但DB有数据)。"""
+    """后台自检N型补涨打板回测报告版本漂移(版本门禁失效即自动重建,防页面空但DB有数据)。"""
 
     def _run() -> None:
         try:

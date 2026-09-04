@@ -1887,8 +1887,8 @@ Index(
     qianlong_backtest_rebuild_runs.c.requested_at,
 )
 
-# ── U型补涨打板(原趋势弱转强)产品线 ──
-# 策略口径 = 量化因子研究/低吸研究/U型补涨打板.md 定稿(2026-08-30,原弱转强V4)。
+# ── N型补涨打板(原趋势弱转强)产品线 ──
+# 策略口径 = 量化因子研究/低吸研究/N型补涨打板.md 定稿(2026-08-30,原弱转强V4)。
 # 盘前池:每个执行交易日一行/股/组,全部条件来自 T-1 收盘数据;池=触发池全量(雷达),
 # actionable=四组白名单出手标记。
 w2s_pool_entries = Table(
@@ -1913,16 +1913,16 @@ w2s_pool_entries = Table(
     Column("base20_tm1", Float, nullable=True),    # 底座20日涨幅 %(v4 已弃用,留列兼容)
     Column("last_streak", Integer, nullable=True), # v3 列(弃用)→ 用 seg_h
     Column("gap_days", Integer, nullable=True),    # 坑宽(D0-末板,研究 gap 口径)
-    # U模型快照(v4 新增)
+    # 坑模型快照(v4 新增)
     Column("base", String(8), nullable=True),      # 地基形态 HIGH/FLAT/U/V/MID/LB/DN
     Column("base_label", String(8), nullable=True),  # 地基中文名
-    Column("pos3", String(8), nullable=True),      # U三状态 无U/U坑内/U突破
+    Column("pos3", String(8), nullable=True),      # 坑三状态 无坑/坑内/已回顶
     Column("low_dd", Float, nullable=True),        # 坑深 %(断板期最低收盘距顶)
     Column("pull", Float, nullable=True),          # 昨收距顶 %
     Column("reb", Float, nullable=True),           # 弹回 %(昨收距坑底)
     Column("ma_st", String(4), nullable=True),     # 均线排列态 +++/−++/+--
     Column("n_lim_mid", Integer, nullable=True),   # 断板期孤立涨停日数
-    Column("topped", Boolean, nullable=True),      # 断板期曾收顶上(伪U)
+    Column("topped", Boolean, nullable=True),      # 断板期曾收顶上(曾收顶上)
     Column("d23ok", Boolean, nullable=True),       # 下探中(D-2收<D-3收且D-3非涨停)
     Column("seg_h", Integer, nullable=True),       # 最近≥2板段高度
     Column("mkt_lim_tm1", Integer, nullable=True), # 昨日大盘(主板非ST)涨停家数(信息项)

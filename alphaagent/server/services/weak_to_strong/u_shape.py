@@ -1,4 +1,4 @@
-"""U型补涨打板 · U模型共享原语（pool.py 与 backtest.py 共用，口径唯一事实源）。
+"""N型补涨打板 · 洗盘坑模型共享原语（pool.py 与 backtest.py 共用，口径唯一事实源）。
 
 移植自研究侧（量化因子研究/低吸研究/scripts/，定稿 commit f6737678）：
 - classify_base ← w2s_base_type.py:29（七类互斥完备，D-1 全可观测）
@@ -26,13 +26,13 @@ SQUAT_BASES = ("U", "MID", "FLAT", "V", "LB")
 # 均线纠缠态
 TANGLE_MA = ("-++", "+--")
 
-# U 三状态标签（展示层）
-POS_NO_U = "无U"
-POS_BREAK = "U突破"
-POS_IN = "U坑内"
+# 坑三状态标签（展示层；N=整体结构名, U蹲/V末反等只描述坑的局部形状=地基分类）
+POS_NO_U = "无坑"
+POS_BREAK = "已回顶"
+POS_IN = "坑内"
 
 # 组 key（内部名，用户可见中文名在 contracts.GROUP_LABELS）
-GROUP_YIN2 = "yin2"      # 2板阴 · U坑
+GROUP_YIN2 = "yin2"      # 2板阴 · 坑蹲
 GROUP_YANG2A = "yang2a"  # 2板阳 · 坑底首阳
 GROUP_YANG2B = "yang2b"  # 2板阳 · 坑中纠缠
 GROUP_YIN4 = "yin4"      # 4+阴 · 孤板多头
@@ -80,7 +80,7 @@ def _last_leq(positions: np.ndarray, i: int) -> int:
 
 def u_features(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
                streak: np.ndarray, i: int, bigtop: bool = False) -> dict | None:
-    """单股序列 + 信号日下标 i → U模型特征 dict；最近无≥2板段返回 None。
+    """单股序列 + 信号日下标 i → 坑模型特征 dict；最近无≥2板段返回 None。
 
     close/high/is_lim/streak: 按交易日升序的等长 numpy 序列（is_lim 为 bool）。
     bigtop: 4+组票置 True——夹层票(seg_h<4)按 bigtop_fix 对最新≥4段顶重算
@@ -89,12 +89,12 @@ def u_features(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
       seg_h      最近≥2板段高度（末板日 streak 值）
       gap_d0     坑宽（研究口径 = D0-末板 = i+1-lp）
       n_lim_mid  断板期孤立涨停日数（(lp, i] 内涨停天数；≥2段会前移 lp 故天然是孤立板）
-      topped     断板期曾收盘 ≥ 最后一次涨停日收盘（伪U；锚=最后涨停日含孤立板）
+      topped     断板期曾收盘 ≥ 最后一次涨停日收盘（曾收顶上；锚=最后涨停日含孤立板）
       d23ok      下探中：close[i-1] < close[i-2] 且 i-2 日非涨停（i<3 数据不足=False）
       ma_st      均线排列态（ma5/10/20/30 在信号日无 shift；数据不足=None）
       big4       是否存在最新≥4段（夹层修正用）
       base/pull/low_dd/reb/pos_low/amp/brk ← classify_base（锚=最近≥2段顶）
-      pos3       U三状态（用修正后的 low_dd/pull）
+      pos3       坑三状态（用修正后的 low_dd/pull）
     """
     n = len(close)
     if i < 1 or i >= n:
@@ -110,7 +110,7 @@ def u_features(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
     if info is None:
         return None
 
-    # 伪U：断板期曾收在「最后一次涨停日」收盘上方（锚含孤立板，与研究口径一致）
+    # 曾收顶上：断板期曾收在「最后一次涨停日」收盘上方（锚含孤立板，与研究口径一致）
     lim_pos = np.flatnonzero(is_lim[: i + 1])
     j = int(lim_pos[-1]) if len(lim_pos) else -1
     topped = bool(j >= 0 and j < i and (close[j + 1: i + 1] >= close[j]).any())
@@ -162,9 +162,9 @@ def u_features(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
 
 def u_struct(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
              streak: np.ndarray, i: int, bigtop: bool = False) -> dict | None:
-    """真U形态识别（结构版, 全收盘口径）——标注层专用，判定层勿用。
+    """真坑结构识别（结构版, 全收盘口径）——标注层专用，判定层勿用。
 
-    与 u_features 的差异（修复「误认为贴顶/伪U」的识别 bug）：
+    与 u_features 的差异（修复「误认为贴顶/曾收顶上」的识别 bug）：
       顶区 = 坑底日之前的最高收盘（段内+断板期溢出；坑底后的新高是修复不是顶,
              插针不算——不用 high 用 close）；
       topped = 坑底日之后曾收回顶区（98%），坑底前的近顶收盘是波峰延续不算；
@@ -172,7 +172,7 @@ def u_struct(close: np.ndarray, high: np.ndarray, is_lim: np.ndarray,
       pit_days = 断板期收盘 < 顶区×96% 的天数（坑的持续性）。
     验收：协鑫集成2026-02-03 坑里右墙 / 法尔胜2026-03-10 浅坑回顶 /
           胜通能源2026-07-09 左半未起 / 川润股份2024-03-12 无坑新高（十票全对）。
-    注意：本函数输出只用于展示/标注（池条目U快照、案例库形态描述）；
+    注意：本函数输出只用于展示/标注（池条目坑快照、案例库形态描述）；
           四组出手判定仍用 u_features（定稿阈值按旧尺子校准，换尺子需整轮重校）。
     """
     n = len(close)
@@ -234,8 +234,8 @@ def actionable_of(group_key: str, f: dict) -> bool:
     2板阴：蹲类 × 弹回≤16% × 坑宽6~15 × 未收顶上
     2板阳·首阳：DN × 未收顶上
     2板阳·纠缠：蹲类 × 均线纠缠 × 下探中
-    4+阴：孤立板1~2 × 全多头 × U坑存在 × 剔中坑8~15%已回顶
-    4+阳：seg_h==2（2板小波穿插；无U也出手=夹层例外）× 剔骑顶区±4%
+    4+阴：孤立板1~2 × 全多头 × 洗盘坑存在 × 剔中坑8~15%已回顶
+    4+阳：seg_h==2（2板小波穿插；无坑也出手=夹层例外）× 剔骑顶区±4%
           （骑顶=信号日收距大波顶±4%内=多空未决毒格：9笔-6.38胜率22%，
            2023/2024/2025 三年全负；坑里<-4%与明确站上顶>+4%均保留）
     """

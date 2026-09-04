@@ -1,6 +1,6 @@
-"""U型补涨打板盘中每分钟扫描:板上买触发(四组统一,无竞价过滤/停手)。
+"""N型补涨打板盘中每分钟扫描:板上买触发(四组统一,无竞价过滤/停手)。
 
-口径(U型补涨打板定稿 v4.0 盘中规则):
+口径(N型补涨打板定稿 v4.0 盘中规则):
 - 扫描窗口 09:30~15:00 全日(研究未设时段限制)
 - 只对 actionable(白名单出手)的池票触发;触发池其余票是雷达,不写信号
 - 一字排除:首次见到开盘价 ≥ 涨停价(一字/开盘即板)→ skipped_gap 当日不再跟踪
@@ -32,7 +32,7 @@ _TERMINAL_STATUSES = {"skipped_gap", "halted", "no_trigger", "closed"}
 
 
 class LiveScanAlreadyRunningError(RuntimeError):
-    """U型补涨打板盘中扫描已有任务在执行。"""
+    """N型补涨打板盘中扫描已有任务在执行。"""
 
 
 def in_scan_window(now: datetime) -> bool:

@@ -1,7 +1,7 @@
 import { apiClient } from "./client";
 
-// ── U型补涨打板(V3 三组体系升级 V4)产品线 API 契约 ──
-// 策略口径 = w2s-v4.0(量化因子研究/低吸研究/U型补涨打板.md 定稿)。
+// ── N型补涨打板(V3 三组体系升级 V4)产品线 API 契约 ──
+// 策略口径 = w2s-v4.0(量化因子研究/低吸研究/N型补涨打板.md 定稿)。
 // 买点 = 断板后再启动首个涨停板板上买(触板买涨停价,一字排除);
 // 池 = 触发池全量(雷达),白名单出手标记 actionable。
 
@@ -20,7 +20,7 @@ export interface W2sLiveEntry {
   yang_tm1: boolean | null;
   base: string | null;
   base_label: string | null;
-  pos3: "无U" | "U坑内" | "U突破" | null;
+  pos3: "无坑" | "坑内" | "已回顶" | null;
   /** 坑深%(断板期最低收盘距上波顶,负值) */
   low_dd: number | null;
   /** 距顶%(信号日收盘距上波顶,负值) */

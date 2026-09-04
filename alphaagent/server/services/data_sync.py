@@ -303,15 +303,15 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
     ),
     JobDefinition(
         id="w2s_eod_finalize",
-        name="U型补涨打板盘后定版",
-        description="U型补涨打板信号定版/退出回填(板留断走) + 次日四组盘前池计算;口径见 weak_to_strong.contracts(w2s-v4)。",
+        name="N型补涨打板盘后定版",
+        description="N型补涨打板信号定版/退出回填(板留断走) + 次日四组盘前池计算;口径见 weak_to_strong.contracts(w2s-v4)。",
         source_id="alphaagent_local",
         target_table="w2s_signals",
         default_params={},
     ),
     JobDefinition(
         id="w2s_live_scan_tick",
-        name="U型补涨打板盘中扫描",
+        name="N型补涨打板盘中扫描",
         description="每分钟现货扫描四组盘前池:一字排除、现价触涨停价板上买(仅出手标记票,09:30~15:00)。",
         source_id="alphaagent_local",
         target_table="w2s_signals",

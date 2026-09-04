@@ -41,7 +41,7 @@ export function WeakToStrongPage() {
       <nav
         className="mb-3 flex h-11 items-end gap-6 overflow-x-auto border-b"
         role="tablist"
-        aria-label="U型补涨打板视图"
+        aria-label="N型补涨打板视图"
       >
         {W2S_VIEWS.map((item) => {
           const Icon = item.icon;
@@ -98,7 +98,7 @@ function LiveTab() {
   if (query.isError || !query.data) {
     return (
       <div className="py-5">
-        <ErrorState message="U型补涨打板实时推荐暂时不可用" onRetry={() => void query.refetch()} />
+        <ErrorState message="N型补涨打板实时推荐暂时不可用" onRetry={() => void query.refetch()} />
       </div>
     );
   }
@@ -152,7 +152,7 @@ function BacktestTab() {
   if (query.isError || !query.data) {
     return (
       <div className="py-5">
-        <ErrorState message="U型补涨打板回测报告暂时不可用" onRetry={() => void query.refetch()} />
+        <ErrorState message="N型补涨打板回测报告暂时不可用" onRetry={() => void query.refetch()} />
       </div>
     );
   }
@@ -200,7 +200,7 @@ function LedgerTab() {
   if (query.isError || !query.data) {
     return (
       <div className="py-5">
-        <ErrorState message="U型补涨打板历史交割单暂时不可用" onRetry={() => void query.refetch()} />
+        <ErrorState message="N型补涨打板历史交割单暂时不可用" onRetry={() => void query.refetch()} />
       </div>
     );
   }

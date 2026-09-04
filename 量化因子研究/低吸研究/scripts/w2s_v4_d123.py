@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""4+阴阳 × U坑存在 × MA20>MA30 底座上, D-3/D-2/D-1 阴阳排列与涨幅结构研究(主人猜想).
+"""4+阴阳 × 洗盘坑存在 × MA20>MA30 底座上, D-3/D-2/D-1 阴阳排列与涨幅结构研究(主人猜想).
 阴阳=蜡烛收盘vs开盘; 另收集三日各自涨跌幅与累计涨幅. 阴组D-1恒阴→4种形态; 阳组D-1恒阳→4种.
 """
 import sys
@@ -67,8 +67,8 @@ def main():
         maok = tg["ma20"] > tg["ma30"]
         base = tg[uok & maok]
         print("=" * 100)
-        print(f"【{name}】 U坑存在×MA20>MA30 底座: n={len(base)} "
-              f"(全组 {len(tg)} | 无U或MA空头 {len(tg) - len(base)})")
+        print(f"【{name}】 洗盘坑存在×MA20>MA30 底座: n={len(base)} "
+              f"(全组 {len(tg)} | 无坑或MA空头 {len(tg) - len(base)})")
         stat(base, "底座全体", "")
 
         print("\n  D-3 D-2 D-1 阴阳排列(D-1已由组条件固定):")

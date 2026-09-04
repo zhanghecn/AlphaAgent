@@ -13,7 +13,7 @@ import { cn, formatPct } from "@/lib/utils";
 
 const GROUPS: W2sGroupKey[] = ["yin2", "yang2a", "yang2b", "yin4", "yang4"];
 const GROUP_SHORT: Record<W2sGroupKey, string> = {
-  yin2: "2板阴·U坑",
+  yin2: "2板阴·坑蹲",
   yang2a: "2板阳·首阳",
   yang2b: "2板阳·纠缠",
   yin4: "4+阴·孤板",

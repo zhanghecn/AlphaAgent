@@ -34,9 +34,9 @@ export function W2sGuideView() {
     <div className="space-y-4">
       <section className="rounded-lg border px-4 py-3">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <span className="text-sm font-semibold">U型补涨打板 · 规则定稿 {rules.rules_version}</span>
+          <span className="text-sm font-semibold">N型补涨打板 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            U坑统一模型×均线形态×夹层结构全市场验证(2023-04 ~ 2026-08);每条件都有分桶证据,见研究文档
+            洗盘坑统一模型×均线形态×夹层结构全市场验证(2023-04 ~ 2026-08);每条件都有分桶证据,见研究文档
           </span>
           <span className="ml-auto flex items-center gap-2">
             {GROUP_ORDER.map((gk) => (
@@ -133,7 +133,7 @@ export function W2sGuideView() {
         </ul>
         <p className="mt-2 text-xs text-muted-foreground">
           注意区分:低吸页趋势族的「B 涨停弱转强 P1.5」是低吸持有打法(收盘买入、D+1/3/5 评估),
-          与本产品的 U型补涨打板(断板后再启动首板板上买、板留断走)不是同一打法,两套条件互不通用。
+          与本产品的 N型补涨打板(断板后再启动首板板上买、板留断走)不是同一打法,两套条件互不通用。
         </p>
       </section>
     </div>

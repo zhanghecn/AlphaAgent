@@ -47,7 +47,7 @@ def main():
     tg = add_outcome(tg, bars)
     L3 = tg[(tg["seg_h"] >= 4) & tg["n_lim_mid"].between(1, 2)
             & (tg["ma_st"] == "+++") & (tg["low_dd"] <= -0.04)].copy()
-    L3["st3"] = np.where(L3["pull"] > -0.04, "U突破(已回顶)", "U坑内")
+    L3["st3"] = np.where(L3["pull"] > -0.04, "已回顶(已回顶)", "坑内")
 
     # ① 华电能源逐日还原
     r0 = L3[(L3["vt_symbol"] == "600726.SSE")
@@ -77,15 +77,15 @@ def main():
     # ② 层③全量: U状态 × 坑深档
     print(f"\n② 层③全量 n={len(L3)}:")
     st(L3, "层③全体", "")
-    for lab, s in (("U坑内(昨收仍在坑里)", L3[L3["st3"] == "U坑内"]),
-                   ("U突破(已爬回顶上)", L3[L3["st3"] == "U突破(已回顶)"])):
+    for lab, s in (("坑内(昨收仍在坑里)", L3[L3["st3"] == "坑内"]),
+                   ("已回顶(已爬回顶上)", L3[L3["st3"] == "已回顶(已回顶)"])):
         st(s, lab)
     print("  坑深档 × U状态:")
     for lo, hi, dlab in ((-0.08, -0.04, "擦边坑4~8%"), (-0.15, -0.08, "中坑8~15%"),
                          (-9, -0.15, "深坑>15%")):
         s0 = L3[L3["low_dd"].between(lo, hi, inclusive="right")]
         st(s0, f"{dlab} 全体")
-        for slab in ("U坑内", "U突破(已回顶)"):
+        for slab in ("坑内", "已回顶(已回顶)"):
             s = s0[s0["st3"] == slab]
             if len(s):
                 st(s, f"{dlab}×{slab}", "    ")
@@ -93,17 +93,17 @@ def main():
     # ③ 全4+阴底池(不套层③其他条件): U状态 × 坑深档 —— 放大数据看浅坑擦边
     print(f"\n③ 全4+阴触发底池 n={len(tg)} (不套孤板/均线条件):")
     tg2 = tg.copy()
-    tg2["st3"] = np.where(tg2["low_dd"] > -0.04, "无U",
-                          np.where(tg2["pull"] > -0.04, "U突破(已回顶)", "U坑内"))
-    for lab in ("无U", "U突破(已回顶)", "U坑内"):
+    tg2["st3"] = np.where(tg2["low_dd"] > -0.04, "无坑",
+                          np.where(tg2["pull"] > -0.04, "已回顶(已回顶)", "坑内"))
+    for lab in ("无坑", "已回顶(已回顶)", "坑内"):
         st(tg2[tg2["st3"] == lab], lab, "")
-    print("  U突破 × 坑深档(浅坑擦边回顶=贴顶伪U?):")
-    u = tg2[tg2["st3"] == "U突破(已回顶)"]
+    print("  已回顶 × 坑深档(浅坑擦边回顶=贴顶曾收顶上?):")
+    u = tg2[tg2["st3"] == "已回顶(已回顶)"]
     for lo, hi, dlab in ((-0.08, -0.04, "擦边坑4~8%"), (-0.15, -0.08, "中坑8~15%"),
                          (-9, -0.15, "深坑>15%")):
         s = u[u["low_dd"].between(lo, hi, inclusive="right")]
-        st(s, f"U突破×{dlab}")
-    print("  华电能源所在格 = 层③ × 擦边坑4~8% × U突破")
+        st(s, f"已回顶×{dlab}")
+    print("  华电能源所在格 = 层③ × 擦边坑4~8% × 已回顶")
 
 
 if __name__ == "__main__":

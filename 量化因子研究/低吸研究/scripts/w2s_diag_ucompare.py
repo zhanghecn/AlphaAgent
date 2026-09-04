@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""修复前后对照表(主人要): 年×四组, 修复前=全量触发(无U混入+夹层小波顶锚),
-修复后=U形态池(无U剔出+出手票保留+夹层大波顶锚). 指标: n/D+1收均/板留均/好票率/出手n/出手板留.
+"""修复前后对照表(主人要): 年×四组, 修复前=全量触发(无坑混入+夹层小波顶锚),
+修复后=U形态池(无坑剔出+出手票保留+夹层大波顶锚). 指标: n/D+1收均/板留均/好票率/出手n/出手板留.
 """
 import sys
 
@@ -15,10 +15,10 @@ pd.set_option("display.width", 300)
 
 def pos_of(low_dd, pull):
     if low_dd == low_dd and low_dd > -0.04:
-        return "无U"
+        return "无坑"
     if pull == pull and pull > -0.04:
-        return "U突破"
-    return "U坑内"
+        return "已回顶"
+    return "坑内"
 
 
 def main():
@@ -115,10 +115,10 @@ def main():
         else:
             tg["pos_new"] = tg["pos_old"]
         old_pool = tg                                  # 修复前=全量触发
-        new_pool = tg[(tg["pos_new"] != "无U") | out]  # 修复后=U形态+出手票
+        new_pool = tg[(tg["pos_new"] != "无坑") | out]  # 修复后=U形态+出手票
         print("=" * 100)
         print(f"【{name}】 修复前 n={len(old_pool)} → 修复后 n={len(new_pool)} "
-              f"(剔出非出手无U {len(old_pool) - len(new_pool)}笔)")
+              f"(剔出非出手无坑 {len(old_pool) - len(new_pool)}笔)")
         print(f"  全期 前: {stat_line(old_pool, out)}")
         print(f"  全期 后: {stat_line(new_pool, out)}")
         for yy in (2023, 2024, 2025, 2026):

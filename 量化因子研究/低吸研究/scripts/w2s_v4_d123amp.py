@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """4+阴 U底座上 D-3/D-2/D-1 涨幅幅度研究(主人: 横盘控制×-+规律, 不脱离U形态).
-底座=U坑存在(low_dd<=-4%)×MA20>MA30. 横盘=三日每日|涨幅|≤3%.
+底座=洗盘坑存在(low_dd<=-4%)×MA20>MA30. 横盘=三日每日|涨幅|≤3%.
 """
 import sys
 
@@ -63,7 +63,7 @@ def main():
         base = tg[(tg["low_dd"] <= -0.04) & (tg["ma20"] > tg["ma30"])].copy()
         base["横盘"] = (base[["d1", "d2", "d3"]].abs().max(axis=1) <= 0.03)
         print("=" * 100)
-        print(f"【{name}】 U坑存在×MA20>MA30: n={len(base)}")
+        print(f"【{name}】 洗盘坑存在×MA20>MA30: n={len(base)}")
         stat(base, "底座全体", "")
         stat(base[base["横盘"]], "横盘(三日|幅|≤3%)", "")
         stat(base[~base["横盘"]], "非横盘", "")
