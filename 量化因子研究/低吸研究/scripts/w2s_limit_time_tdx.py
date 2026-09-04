@@ -149,11 +149,20 @@ def analyze(m: pd.DataFrame, from_csv: bool = False) -> None:
     print("== ① 四大组(2板阴/2板阳/4+阴/4+阳) × 15分钟粒度 (格= n|板留均%/好票率%) ==")
     print("=" * 100)
     bigs = ["2板阴", "2板阳", "4+阴", "4+阳"]
+    # 15mK时标=周期末刻 → 行标签改写为区间(09:45→09:30~09:45), 主人2026-09-04要求
+    EDGE = ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:15", "11:30",
+            "13:15", "13:30", "13:45", "14:00", "14:15", "14:30", "14:45", "15:00"]
+    PREV = {EDGE[0]: "09:30"}
+    for a, b in zip(EDGE, EDGE[1:]):
+        PREV[b] = a
+    PREV["13:15"] = "13:00"   # 午休断点: 午后首根起点=13:00, 不接上午11:30
+    def interval(t: str) -> str:
+        return f"{PREV.get(t, '?')}~{t}"
     times = sorted(m["touch"].unique())
-    header = f"{'触板时刻':<8}" + "".join(f"{b:^24}" for b in bigs) + f"{'合计':^24}"
+    header = f"{'触板区间':<16}" + "".join(f"{b:^24}" for b in bigs) + f"{'合计':^24}"
     print(header)
     for t in times:
-        row = f"{t:<8}"
+        row = f"{interval(t):<16}"
         for big in bigs + ["合计"]:
             s = m if big == "合计" else m[m["big4"] == big]
             s = s[s["touch"] == t]
@@ -168,7 +177,7 @@ def analyze(m: pd.DataFrame, from_csv: bool = False) -> None:
         g = m[m["big4"] == big]
         r = g["ret_bw"].dropna()
         print(f"  {big} 合计: n={len(r)} 均{r.mean()*100:+.2f}% 好票率{(r>0).mean()*100:.1f}%")
-    print("注: 时刻=15分钟K周期结束时点(09:45=09:30-09:45触板; 11:15=上午最后一根; 15:00=收盘)")
+    print("注: 区间=该15分钟内最高价摸到过涨停价(区间内具体哪一分不可见); 11:00~11:15=上午末; 14:45~15:00=收盘")
 
     print("\n== ② 阴系 vs 阳系 × 粗五段 ==")
     m["yy"] = m["big4"].map(YIN_YANG)
