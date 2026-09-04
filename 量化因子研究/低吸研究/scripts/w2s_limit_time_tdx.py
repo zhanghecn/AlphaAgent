@@ -114,7 +114,107 @@ def stats_block(df: pd.DataFrame, by: str) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(by)
 
 
+BIG4 = {  # 阴阳×板高 2×2 大组(主人2026-09-04要求拆开看)
+    "yin2": "2板阴", "yang2a": "2板阳", "yang2b": "2板阳",
+    "yin4": "4+阴", "yang4": "4+阳",
+}
+YIN_YANG = {"2板阴": "阴系", "2板阳": "阳系", "4+阴": "阴系", "4+阳": "阳系"}
+HEIGHT = {"2板阴": "2板系", "2板阳": "2板系", "4+阴": "4+系", "4+阳": "4+系"}
+SEG_ORDER = ["①早盘9:30-10:00", "②上午10:00-11:00", "③上午11:00-11:30",
+             "④午后13:00-14:00", "⑤尾盘14:00-15:00"]
+
+
+def analyze(m: pd.DataFrame, from_csv: bool = False) -> None:
+    m = m.copy()
+    if "bucket" not in m.columns or m["bucket"].isna().all():
+        m["bucket"] = m["touch"].apply(bucket_of)
+        m = m.dropna(subset=["bucket"])
+        m["coarse"] = m["bucket"].map(COARSE)
+    m["year"] = pd.to_datetime(m["entry_day"]).dt.year
+    m["good"] = m["ret_bw"] > 0
+    m["big4"] = m["group_key"].map(BIG4)
+
+    print("\n== 全体 · 按首次触板时段(半小时) ==")
+    print(stats_block(m, "bucket").to_string(index=False))
+
+    print("\n== 好票 vs 差票 · 时段分布(组内占比%) ==")
+    cross = pd.crosstab(m["bucket"], m["good"], normalize="columns") * 100
+    cross.columns = ["差票组内%", "好票组内%"]
+    cnt = pd.crosstab(m["bucket"], m["good"])
+    cnt.columns = ["差票n", "好票n"]
+    print(cross.join(cnt).round(1).to_string())
+
+    # ── 主人2026-09-04要求: 阴阳区分开、2板/4+也区分开 ──
+    print("\n" + "=" * 72)
+    print("== ① 阴阳×板高 2×2 大组 × 八桶矩阵 (格= n|板留均%) ==")
+    print("=" * 72)
+    buckets = [b for b, _, _ in BUCKETS]
+    for big in ["2板阴", "2板阳", "4+阴", "4+阳"]:
+        g = m[m["big4"] == big]
+        cells = []
+        for bk in buckets:
+            s = g[g["bucket"] == bk]
+            r = s["ret_bw"].dropna()
+            cells.append(f"{len(s):3d}|{r.mean()*100:+6.2f}" if len(r) else "   0|    --")
+        print(f"{big}(共{len(g):3d}笔) " + " ".join(cells))
+    print("列序:", " / ".join(buckets))
+
+    print("\n== ② 阴系 vs 阳系 × 粗五段 ==")
+    m["yy"] = m["big4"].map(YIN_YANG)
+    for yy in ["阴系", "阳系"]:
+        g = m[m["yy"] == yy]
+        print(f"\n── {yy} (n={len(g)}) ──")
+        blk = stats_block(g, "coarse")
+        blk["n占比%"] = (blk["n"] / blk["n"].sum() * 100).round(1)
+        print(blk.to_string(index=False))
+
+    print("\n== ③ 2板系 vs 4+系 × 粗五段 ==")
+    m["hh"] = m["big4"].map(HEIGHT)
+    for hh in ["2板系", "4+系"]:
+        g = m[m["hh"] == hh]
+        print(f"\n── {hh} (n={len(g)}) ──")
+        blk = stats_block(g, "coarse")
+        blk["n占比%"] = (blk["n"] / blk["n"].sum() * 100).round(1)
+        print(blk.to_string(index=False))
+
+    print("\n== ④ 五细组各自 × 粗五段(完整) ==")
+    for gk in contracts.GROUP_KEYS:
+        g = m[m["group_key"] == gk]
+        print(f"\n── {gk} · {BIG4[gk]} (n={len(g)}) ──")
+        blk = stats_block(g, "coarse")
+        blk["n占比%"] = (blk["n"] / blk["n"].sum() * 100).round(1)
+        print(blk.to_string(index=False))
+
+    print("\n== 粗五段 × 分年(稳健性) ==")
+    for seg in SEG_ORDER:
+        g = m[m["coarse"] == seg]
+        line = f"{seg:18s} n={len(g):3d} |"
+        for y, gy in g.groupby("year"):
+            line += f"  {y}: n={len(gy):3d} 均{gy['ret_bw'].mean()*100:+6.2f}"
+        print(line)
+
+    print("\n== 各大组 × 粗五段 × 分年(稳健性) ==")
+    for big in ["2板阴", "2板阳", "4+阴", "4+阳"]:
+        for seg in SEG_ORDER:
+            g = m[(m["big4"] == big) & (m["coarse"] == seg)]
+            if not len(g):
+                continue
+            line = f"{big} {seg:18s} n={len(g):3d} |"
+            for y, gy in g.groupby("year"):
+                line += f"  {y}: n={len(gy):3d} 均{gy['ret_bw'].mean()*100:+6.2f}"
+            print(line)
+
+    print("\n== 差票 top10 亏损(个体核查) ==")
+    worst = m.nsmallest(10, "ret_bw")
+    worst = worst.assign(ret_pct=lambda d: (d["ret_bw"] * 100).round(2))
+    print(worst[["name", "big4", "entry_day", "touch", "ret_pct"]].to_string(index=False))
+
+
 def main() -> None:
+    csv_path = sys.argv[sys.argv.index("--csv") + 1] if "--csv" in sys.argv else None
+    if csv_path:
+        analyze(pd.read_csv(csv_path), from_csv=True)
+        return
     T = backtest._build_events()
     frames = [backtest._trades_for(T[T["group_key"] == gk].copy())
               for gk in contracts.GROUP_KEYS]
@@ -160,47 +260,12 @@ def main() -> None:
 
     m["bucket"] = m["touch"].apply(bucket_of)
     m = m.dropna(subset=["bucket"]).copy()
-    m["year"] = pd.to_datetime(m["entry_day"]).dt.year
-    m["good"] = m["ret_bw"] > 0
-
-    print("\n== 全体 · 按首次触板时段(半小时) ==")
-    print(stats_block(m, "bucket").to_string(index=False))
-
-    print("\n== 好票 vs 差票 · 时段分布(组内占比%) ==")
-    cross = pd.crosstab(m["bucket"], m["good"], normalize="columns") * 100
-    cross.columns = ["差票组内%", "好票组内%"]
-    cnt = pd.crosstab(m["bucket"], m["good"])
-    cnt.columns = ["差票n", "好票n"]
-    print(cross.join(cnt).round(1).to_string())
-
-    print("\n== 粗五段(合并) ==")
     m["coarse"] = m["bucket"].map(COARSE)
-    print(stats_block(m, "coarse").to_string(index=False))
-
-    print("\n== 粗五段 × 分年(稳健性) ==")
-    for seg, g in m.groupby("coarse"):
-        line = f"{seg:18s} n={len(g):3d} |"
-        for y, gy in g.groupby("year"):
-            line += f"  {y}: n={len(gy):3d} 均{gy['ret_bw'].mean()*100:+6.2f}"
-        print(line)
-
-    print("\n== 四组 × 粗五段 ==")
-    for gk in contracts.GROUP_KEYS:
-        g = m[m["group_key"] == gk]
-        line = f"{gk:7s} n={len(g):3d} |"
-        for seg in ["①早盘9:30-10:00", "②上午10:00-11:00", "③上午11:00-11:30",
-                    "④午后13:00-14:00", "⑤尾盘14:00-15:00"]:
-            s = g[g["coarse"] == seg]
-            line += f" {seg[0]}:{len(s):3d}笔" + (f"/{s['ret_bw'].mean()*100:+.1f}" if len(s) else "  ")
-        print(line)
-
-    print("\n== 差票 top10 亏损(个体核查) ==")
-    worst = m.nsmallest(10, "ret_bw")
-    worst = worst.assign(ret_pct=lambda d: (d["ret_bw"] * 100).round(2))
-    print(worst[["name", "group_key", "entry_day", "touch", "ret_pct"]].to_string(index=False))
+    analyze(m)
 
     out = "/app/w2s_touch_out.csv"
-    m.drop(columns=["good"]).to_csv(out, index=False, encoding="utf-8-sig")
+    m.drop(columns=["good"] if "good" in m.columns else []).to_csv(
+        out, index=False, encoding="utf-8-sig")
     print(f"\n逐笔明细: {out}")
 
 
