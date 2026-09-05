@@ -128,6 +128,7 @@ export function W2sLedgerView({
                 <th className="px-3 py-2 text-left font-medium">组</th>
                 <th className="px-3 py-2 text-right font-medium">竞价/高开</th>
                 <th className="px-3 py-2 text-right font-medium">买入价</th>
+                <th className="px-3 py-2 text-right font-medium">首触</th>
                 <th className="px-3 py-2 text-right font-medium">卖出价</th>
                 <th className="px-3 py-2 text-right font-medium">卖出日</th>
                 <th className="px-3 py-2 text-left font-medium">卖出原因</th>
@@ -146,6 +147,13 @@ export function W2sLedgerView({
       )}
     </section>
   );
+}
+
+/** 15mK周期末刻 → 区间起点(09:45→09:30, 13:15→13:00, 其他→前15分钟). */
+function touchStart(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  const mins = h * 60 + m - 15;
+  return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
 }
 
 function LedgerRow({ day, trade }: { day: string; trade: W2sLedgerTrade }) {
@@ -171,6 +179,10 @@ function LedgerRow({ day, trade }: { day: string; trade: W2sLedgerTrade }) {
       </td>
       <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs tabular-nums">
         {formatPrice(trade.entry_price)}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs tabular-nums"
+        title={trade.touch ? `${touchStart(trade.touch)}~${trade.touch} 首次触板` : "无分钟数据(2024-08前)"}>
+        {trade.touch ?? <span className="text-muted-foreground/60">--</span>}
       </td>
       <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono text-xs tabular-nums">
         {formatPrice(trade.exit_price)}

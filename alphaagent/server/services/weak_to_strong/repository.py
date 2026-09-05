@@ -50,6 +50,37 @@ def _ensure_extra_columns() -> None:
     _columns_ensured = True
 
 
+# ── 首触板时间(v4.9: 历史pytdx导入+每日涨停池快照增量) ──
+
+def load_touch_map() -> dict[tuple[str, date], str]:
+    """全表 → {(vt_symbol, D0日): 'HH:MM'}(15mK周期末刻); 行数~3千,直接全读。"""
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        rows = session.execute(select(
+            schema.w2s_touch_times.c.vt_symbol,
+            schema.w2s_touch_times.c.trade_date,
+            schema.w2s_touch_times.c.touch,
+        )).all()
+    return {(str(v), d): str(t) for v, d, t in rows}
+
+
+def upsert_touch_times(rows: list[Mapping[str, object]]) -> int:
+    """幂等批量写入 {(vt_symbol, trade_date, touch, source)}; 同键zt_pool覆盖pytdx(更新鲜)。"""
+    if not rows:
+        return 0
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        for r in rows:
+            stmt = pg_insert(schema.w2s_touch_times).values(
+                vt_symbol=str(r["vt_symbol"]), trade_date=r["trade_date"],
+                touch=str(r["touch"]), source=str(r.get("source", "pytdx")))
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["vt_symbol", "trade_date"],
+                set_={"touch": stmt.excluded.touch, "source": stmt.excluded.source})
+            session.execute(stmt)
+    return len(rows)
+
+
 # ── 盘前池 ──
 
 def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_version: str) -> int:

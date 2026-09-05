@@ -23,7 +23,7 @@ from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine
 from alphaagent.server.services.a_share_universe import is_eligible_main_board
 from alphaagent.server.services.weak_to_strong import contracts, pool as pool_mod
-from alphaagent.server.services.weak_to_strong import u_shape
+from alphaagent.server.services.weak_to_strong import repository, u_shape
 
 REPLAY_START = pd.Timestamp("2023-04-01")
 BARS_START = "2021-01-01"  # 暖机窗口(ma30/mx20/段锚需要的全部历史深度;锚点口径=研究全历史)
@@ -67,7 +67,7 @@ def run_backtest() -> dict[str, object]:
         "case_gates": _case_gates(T),
         "radar": {k: _radar_stats(T, k) for k in keys},
     }
-    payload["ledger_days"] = _ledger_days(all_t)
+    payload["ledger_days"] = _ledger_days(all_t, repository.load_touch_map())
     return payload
 
 
@@ -305,8 +305,14 @@ def _case_gates(T: pd.DataFrame) -> list[dict[str, object]]:
     return out
 
 
-def _ledger_days(all_trades: pd.DataFrame) -> list[dict[str, object]]:
-    """全历史模拟交割单(出手口径,全组合并,不限仓位不限天数;月份筛选由 API 层切片)。"""
+def _ledger_days(all_trades: pd.DataFrame,
+                  touch_map: dict | None = None) -> list[dict[str, object]]:
+    """全历史模拟交割单(出手口径,全组合并,不限仓位不限天数;月份筛选由 API 层切片)。
+
+    touch_map: {(vt_symbol, D0日): 'HH:MM'} 首触板15分钟末刻(w2s_touch_times表, v4.9);
+    无数据的笔 touch=None(2024-08前无分钟存档)。
+    """
+    touch_map = touch_map or {}
     e = all_trades.dropna(subset=["ret_bw", "exit_date_bw"]).copy()
     if not len(e):
         return []
@@ -326,6 +332,7 @@ def _ledger_days(all_trades: pd.DataFrame) -> list[dict[str, object]]:
             "exit_price": _sr(r.exit_price_bw, 3),
             "exit_reason": str(r.exit_reason),
             "ret_pct": _sr(float(r.ret_bw) * 100, 2),
+            "touch": touch_map.get((str(r.vt_symbol), r.entry_day)),
         } for r in g_.itertuples()]
         rets = [float(t["ret_pct"]) for t in items if t["ret_pct"] is not None]
         out.append({

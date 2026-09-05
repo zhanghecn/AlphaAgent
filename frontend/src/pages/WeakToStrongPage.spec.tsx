@@ -178,6 +178,7 @@ describe("W2sLedgerView", () => {
                 exit_price: 5.54,
                 exit_reason: "break_close",
                 ret_pct: 13.1,
+                touch: "10:15",
               },
             ],
           },

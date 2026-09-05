@@ -34,16 +34,62 @@ def run_eod_finalize() -> dict[str, object]:
     entries = pool_result.get("entries") or []
     exec_date = date.fromisoformat(str(pool_result["exec_date"]))
     saved = repository.save_pool(exec_date, entries, contracts.W2S_RULES_VERSION)
+    touched = _backfill_touch_times(data_date)
     message = (f"数据日 {data_date}:信号定版 {finalized['closed']} 笔退出/"
                f"{finalized['holding']} 在持/{finalized['no_trigger']} 未触发;"
                f"次日池 {exec_date} = {saved} 只"
                f"(出手 {pool_result['filter_stats'].get('actionable')}: "
                + "/".join(f"{gk}{pool_result['filter_stats'].get(f'act_{gk}', 0)}"
                           for gk in contracts.GROUP_KEYS)
-               + f",大盘涨停 {pool_result.get('mkt_lim_tm1')})")
+               + f",大盘涨停 {pool_result.get('mkt_lim_tm1')};"
+               + f"首触时间补 {touched} 笔)")
     logger.info("w2s eod finalize: %s", message)
     return {"status": "ok", "rows_read": finalized["processed"] + len(entries),
-            "rows_written": saved + finalized["closed"], "message": message}
+            "rows_written": saved + finalized["closed"] + touched, "message": message}
+
+
+_TOUCH_EDGES = (9 * 60 + 45, 10 * 60, 10 * 60 + 15, 10 * 60 + 30, 10 * 60 + 45,
+                11 * 60, 11 * 60 + 15, 11 * 60 + 30, 13 * 60 + 15, 13 * 60 + 30,
+                13 * 60 + 45, 14 * 60, 14 * 60 + 15, 14 * 60 + 30, 14 * 60 + 45, 15 * 60)
+
+
+def _bucket_touch(hhmmss: str | None) -> str | None:
+    """首封时刻 HH:MM:SS → 15mK周期末刻 HH:MM(集合竞价封板归09:45; 越界归最近段)."""
+    if not hhmmss:
+        return None
+    try:
+        h, m = int(hhmmss[:2]), int(hhmmss[3:5])
+    except (ValueError, IndexError):
+        return None
+    mins = h * 60 + m
+    if mins <= _TOUCH_EDGES[0]:
+        return "09:45"
+    for e in _TOUCH_EDGES:
+        if mins <= e:
+            return f"{e // 60:02d}:{e % 60:02d}"
+    return "15:00"
+
+
+def _backfill_touch_times(data_date: date) -> int:
+    """当日涨停池快照(zt封板+zbgc炸板)首次封板时间 fbt → w2s_touch_times 增量.
+
+    fbt=首封口径(≈首触的15m粒度近似, 触了没封住又封的差异在15分钟内多不可分);
+    全量快照票都存(不只w2s池), 好差票库与时间研究复用. source=zt_pool.
+    """
+    engine = get_engine()
+    snaps = pd.read_sql(
+        select(schema.limit_up_pool_snapshots.c.vt_symbol,
+               schema.limit_up_pool_snapshots.c.first_limit_time)
+        .where(schema.limit_up_pool_snapshots.c.trade_date == data_date,
+               schema.limit_up_pool_snapshots.c.pool_type.in_(["zt", "zbgc"])),
+        engine)
+    if snaps.empty:
+        return 0
+    rows = [{"vt_symbol": str(r.vt_symbol), "trade_date": data_date,
+             "touch": touch, "source": "zt_pool"}
+            for r in snaps.itertuples()
+            if (touch := _bucket_touch(r.first_limit_time))]
+    return repository.upsert_touch_times(rows)
 
 
 def _finalize_signals(data_date: date) -> dict[str, int]:

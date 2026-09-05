@@ -160,6 +160,8 @@ export interface W2sLedgerTrade {
   exit_price: number | null;
   exit_reason: "next_close_fail" | "break_close" | "max_hold_close" | "open_end";
   ret_pct: number | null;
+  /** 首触板15分钟K周期末刻(如"11:15"=11:00~11:15段); null=无分钟数据(2024-08前) */
+  touch: string | null;
 }
 
 export interface W2sLedgerDay {

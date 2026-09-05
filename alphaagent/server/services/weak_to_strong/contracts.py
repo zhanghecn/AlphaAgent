@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-W2S_RULES_VERSION = "w2s-v4.8"
+W2S_RULES_VERSION = "w2s-v4.9"
 
 # ── 触发池基本条件(四组共用件;全部为 T-1 收盘口径,无未来函数) ──
 LISTED_MIN_BARS = 5         # 上市至少 5 个交易日

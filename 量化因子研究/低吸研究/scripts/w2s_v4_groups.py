@@ -138,12 +138,44 @@ def tier_of(grp, base, seg_h=99, n_lim_mid=0, reb=0.0, gap=99, st="", dd=0.0, to
     return False, ""
 
 
+# 首触板时间映射(w2s_touch_times同源数据; 库生成时读全量明细CSV, 2024-08前无数据)
+_TOUCH_CSV = "/tmp/首次触板时间-全量.csv"
+_TOUCH_EDGES = ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:15", "11:30",
+                "13:15", "13:30", "13:45", "14:00", "14:15", "14:30", "14:45", "15:00"]
+_TOUCH_PREV = {_TOUCH_EDGES[0]: "09:30"}
+for _a, _b in zip(_TOUCH_EDGES, _TOUCH_EDGES[1:]):
+    _TOUCH_PREV[_b] = _a
+_TOUCH_PREV["13:15"] = "13:00"
+
+
+def touch_label(hhmm):
+    """末刻 '11:15' → 区间 '11:00~11:15'(无数据→'--')."""
+    if not hhmm or hhmm != hhmm:
+        return None
+    return f"{_TOUCH_PREV.get(str(hhmm), '?')}~{hhmm}"
+
+
+def load_touch_map():
+    """{(vt_symbol, D0日期串): 区间标签}; 文件缺失返回空映射(库仍可生成,只是无首触列)."""
+    import pandas as _pd
+    try:
+        df = _pd.read_csv(_TOUCH_CSV, dtype={"vt_symbol": str}).dropna(subset=["touch"])
+        return {(r.vt_symbol, str(r.entry_day)): touch_label(r.touch)
+                for r in df.itertuples()}
+    except FileNotFoundError:
+        print(f"⚠️ 未找到 {_TOUCH_CSV}: 库文件将不带首触(把首触板时间-全量.csv docker cp到/tmp)")
+        return {}
+
+
 def describe_row(r):
     """每行形态人话解读（主人：数值看不懂，要文字描述）. 出手/未出手理由由 fail_reasons 给.
     U坐标用真坑结构尺子(顶=坑底日前最高收盘, 插针不算): 坑深_真/距顶_真/弹回_真/底确认."""
     dd, pu, rb, gp, st = r["坑深_真"], r["距顶_真"], r["弹回_真"], r["gap"], r["ma_st"]
     pos, sw = r["位置"], r["夹层"]
     parts = [f"上波{r['seg_h']:.0f}板"]
+    _tc = r.get("首触区间")
+    if isinstance(_tc, str) and _tc:   # None→NaN(pandas)非字符串, 2024-08前无数据
+        parts.append(f"首触{_tc}")
     if r["grp"].startswith("4板"):
         parts = [f"大波4+后·最近段{r['seg_h']:.0f}板"]
     if pos == "无坑":
@@ -545,7 +577,12 @@ def main():
     t["夹层"] = [sandwich_of(h, nm) for h, nm in zip(t["seg_h"], t["n_lim_mid"])]
     t.loc[~t["grp"].str.startswith("4板"), "夹层"] = ""
     t["出手"] = t["档位"] == "出手"
-    cols = ["vt_symbol", "name", "date", "ym", "grp", "出手", "通道", "位置", "夹层", "topped",
+    # 首触板时间列(v4.9): (vt, D0=date列) join 全量明细CSV; 无数据None
+    _tm = load_touch_map()
+    t["首触区间"] = [_tm.get((v, str(d))) for v, d in zip(t["vt_symbol"], t["date"])]
+    _cov = sum(isinstance(x, str) for x in t["首触区间"])
+    print(f"首触覆盖: {_cov} / {len(t)} 笔  [2024-08-15前无分钟存档]")
+    cols = ["vt_symbol", "name", "date", "ym", "grp", "出手", "通道", "首触区间", "位置", "夹层", "topped",
             "曾收顶上_真", "底确认", "坑深_真", "距顶_真", "res",
             "r_d1o", "r_d1c", "r_bh", "pull", "low_dd", "reb", "gap", "ma_st", "seg_h", "p_chg",
             "p_ush", "mkt_prev", "is_wv", "v3grp", "is_lim", "n1_lim", "prev_lim"]

@@ -2028,6 +2028,20 @@ Index(
 )
 
 
+# 首触板时间(v4.9): 每笔触板事件的首次触板15分钟K区间(末刻HH:MM).
+# 历史=pytdx研究导入(source=pytdx, 2024-08起); 每日=eod从涨停池快照首封时间fbt增量补(source=zt_pool).
+# 交割单每笔显示 + 好差票库生成join用; 不进判定.
+w2s_touch_times = Table(
+    "w2s_touch_times",
+    metadata,
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("trade_date", Date, primary_key=True),  # D0 入场(触板)日
+    Column("touch", String(8), nullable=False),     # 15mK周期末刻 HH:MM
+    Column("source", String(24), nullable=False, server_default="pytdx"),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+
 market_timing_panel = Table(
     "market_timing_panel",
     metadata,
