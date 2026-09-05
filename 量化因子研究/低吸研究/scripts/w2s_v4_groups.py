@@ -173,9 +173,6 @@ def describe_row(r):
     dd, pu, rb, gp, st = r["坑深_真"], r["距顶_真"], r["弹回_真"], r["gap"], r["ma_st"]
     pos, sw = r["位置"], r["夹层"]
     parts = [f"上波{r['seg_h']:.0f}板"]
-    _tc = r.get("首触区间")
-    if isinstance(_tc, str) and _tc:   # None→NaN(pandas)非字符串, 2024-08前无数据
-        parts.append(f"首触{_tc}")
     if r["grp"].startswith("4板"):
         parts = [f"大波4+后·最近段{r['seg_h']:.0f}板"]
     if pos == "无坑":
@@ -601,8 +598,10 @@ def main():
     # 好差票md: 组/年月, 只分差票/好票两段; 每笔=文字小节(主人: 不要表格, 文字分组换行)
     def _block(r):
         hit = f"✅出手「{r['通道']}」" if r["档位"] == "出手" else "✘未出手"
+        _tc = r.get("首触区间")
         lines = [f"- **{r['vt_symbol']} {r['name']} · {r['date']} · {hit} · {r['res']}**",
-                 f"  - 形态：{describe_row(r)}"]
+                 f"  - 形态：{describe_row(r)}",
+                 f"  - 首次触板：{ _tc if isinstance(_tc, str) and _tc else '--（2024-08前无分钟数据）'}"]
         if r["档位"] != "出手":
             lines.append(f"  - 未出手原因：{'；'.join(fail_reasons(r))}")
         lines.append(f"  - 结果：D+1开盘 {r['r_d1o'] * 100:+.1f}%、收盘 {r['r_d1c'] * 100:+.1f}%"
