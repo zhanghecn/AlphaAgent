@@ -328,6 +328,7 @@ def get_rules() -> dict[str, object]:
         "anchor_tolerances": contracts.ANCHOR_TOLERANCES,
         "case_gates": contracts.CASE_GATES,
         "touch_time_windows": contracts.TOUCH_TIME_WINDOWS,
+        "streak_hold": contracts.STREAK_HOLD,
     }
 
 

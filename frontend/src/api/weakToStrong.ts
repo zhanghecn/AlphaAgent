@@ -223,6 +223,49 @@ export interface W2sTouchWindowHint {
   hint: string;
 }
 
+export interface W2sStreakGoldenGroup {
+  group: "yin2" | "yang2" | "yin4" | "yang4";
+  label: string;
+  n: number;
+  golden: { win: number; seal: number } | null;
+  note: string;
+}
+
+export interface W2sStreakHoldSignal {
+  cond: string;
+  n: number;
+  relay: number;
+  edge: number;
+}
+
+export interface W2sStreakHoldGroup {
+  group: "yin2" | "yang2" | "yin4" | "yang4";
+  label: string;
+  n: number;
+  relay: number;
+  default: string;
+  holds: W2sStreakHoldSignal[];
+  runs: string[];
+}
+
+export interface W2sStreakHold {
+  meta: string;
+  first_night: {
+    title: string;
+    baseline: string;
+    golden_rule: string;
+    avoid_rule: string;
+    groups: W2sStreakGoldenGroup[];
+  };
+  second_night: {
+    title: string;
+    structure: string;
+    key_rule: string;
+    groups: W2sStreakHoldGroup[];
+    small_sample: string;
+  };
+}
+
 export interface W2sRulesPayload {
   rules_version: string;
   group_labels: Record<W2sGroupKey, string>;
@@ -236,6 +279,7 @@ export interface W2sRulesPayload {
   anchor_tolerances: Record<string, number>;
   case_gates: Omit<W2sCaseGate, "actual_groups" | "pass">[];
   touch_time_windows: { meta: string; class_hints: W2sTouchWindowHint[]; groups: W2sTouchWindow[] };
+  streak_hold: W2sStreakHold;
 }
 
 export function fetchW2sLive(date?: string) {

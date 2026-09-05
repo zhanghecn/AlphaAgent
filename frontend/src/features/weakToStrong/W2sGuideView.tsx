@@ -4,6 +4,7 @@ import { fetchW2sRules, type W2sGroupKey } from "@/api/weakToStrong";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
+import { cn } from "@/lib/utils";
 
 const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   pool: { badge: "bg-primary/15 text-primary", label: "池" },
@@ -120,6 +121,127 @@ export function W2sGuideView() {
             );
           })}
         </div>
+      </section>
+
+      <section className="rounded-lg border p-4" aria-label="连板延续去留决策">
+        <div className="mb-1 flex items-center gap-2">
+          <span className="text-sm font-semibold">连板延续 · 去留决策(什么时刻可以多拿一天)</span>
+          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+            观察参考 · 持有规则仍=板留断走
+          </span>
+        </div>
+        <p className="mb-3 text-xs text-muted-foreground">{rules.streak_hold.meta}</p>
+
+        <div className="mb-2 text-xs font-semibold text-foreground">
+          ① {rules.streak_hold.first_night.title}
+          <span className="ml-2 font-normal text-muted-foreground">{rules.streak_hold.first_night.baseline}</span>
+        </div>
+        <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+          <div className="flex items-baseline gap-2 rounded-md border border-rise/20 bg-rise/5 px-3 py-2">
+            <span className="shrink-0 text-xs font-semibold text-rise">黄金格</span>
+            <span className="text-xs leading-5 text-muted-foreground">{rules.streak_hold.first_night.golden_rule}</span>
+          </div>
+          <div className="flex items-baseline gap-2 rounded-md border border-fall/20 bg-fall/5 px-3 py-2">
+            <span className="shrink-0 text-xs font-semibold text-fall">避雷</span>
+            <span className="text-xs leading-5 text-muted-foreground">{rules.streak_hold.first_night.avoid_rule}</span>
+          </div>
+        </div>
+        <div className="mb-4 overflow-x-auto">
+          <table className="w-full min-w-[680px] text-xs">
+            <thead className="border-b bg-muted/30 text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">组</th>
+                <th className="px-3 py-2 text-right font-medium">黄金格n</th>
+                <th className="px-3 py-2 text-right font-medium">封板率</th>
+                <th className="px-3 py-2 text-right font-medium">多拿一天</th>
+                <th className="px-3 py-2 text-left font-medium">说明</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {rules.streak_hold.first_night.groups.map((g) => {
+                const style = GROUP_STYLES[g.group === "yang2" ? "yang2a" : g.group];
+                return (
+                  <tr key={g.group}>
+                    <td className="px-3 py-2">
+                      <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${style.badge}`}>{g.label}</span>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono tabular-nums">{g.n}</td>
+                    <td className="px-3 py-2 text-right font-mono tabular-nums">
+                      {g.golden ? `${g.golden.seal}%` : "--"}
+                    </td>
+                    <td className={cn(
+                      "px-3 py-2 text-right font-mono font-semibold tabular-nums",
+                      g.golden ? "text-rise" : "text-muted-foreground",
+                    )}>
+                      {g.golden ? `${g.golden.win}%` : "不适用"}
+                    </td>
+                    <td className="px-3 py-2 leading-5 text-muted-foreground">{g.note}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="mb-2 text-xs font-semibold text-foreground">
+          ② {rules.streak_hold.second_night.title}
+        </div>
+        <div className="mb-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {rules.streak_hold.second_night.structure}
+        </div>
+        <div className="mb-3 flex items-baseline gap-2 rounded-md border border-amber-500/25 bg-amber-500/5 px-3 py-2">
+          <span className="shrink-0 text-xs font-semibold text-amber-600 dark:text-amber-400">核心判别</span>
+          <span className="text-xs leading-5 text-muted-foreground">{rules.streak_hold.second_night.key_rule}</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[860px] text-xs">
+            <thead className="border-b bg-muted/30 text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">组</th>
+                <th className="px-3 py-2 text-right font-medium">2板在手</th>
+                <th className="px-3 py-2 text-right font-medium">2进3率</th>
+                <th className="px-3 py-2 text-left font-medium">默认动作</th>
+                <th className="px-3 py-2 text-left font-medium">继续拿信号(接力率/增量)</th>
+                <th className="px-3 py-2 text-left font-medium">落袋信号</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {rules.streak_hold.second_night.groups.map((g) => {
+                const style = GROUP_STYLES[g.group === "yang2" ? "yang2a" : g.group];
+                return (
+                  <tr key={g.group} className="align-top">
+                    <td className="px-3 py-2.5">
+                      <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${style.badge}`}>{g.label}</span>
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{g.n}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{g.relay}%</td>
+                    <td className="px-3 py-2.5 font-medium">{g.default}</td>
+                    <td className="px-3 py-2.5">
+                      {g.holds.length ? (
+                        <ul className="space-y-1">
+                          {g.holds.map((h) => (
+                            <li key={h.cond} className="font-mono tabular-nums text-rise">
+                              {h.cond}　{h.relay}% / +{h.edge.toFixed(1)}%
+                              <span className="font-normal text-muted-foreground"> (n={h.n})</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-muted-foreground">无稳定信号</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 leading-5 text-muted-foreground">
+                      <ul className="space-y-1">
+                        {g.runs.map((r) => <li key={r}>{r}</li>)}
+                      </ul>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">{rules.streak_hold.second_night.small_sample}</p>
       </section>
 
       {rules.rules.map((group) => {
