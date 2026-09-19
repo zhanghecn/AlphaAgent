@@ -318,6 +318,22 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={},
     ),
     JobDefinition(
+        id="hpr_eod_finalize",
+        name="高位接力盘后定版",
+        description="高位接力(二接三/三接四)信号定版/退出回填(炸板当日走/断板卖15日兜底) + 次日五方案点盘前池计算;口径见 high_relay.contracts(hpr-v1.3)。",
+        source_id="alphaagent_local",
+        target_table="hpr_signals",
+        default_params={},
+    ),
+    JobDefinition(
+        id="hpr_live_scan_tick",
+        name="高位接力盘中扫描",
+        description="每分钟现货扫描2/3连板盘前池:竞价门(A2 0~9.5/B2 4~7)、T字观察、首刻09:30~09:45触板买(仅方案点命中票)。",
+        source_id="alphaagent_local",
+        target_table="hpr_signals",
+        default_params={},
+    ),
+    JobDefinition(
         id="sync_limit_up_pool_snapshots",
         name="涨停池五池归档",
         description="盘后落库东财涨停/炸板/跌停/昨日涨停/强势股五池,供连板复盘归档。",
@@ -565,6 +581,8 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "qianlong_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "qianlong_signals", "updated_at"),
     "w2s_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "w2s_signals", "updated_at"),
     "w2s_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "w2s_signals", "updated_at"),
+    "hpr_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "hpr_signals", "updated_at"),
+    "hpr_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "hpr_signals", "updated_at"),
     "sync_limit_up_pool_snapshots": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_pool_snapshots", "updated_at"),
     "backfill_limit_up_pool_snapshots": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BARS, 30, "limit_up_pool_snapshots", "updated_at"),
     "sync_margin_balance": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_REALTIME, 1, "market_margin_balance", "trade_date"),
@@ -601,6 +619,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_stock_daily_bars", "rebuild_stock_limit_up_daily", "sync_limit_up_pool_snapshots", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
     "qianlong_eod_finalize",
     "w2s_eod_finalize",
+    "hpr_eod_finalize",
     "sync_stock_minute_bars",
     "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
@@ -748,6 +767,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_margin_balance",
             "qianlong_eod_finalize",
             "w2s_eod_finalize",
+            "hpr_eod_finalize",
         ],
     },
     {
@@ -776,6 +796,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_margin_balance",
             "qianlong_eod_finalize",
             "w2s_eod_finalize",
+            "hpr_eod_finalize",
         ],
     },
     {
@@ -815,6 +836,24 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": ["w2s_backtest_rerun"],
     },
     {
+        "id": "hpr_live_scan",
+        "name": "高位接力盘中扫描（每分钟 09:30~15:00）",
+        "cron": "* 9-15 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["hpr_live_scan_tick"],
+    },
+    {
+        "id": "hpr_backtest_2305",
+        "name": "高位接力回测重算（23:05）",
+        "cron": "5 23 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["hpr_backtest_rerun"],
+    },
+    {
         "id": "low_suction_backtest_2230",
         "name": "低吸日线回测重算（22:30）",
         "cron": "30 22 * * 1-5",
@@ -828,11 +867,13 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
 LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID = "low_suction_daily_backtest_rerun"
 QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID = "qianlong_backtest_rerun"
 W2S_BACKTEST_RERUN_BATCH_JOB_ID = "w2s_backtest_rerun"
+HPR_BACKTEST_RERUN_BATCH_JOB_ID = "hpr_backtest_rerun"
 INTERNAL_BATCH_JOB_IDS = {
     LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID,
     LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
     QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID,
     W2S_BACKTEST_RERUN_BATCH_JOB_ID,
+    HPR_BACKTEST_RERUN_BATCH_JOB_ID,
 }
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
@@ -1574,6 +1615,34 @@ class DataSyncRunner:
             "rows_read": int(result.get("pool") or 0),
             "rows_written": int(result.get("writes") or 0),
             "message": str(result.get("message") or "趋势弱转强盘中扫描"),
+        }
+
+    def _run_hpr_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """高位接力盘后定版:信号推进(E3卖出) + 次日五方案点盘前池计算。"""
+        del params
+        from alphaagent.server.services.high_relay.eod_finalize import run_eod_finalize
+
+        self._report_progress("高位接力盘后定版", current=0, total=1)
+        result = run_eod_finalize()
+        self._report_progress(
+            "高位接力盘后定版", current=1, total=1,
+            current_label=str(result.get("message") or ""),
+            rows_read=int(result.get("rows_read") or 0),
+            rows_written=int(result.get("rows_written") or 0),
+        )
+        return result
+
+    def _run_hpr_live_scan_tick(self, params: dict[str, Any]) -> dict[str, Any]:
+        """高位接力盘中扫描(每分钟):竞价门/T字观察/首刻触板买。"""
+        del params
+        from alphaagent.server.services.high_relay.live_scan import run_live_scan_tick
+
+        result = run_live_scan_tick()
+        return {
+            "status": str(result.get("status") or "ok"),
+            "rows_read": int(result.get("pool") or 0),
+            "rows_written": int(result.get("writes") or 0),
+            "message": str(result.get("message") or "高位接力盘中扫描"),
         }
 
     def _run_sync_limit_up_pool_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2622,6 +2691,8 @@ JOB_RUNNERS: dict[str, str] = {
     "qianlong_live_scan_tick": "_run_qianlong_live_scan_tick",
     "w2s_eod_finalize": "_run_w2s_eod_finalize",
     "w2s_live_scan_tick": "_run_w2s_live_scan_tick",
+    "hpr_eod_finalize": "_run_hpr_eod_finalize",
+    "hpr_live_scan_tick": "_run_hpr_live_scan_tick",
     "sync_limit_up_pool_snapshots": "_run_sync_limit_up_pool_snapshots",
     "backfill_limit_up_pool_snapshots": "_run_backfill_limit_up_pool_snapshots",
     "sync_margin_balance": "_run_sync_margin_balance",
@@ -3501,6 +3572,8 @@ def _run_sync_batch(
                 result = _run_qianlong_backtest_rerun_batch_job()
             elif job_id == W2S_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_w2s_backtest_rerun_batch_job()
+            elif job_id == HPR_BACKTEST_RERUN_BATCH_JOB_ID:
+                result = _run_hpr_backtest_rerun_batch_job()
             elif job_id == LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID:
                 result = _run_low_suction_live_snapshot_refresh_batch_job()
             else:
@@ -3751,6 +3824,42 @@ def _run_w2s_backtest_rerun_batch_job() -> dict[str, Any]:
         "rows_read": total,
         "rows_written": 1,
         "message": "趋势弱转强回测已刷新:" + ";".join(parts),
+    }
+
+
+def _run_hpr_backtest_rerun_batch_job() -> dict[str, Any]:
+    """每晚 23:05 全量重算高位接力回测并写库,供前端回测/交割单读取。"""
+
+    from alphaagent.server.services.high_relay.service import (
+        BacktestAlreadyRunningError,
+        run_backtest_sync,
+    )
+
+    if _latest_complete_daily_date_for_research() is None:
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    try:
+        payload = run_backtest_sync()
+    except BacktestAlreadyRunningError:
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": "高位接力回测已有任务在执行,跳过本次重复触发",
+        }
+    summary = payload.get("summary") or {}
+    parts = []
+    total = 0
+    for pk in ("A1", "A2", "B1", "B2", "B3"):
+        s = summary.get(pk) or {}
+        parts.append(f"{pk} n={s.get('n')}")
+        total += int(s.get("n") or 0)
+    all_s = summary.get("all") or {}
+    return {
+        "rows_read": total,
+        "rows_written": 1,
+        "message": (f"高位接力回测已刷新:合计 n={all_s.get('n')} "
+                    f"均 {all_s.get('bw_pct')}% / 胜率 {all_s.get('win')};"
+                    + ";".join(parts)),
     }
 
 

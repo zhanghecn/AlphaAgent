@@ -2042,6 +2042,152 @@ w2s_touch_times = Table(
 )
 
 
+# ── 高位接力打板(二接三/三接四, hpr) ──
+# 策略口径 = 量化因子研究/高位接力/高位接力规则.md v1.3 定稿(2026-09-19)。
+# 池 = 昨日恰好 2/3 连板全量(雷达);方案点 A1/A2(出手级) B1/B2/B3(观察级),
+# 命中且非静态回避 = actionable;买 = 首刻 09:30~09:45 首次触板按涨停价(T字回封可买);
+# 卖 = 炸板当日收盘走 / 封住→断板日收盘(15 个交易日兜底)。
+
+hpr_pool_entries = Table(
+    "hpr_pool_entries",
+    metadata,
+    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False),
+    Column("group4", String(8), nullable=False),     # 二接三阴/二接三阳/三接四阴/三接四阳
+    Column("n_board", Integer, nullable=False),      # 昨日连板数 2/3
+    Column("point", String(4), nullable=False, server_default="—"),  # A1/A2/B1/B2/B3/—
+    Column("level", String(2), nullable=False, server_default="—"),  # A/B/—
+    Column("actionable", Boolean, nullable=False, server_default="false"),  # 命中且非静态回避
+    Column("avoid_static", String(160), nullable=True),   # 静态回避原因(命中也不买)
+    Column("auction_gate", String(16), nullable=True),    # 竞价门: a2_0_9.5 / b2_4_7 / None
+    Column("prev_close", Float, nullable=False),     # T-1 收盘
+    Column("limit_price", Float, nullable=False),    # 触发价 = 今日涨停价
+    # 地基快照(T-1 口径,首板前一天)
+    Column("foundation_yang", Boolean, nullable=True),   # 地基日收阳
+    Column("foundation_chg", Float, nullable=True),      # 地基涨跌 %
+    Column("dist_h60", Float, nullable=True),            # 距60日新高 %
+    Column("ma_state", String(4), nullable=True),        # 均线排列态 +++/−++/+--
+    Column("dist_ma10", Float, nullable=True),           # 地基收盘距MA10 %
+    Column("prior_height", Integer, nullable=True),      # 前板高度(60日内最近一个涨停的连板高度)
+    Column("prior_gap", Integer, nullable=True),         # 断板天数(前板~本波首板间隔)
+    Column("prev_wave60", Integer, nullable=True),       # 前波60日最高板
+    Column("prev_wave120", Integer, nullable=True),      # 前波120日最高板
+    Column("chain", String(40), nullable=True),          # 板型链(如 实体→下影→下影)
+    Column("b1_type", String(8), nullable=True),         # 首板板型 一字/实体/下影
+    Column("b2_type", String(8), nullable=True),
+    Column("b3_type", String(8), nullable=True),
+    Column("b1_open", Float, nullable=True),             # 首板开盘 %
+    Column("b2_open", Float, nullable=True),             # 二板开盘 %
+    Column("b1_turn", Float, nullable=True),             # 首板换手 %
+    Column("b2_turn", Float, nullable=True),             # 二板换手 %
+    Column("turn_grad", Float, nullable=True),           # 换手梯度 b2-b1
+    Column("mkt_lim_tm1", Integer, nullable=True),       # 昨日大盘涨停家数(信息项)
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_hpr_pool_entries_date", hpr_pool_entries.c.trade_date)
+
+# 盘中触发信号:与池同主键,状态机随扫描推进;EOD 定版封板/退出。
+# 该表同时是前推交割单(entered 且有 exit 的行),避免双写不一致。
+hpr_signals = Table(
+    "hpr_signals",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False),
+    Column("group4", String(8), nullable=False),
+    Column("point", String(4), nullable=False),
+    Column("level", String(2), nullable=False, server_default="—"),
+    # watching/sealed_watch/entered/holding/pending_exit/closed/
+    # skipped_auction(竞价回避)/skipped_gap(一字买不进)/late_touch(迟到放弃)/no_trigger
+    Column("status", String(24), nullable=False, server_default="watching"),
+    Column("auction_pct", Float, nullable=True),     # 竞价/开盘涨幅 %(09:30 首跳定型)
+    Column("prev_close", Float, nullable=False),
+    Column("limit_price", Float, nullable=False),    # 触发价 = 涨停价
+    Column("opened", Boolean, nullable=True),        # T字观察:一字开盘后盘中打开过
+    Column("touched_at", DateTime(timezone=True), nullable=True),  # 扫描发现的首触时刻
+    Column("entry_price", Float, nullable=True),     # 买入价 = 涨停价
+    Column("entry_time", DateTime(timezone=True), nullable=True),
+    Column("last_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),      # 现价相对昨收 %
+    # EOD 定版字段
+    Column("sealed", Boolean, nullable=True),        # 买入当日是否封板
+    Column("streak_h", Integer, nullable=True),      # 持有中连板数(买入日起)
+    Column("exit_date", Date, nullable=True),
+    Column("exit_price", Float, nullable=True),
+    # break_day_close(炸板当日收盘卖)/break_close(断板日收盘卖)/max_hold_close(15日兜底)
+    Column("exit_reason", String(24), nullable=True),
+    Column("ret_pct", Float, nullable=True),         # (exit/entry-1)×100
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_hpr_signals_date", hpr_signals.c.trade_date)
+Index("ix_hpr_signals_status", hpr_signals.c.status)
+
+# 每分钟盘中扫描运行轨道(诊断用)。
+hpr_live_scan_runs = Table(
+    "hpr_live_scan_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=False),
+    Column("duration_ms", Integer, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("pool_count", Integer, nullable=True),
+    Column("touched_count", Integer, nullable=True),
+    Column("entered_count", Integer, nullable=True),
+    Column("spot_active_symbols", Integer, nullable=True),
+    Column("rules_version", String(80), nullable=False),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index(
+    "ix_hpr_live_scan_runs_date_time",
+    hpr_live_scan_runs.c.trade_date,
+    hpr_live_scan_runs.c.started_at,
+)
+
+# 回测报告:单行 id=1 物化(CLI/调度写库,API 只读)。
+hpr_backtest_runs = Table(
+    "hpr_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1
+    Column("rules_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# 回测重算运行轨道(手动/定时请求)。
+hpr_backtest_rebuild_runs = Table(
+    "hpr_backtest_rebuild_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source", String(24), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("stage", String(48), nullable=False),
+    Column("rules_version", String(80), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_hpr_backtest_rebuild_requested",
+    hpr_backtest_rebuild_runs.c.requested_at,
+)
+
+
 market_timing_panel = Table(
     "market_timing_panel",
     metadata,

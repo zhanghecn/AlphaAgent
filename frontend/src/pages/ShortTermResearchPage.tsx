@@ -1,16 +1,18 @@
-import { FlaskConical, Rocket, Zap } from "lucide-react";
+import { FlaskConical, Rocket, Swords, Zap } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
+import { HighRelayPage } from "@/pages/HighRelayPage";
 import { LowSuctionPage } from "@/pages/LowSuctionPage";
 import { QianlongPage } from "@/pages/QianlongPage";
 import { WeakToStrongPage } from "@/pages/WeakToStrongPage";
 
-type ResearchTab = "first-board" | "low-suction" | "weak-to-strong";
+type ResearchTab = "first-board" | "low-suction" | "weak-to-strong" | "high-relay";
 
 const RESEARCH_TABS = [
   { value: "first-board", label: "潜龙首板", icon: Rocket },
   { value: "weak-to-strong", label: "N型补涨打板", icon: Zap },
+  { value: "high-relay", label: "高位接力", icon: Swords },
   { value: "low-suction", label: "低吸", icon: FlaskConical },
 ] as const;
 
@@ -23,7 +25,9 @@ export function ShortTermResearchPage() {
       ? "low-suction"
       : raw === "weak-to-strong"
         ? "weak-to-strong"
-        : "first-board";
+        : raw === "high-relay"
+          ? "high-relay"
+          : "first-board";
 
   const selectTab = (tab: ResearchTab) => {
     const next = new URLSearchParams(searchParams);
@@ -37,6 +41,8 @@ export function ShortTermResearchPage() {
       <QianlongPage />
     ) : activeTab === "weak-to-strong" ? (
       <WeakToStrongPage />
+    ) : activeTab === "high-relay" ? (
+      <HighRelayPage />
     ) : (
       <LowSuctionPage />
     );
