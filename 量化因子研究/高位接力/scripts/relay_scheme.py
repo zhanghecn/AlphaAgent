@@ -15,7 +15,8 @@
  C2二接三阳大阳地基×断1~3天70笔+1.99分年全正但刀口; 见 汇总/地基均线反包-验证.md)
 
 做的事:
-1. 全量明细加「方案点」列, 重写 好差票验证/<组>/YYYY-MM.md (每票标记属于哪个方案点)
+1. 全量明细加「方案点」列, 重写 好差票验证/<组>/YYYY-MM.md (每票标记属于哪个方案点;
+   好票/坏票二级标题下按当月第几周分三级块, 表内加「月日序」=当月第几个交易日)
 2. 汇总/因子方案.md: 方案定义 + 各点统计 + 按月列举(每月每点 笔数/胜率/收益/票名)
 """
 import os
@@ -26,7 +27,20 @@ import pandas as pd
 pd.set_option("display.width", 340)
 ROOT = "/root/project/ai/vnpy/量化因子研究/高位接力"
 CSV = f"{ROOT}/全量明细.csv"
+CAL = f"{ROOT}/交易日历.csv"
 YEARS = ["2023", "2024", "2025", "2026"]
+
+
+def cal_maps():
+    """交易日历 → {买入日: (当月第几个交易日, 当月第几周)}。
+    周 = 自然周(周一起算), 当月内出现的周按顺序编号第1~5周。"""
+    cal = pd.read_csv(CAL, parse_dates=["trade_date"])
+    cal["月"] = cal["trade_date"].dt.strftime("%Y-%m")
+    cal["月日序"] = cal.groupby("月").cumcount() + 1
+    cal["周起点"] = cal["trade_date"] - pd.to_timedelta(cal["trade_date"].dt.weekday, unit="D")
+    cal["周序"] = cal.groupby("月")["周起点"].rank(method="dense").astype(int)
+    key = cal["trade_date"].dt.strftime("%Y-%m-%d")
+    return dict(zip(key, zip(cal["月日序"], cal["周序"])))
 
 POINT_DEFS = [
     ("A1", "三接四阳", "修复启动格"),
@@ -43,6 +57,13 @@ def load():
     E["月"] = E["月"].astype(str)
     E["胜"] = E["次日收%"] > 0
     E["换手梯度"] = E["b2换手%"] - E["b1换手%"]
+    cmap = cal_maps()
+    E["月日序"] = [cmap.get(d, ("", ""))[0] for d in E["买入日"]]
+    E["周序"] = [cmap.get(d, ("", ""))[1] for d in E["买入日"]]
+    missing = E[E["月日序"] == ""]
+    if len(missing):
+        raise SystemExit(f"交易日历缺 {len(missing)} 个买入日, 首个 {missing.iloc[0]['买入日']}, "
+                         f"请更新 {CAL}")
 
     # 地基/均线/反包扩展字段(第十九遍 relay_foundation.py 产出)
     ext = f"{ROOT}/地基均线反包明细.csv"
@@ -159,7 +180,7 @@ def miss_detail(r):
 
 
 def row_of(r):
-    return (f"| {r['代码']} | {r['名称']} | {r['买入日']} | **{r['方案点']}** | {r.get('首刻','无数据')} | {r['结果']} "
+    return (f"| {r['代码']} | {r['名称']} | {r['买入日']} | {r['月日序']} | **{r['方案点']}** | {r.get('首刻','无数据')} | {r['结果']} "
             f"| {r['次日开%']:+.1f} | {r['次日收%']:+.1f} | {r['持有到断板%']:+.1f} "
             f"| {r['链']} | {r['买入开盘%']:+.1f} "
             f"| {r['阴阳']}{r['地基涨跌%']:+.1f} | {r['距60日新高%']:+.1f} | {r['均线']} "
@@ -167,11 +188,22 @@ def row_of(r):
             f"| {r['前波60日最高板'] or ''} | {r['昨日涨停家数'] or ''} | {miss_detail(r)} |")
 
 
+def week_blocks(sub, header, sep):
+    """坏票/好票表按当月第几周分三级块; 无票返回空。"""
+    if not len(sub):
+        return []
+    out = []
+    for wk, wsub in sub.groupby("周序"):
+        out += ["", f"### 第{int(wk)}周 — {len(wsub)} 笔", "", header, sep]
+        out += [row_of(r) for _, r in wsub.iterrows()]
+    return out
+
+
 def rewrite_monthly(E):
     out_root = f"{ROOT}/好差票验证"
-    header = ("| 代码 | 名称 | 买入日 | 方案点 | 首刻 | 结果 | 次日开% | 次日收% | 持有到断板% | 链 | 买入开盘% | "
+    header = ("| 代码 | 名称 | 买入日 | 月日序 | 方案点 | 首刻 | 结果 | 次日开% | 次日收% | 持有到断板% | 链 | 买入开盘% | "
               "地基 | 位置% | 均线 | MA10% | 反包 | 前波 | 环境 | 不符合在哪 |")
-    sep = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    sep = "|---" * 20 + "|"
     # 每组对应的方案点(一组可有多个点), 月度文件里只显示本组的点
     group_point = {
         "三接四阳": [("A1", "修复启动", "出手级",
@@ -194,8 +226,8 @@ def rewrite_monthly(E):
             sub = sub.sort_values("买入日")
             done = sub[~sub["未完"]]
             hit = done[done["方案点"] != "—"]
-            bad = done[done["坏票"]].sort_values("次日收%")
-            good = done[~done["坏票"].fillna(False)].sort_values("持有到断板%", ascending=False)
+            bad = done[done["坏票"]].sort_values(["买入日", "代码"])
+            good = done[~done["坏票"].fillna(False)].sort_values(["买入日", "代码"])
             zb_bad = int(((done["结果"] == "炸板") & done["坏票"].fillna(False)).sum())
             fb = int((done["结果"] == "封次日负").sum())
             lb = int((done["结果"] == "连板").sum())
@@ -231,12 +263,13 @@ def rewrite_monthly(E):
                 "均线 = 首板前一天5/10/20/30日线排列（+=短线在上）",
                 "- MA10% = 地基日收盘距10日线%；反包 = 首板前最近的板「断几天·前几板」（无板=60日内没有过涨停）",
                 "- 前波 = 近60天内前一波连板最高几板；环境 = 前一天全市场涨停家数",
-                "- 不符合在哪 = 未命中票对本组方案点的逐条判定，只列不满足的条件；命中票此列为空", "",
-                f"## 坏票 — {len(bad)} 笔", "", header, sep,
+                "- 不符合在哪 = 未命中票对本组方案点的逐条判定，只列不满足的条件；命中票此列为空",
+                "- 月日序 = 买入日是当月第几个交易日；周 = 表内按当月第几个自然周（周一起算）分块", "",
+                f"## 坏票 — {len(bad)} 笔",
             ]
-            L += [row_of(r) for _, r in bad.iterrows()]
-            L += ["", f"## 好票 — {len(good)} 笔", "", header, sep]
-            L += [row_of(r) for _, r in good.iterrows()]
+            L += week_blocks(bad, header, sep)
+            L += ["", f"## 好票 — {len(good)} 笔"]
+            L += week_blocks(good, header, sep)
             with open(f"{gdir}/{ym}.md", "w", encoding="utf-8") as fp:
                 fp.write("\n".join(L) + "\n")
 
