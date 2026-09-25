@@ -62,6 +62,7 @@ def run_forever(*, stop_event: Event | None = None) -> None:
     _start_low_suction_view_reconcile()
     _start_w2s_report_reconcile()
     _start_hpr_report_reconcile()
+    _start_fbb_report_reconcile()
     health_server: ThreadingHTTPServer | None = None
     try:
         health_server = start_worker_health_server()
@@ -138,6 +139,23 @@ def _start_hpr_report_reconcile() -> None:
             LOGGER.exception("hpr backtest report reconcile failed")
 
     Thread(target=_run, name="hpr-report-reconcile", daemon=True).start()
+
+
+def _start_fbb_report_reconcile() -> None:
+    """后台自检断板反包回测报告版本漂移(版本门禁失效即自动重建,防页面空但DB有数据)。"""
+
+    def _run() -> None:
+        try:
+            from alphaagent.server.services.fanbao import contracts, repository, service
+
+            if repository.load_backtest_report(contracts.FANBAO_RULES_VERSION) is None:
+                LOGGER.info("fbb backtest report missing for %s, scheduling rebuild",
+                            contracts.FANBAO_RULES_VERSION)
+                service.start_backtest_rebuild(source="startup")
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("fbb backtest report reconcile failed")
+
+    Thread(target=_run, name="fbb-report-reconcile", daemon=True).start()
 
 
 @lru_cache(maxsize=1)

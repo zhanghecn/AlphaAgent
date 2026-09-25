@@ -334,6 +334,22 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={},
     ),
     JobDefinition(
+        id="fbb_eod_finalize",
+        name="断板反包盘后定版",
+        description="断板反包(2/4/5+板断1~3天)信号定版/退出回填/坏票标注 + 次日五方案点盘前池计算;口径见 fanbao.contracts(fbb-v2.0)。",
+        source_id="alphaagent_local",
+        target_table="fbb_signals",
+        default_params={},
+    ),
+    JobDefinition(
+        id="fbb_live_scan_tick",
+        name="断板反包盘中扫描",
+        description="每分钟现货扫描断板中盘前池:T字观察、触板即买(无首刻窗,仅方案点命中票)。",
+        source_id="alphaagent_local",
+        target_table="fbb_signals",
+        default_params={},
+    ),
+    JobDefinition(
         id="sync_limit_up_pool_snapshots",
         name="涨停池五池归档",
         description="盘后落库东财涨停/炸板/跌停/昨日涨停/强势股五池,供连板复盘归档。",
@@ -583,6 +599,8 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "w2s_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "w2s_signals", "updated_at"),
     "hpr_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "hpr_signals", "updated_at"),
     "hpr_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "hpr_signals", "updated_at"),
+    "fbb_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "fbb_signals", "updated_at"),
+    "fbb_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "fbb_signals", "updated_at"),
     "sync_limit_up_pool_snapshots": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "limit_up_pool_snapshots", "updated_at"),
     "backfill_limit_up_pool_snapshots": JobCadence(CADENCE_IRREGULAR, CATEGORY_MARKET_BARS, 30, "limit_up_pool_snapshots", "updated_at"),
     "sync_margin_balance": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_REALTIME, 1, "market_margin_balance", "trade_date"),
@@ -620,6 +638,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "qianlong_eod_finalize",
     "w2s_eod_finalize",
     "hpr_eod_finalize",
+    "fbb_eod_finalize",
     "sync_stock_minute_bars",
     "sync_stock_auction_snapshots",
     "sync_stock_fund_flows", "sync_sector_fund_flows",
@@ -768,6 +787,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "qianlong_eod_finalize",
             "w2s_eod_finalize",
             "hpr_eod_finalize",
+            "fbb_eod_finalize",
         ],
     },
     {
@@ -797,6 +817,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "qianlong_eod_finalize",
             "w2s_eod_finalize",
             "hpr_eod_finalize",
+            "fbb_eod_finalize",
         ],
     },
     {
@@ -854,6 +875,24 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "job_ids": ["hpr_backtest_rerun"],
     },
     {
+        "id": "fbb_live_scan",
+        "name": "断板反包盘中扫描（每分钟 09:30~15:00）",
+        "cron": "* 9-15 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["fbb_live_scan_tick"],
+    },
+    {
+        "id": "fbb_backtest_2320",
+        "name": "断板反包回测重算（23:20）",
+        "cron": "20 23 * * 1-5",
+        "action": "sync",
+        "enabled": True,
+        "concurrency": 1,
+        "job_ids": ["fbb_backtest_rerun"],
+    },
+    {
         "id": "low_suction_backtest_2230",
         "name": "低吸日线回测重算（22:30）",
         "cron": "30 22 * * 1-5",
@@ -868,12 +907,14 @@ LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID = "low_suction_daily_backtest_reru
 QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID = "qianlong_backtest_rerun"
 W2S_BACKTEST_RERUN_BATCH_JOB_ID = "w2s_backtest_rerun"
 HPR_BACKTEST_RERUN_BATCH_JOB_ID = "hpr_backtest_rerun"
+FBB_BACKTEST_RERUN_BATCH_JOB_ID = "fbb_backtest_rerun"
 INTERNAL_BATCH_JOB_IDS = {
     LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID,
     LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
     QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID,
     W2S_BACKTEST_RERUN_BATCH_JOB_ID,
     HPR_BACKTEST_RERUN_BATCH_JOB_ID,
+    FBB_BACKTEST_RERUN_BATCH_JOB_ID,
 }
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
@@ -1643,6 +1684,34 @@ class DataSyncRunner:
             "rows_read": int(result.get("pool") or 0),
             "rows_written": int(result.get("writes") or 0),
             "message": str(result.get("message") or "高位接力盘中扫描"),
+        }
+
+    def _run_fbb_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """断板反包盘后定版:信号推进(单一卖出纪律) + 次日五方案点盘前池计算。"""
+        del params
+        from alphaagent.server.services.fanbao.eod_finalize import run_eod_finalize
+
+        self._report_progress("断板反包盘后定版", current=0, total=1)
+        result = run_eod_finalize()
+        self._report_progress(
+            "断板反包盘后定版", current=1, total=1,
+            current_label=str(result.get("message") or ""),
+            rows_read=int(result.get("rows_read") or 0),
+            rows_written=int(result.get("rows_written") or 0),
+        )
+        return result
+
+    def _run_fbb_live_scan_tick(self, params: dict[str, Any]) -> dict[str, Any]:
+        """断板反包盘中扫描(每分钟):T字观察/触板即买(无首刻窗)。"""
+        del params
+        from alphaagent.server.services.fanbao.live_scan import run_live_scan_tick
+
+        result = run_live_scan_tick()
+        return {
+            "status": str(result.get("status") or "ok"),
+            "rows_read": int(result.get("pool") or 0),
+            "rows_written": int(result.get("writes") or 0),
+            "message": str(result.get("message") or "断板反包盘中扫描"),
         }
 
     def _run_sync_limit_up_pool_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2693,6 +2762,8 @@ JOB_RUNNERS: dict[str, str] = {
     "w2s_live_scan_tick": "_run_w2s_live_scan_tick",
     "hpr_eod_finalize": "_run_hpr_eod_finalize",
     "hpr_live_scan_tick": "_run_hpr_live_scan_tick",
+    "fbb_eod_finalize": "_run_fbb_eod_finalize",
+    "fbb_live_scan_tick": "_run_fbb_live_scan_tick",
     "sync_limit_up_pool_snapshots": "_run_sync_limit_up_pool_snapshots",
     "backfill_limit_up_pool_snapshots": "_run_backfill_limit_up_pool_snapshots",
     "sync_margin_balance": "_run_sync_margin_balance",
@@ -3574,6 +3645,8 @@ def _run_sync_batch(
                 result = _run_w2s_backtest_rerun_batch_job()
             elif job_id == HPR_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_hpr_backtest_rerun_batch_job()
+            elif job_id == FBB_BACKTEST_RERUN_BATCH_JOB_ID:
+                result = _run_fbb_backtest_rerun_batch_job()
             elif job_id == LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID:
                 result = _run_low_suction_live_snapshot_refresh_batch_job()
             else:
@@ -3858,6 +3931,42 @@ def _run_hpr_backtest_rerun_batch_job() -> dict[str, Any]:
         "rows_read": total,
         "rows_written": 1,
         "message": (f"高位接力回测已刷新:合计 n={all_s.get('n')} "
+                    f"均 {all_s.get('bw_pct')}% / 胜率 {all_s.get('win')};"
+                    + ";".join(parts)),
+    }
+
+
+def _run_fbb_backtest_rerun_batch_job() -> dict[str, Any]:
+    """每晚 23:20 全量重算断板反包回测并写库,供前端回测/交割单读取。"""
+
+    from alphaagent.server.services.fanbao.service import (
+        BacktestAlreadyRunningError,
+        run_backtest_sync,
+    )
+
+    if _latest_complete_daily_date_for_research() is None:
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    try:
+        payload = run_backtest_sync()
+    except BacktestAlreadyRunningError:
+        return {
+            "status": "skipped",
+            "rows_read": 0,
+            "rows_written": 0,
+            "message": "断板反包回测已有任务在执行,跳过本次重复触发",
+        }
+    summary = payload.get("summary") or {}
+    parts = []
+    total = 0
+    for pk in ("S1", "S2", "S3", "O1", "O2"):
+        s = summary.get(pk) or {}
+        parts.append(f"{pk} n={s.get('n')}")
+        total += int(s.get("n") or 0)
+    all_s = summary.get("all") or {}
+    return {
+        "rows_read": total,
+        "rows_written": 1,
+        "message": (f"断板反包回测已刷新:合计 n={all_s.get('n')} "
                     f"均 {all_s.get('bw_pct')}% / 胜率 {all_s.get('win')};"
                     + ";".join(parts)),
     }

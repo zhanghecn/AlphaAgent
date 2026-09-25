@@ -2188,6 +2188,160 @@ Index(
 )
 
 
+# ── 断板反包打板(2/4/5+板断板1~3天后再涨停, fbb) ──
+# 策略口径 = 量化因子研究/反包/反包规则.md v2 定稿(2026-09-25)。
+# 池 = 昨日处于断板第 1~3 天且前波高度 2/4/5+(3板删除)的全量(雷达);
+# 方案点 S1/S2/S3(出手级) O1/O2(观察级),命中且非死格 = actionable;
+# 买 = 盘中触涨停价按涨停价(无首刻窗,T字回封可买,一字剔除);
+# 卖 = 反包日炸板当日收盘走 / 封住→断板日收盘(15 个交易日兜底)。
+# ⚠️ yin_yang=跌幅口径(分组);break_yin_count=实体口径(S1条件),两把尺子严禁互换。
+
+fbb_pool_entries = Table(
+    "fbb_pool_entries",
+    metadata,
+    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False),
+    Column("group6", String(8), nullable=False),     # 2板阴/2板阳/4板阴/4板阳/5+阴/5+阳
+    Column("n_board", Integer, nullable=False),      # 前波实际连板数(5+ 存原值,勿用=5过滤)
+    Column("seg", String(4), nullable=False),        # 高度段 2板/4板/5+板
+    Column("gap", Integer, nullable=False),          # 断板天数 1/2/3(主格)
+    Column("yin_yang", String(2), nullable=False),   # 跌幅口径: 昨收<前日收=阴,涨或平=阳
+    Column("point", String(4), nullable=False, server_default="—"),  # S1/S2/S3/O1/O2/—
+    Column("level", String(2), nullable=False, server_default="—"),  # S/O/—
+    Column("actionable", Boolean, nullable=False, server_default="false"),  # 命中且非死格
+    Column("avoid_static", String(160), nullable=True),   # 死格原因(命中也不买)
+    Column("prev_close", Float, nullable=False),     # T-1 收盘
+    Column("limit_price", Float, nullable=False),    # 触发价 = 今日涨停价
+    # 断板期快照(T-1 口径)
+    Column("break_end", Date, nullable=True),            # 末板日(断板期前一天)
+    Column("wave_start", Date, nullable=True),           # 前波首板日
+    Column("break_days", String(64), nullable=True),     # 断板期逐日串(如 阴-3.2→阳+1.1,实体口径)
+    Column("break_yin_count", Integer, nullable=True),   # 断板期实体阴线数(收盘<开盘;S1条件)
+    Column("break_zha_days", Integer, nullable=True),    # 断板期炸板日数(触板收盘未封)
+    Column("break_drop_pct", Float, nullable=True),      # 断板累计% = 昨收/末板收-1
+    Column("pit_depth_pct", Float, nullable=True),       # 坑深% = 断板期最低收盘/末板收-1
+    Column("last_entity", String(2), nullable=True),     # 末日实体阴/阳(收盘vs开盘;S2条件)
+    Column("last_open_pct", Float, nullable=True),       # 末日开盘%(S1<=0 低开杀;S2>2 高开洗透)
+    Column("dist_ma5", Float, nullable=True),            # 昨收距MA5 %(标注维度)
+    # 技术位快照(T-1 口径)
+    Column("dist_h60", Float, nullable=True),            # 距60日新高 %
+    Column("ma_state", String(4), nullable=True),        # 均线排列态 +++/−++/+--
+    Column("dist_ma10", Float, nullable=True),           # 收盘距MA10 %
+    # 前波快照
+    Column("chain", String(40), nullable=True),          # 板型链(如 实体→一字,下影线阈值0.3%)
+    Column("foundation_yang", Boolean, nullable=True),   # 地基日(首板前一天)收阳
+    Column("foundation_chg", Float, nullable=True),      # 地基涨跌 %
+    Column("prior_gap", Integer, nullable=True),         # 前波之前的断板天数
+    Column("prev_wave60", Integer, nullable=True),       # 前波60日最高板
+    Column("prev_wave120", Integer, nullable=True),      # 前波120日最高板
+    Column("mkt_lim_tm1", Integer, nullable=True),       # 昨日大盘涨停家数(信息项)
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_fbb_pool_entries_date", fbb_pool_entries.c.trade_date)
+
+# 盘中触发信号:与池同主键,状态机随扫描推进;EOD 定版封板/退出/坏票。
+# 该表同时是前推交割单(entered 且有 exit 的行),避免双写不一致。
+fbb_signals = Table(
+    "fbb_signals",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False),
+    Column("group6", String(8), nullable=False),
+    Column("point", String(4), nullable=False),
+    Column("level", String(2), nullable=False, server_default="—"),
+    # watching/sealed_watch/entered/holding/pending_exit/closed/
+    # skipped_gap(一字买不进)/no_trigger(全天未触板)
+    Column("status", String(24), nullable=False, server_default="watching"),
+    Column("auction_pct", Float, nullable=True),     # 竞价/开盘涨幅 %(展示项,无竞价门)
+    Column("prev_close", Float, nullable=False),
+    Column("limit_price", Float, nullable=False),    # 触发价 = 涨停价
+    Column("opened", Boolean, nullable=True),        # T字观察:一字开盘后盘中打开过
+    Column("touched_at", DateTime(timezone=True), nullable=True),  # 扫描发现的首触时刻
+    Column("entry_price", Float, nullable=True),     # 买入价 = 涨停价
+    Column("entry_time", DateTime(timezone=True), nullable=True),
+    Column("last_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),      # 现价相对昨收 %
+    # EOD 定版字段
+    Column("sealed", Boolean, nullable=True),        # 反包日是否封板
+    Column("streak_h", Integer, nullable=True),      # 持有中连板数(买入日起)
+    Column("exit_date", Date, nullable=True),
+    Column("exit_price", Float, nullable=True),
+    # break_day_close(反包日炸板当日收盘卖)/break_close(断板日收盘卖)/max_hold_close(15日兜底)
+    Column("exit_reason", String(24), nullable=True),
+    Column("ret_pct", Float, nullable=True),         # (exit/entry-1)×100
+    Column("bad_ticket", Boolean, nullable=True),    # 坏票=次日收盘<买价(次日无数据为NULL,幂等补)
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_fbb_signals_date", fbb_signals.c.trade_date)
+Index("ix_fbb_signals_status", fbb_signals.c.status)
+
+# 每分钟盘中扫描运行轨道(诊断用)。
+fbb_live_scan_runs = Table(
+    "fbb_live_scan_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=False),
+    Column("duration_ms", Integer, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("pool_count", Integer, nullable=True),
+    Column("touched_count", Integer, nullable=True),
+    Column("entered_count", Integer, nullable=True),
+    Column("spot_active_symbols", Integer, nullable=True),
+    Column("rules_version", String(80), nullable=False),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index(
+    "ix_fbb_live_scan_runs_date_time",
+    fbb_live_scan_runs.c.trade_date,
+    fbb_live_scan_runs.c.started_at,
+)
+
+# 回测报告:单行 id=1 物化(CLI/调度写库,API 只读)。
+fbb_backtest_runs = Table(
+    "fbb_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),  # 固定 1
+    Column("rules_version", String(80), nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+# 回测重算运行轨道(手动/定时请求)。
+fbb_backtest_rebuild_runs = Table(
+    "fbb_backtest_rebuild_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source", String(24), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("stage", String(48), nullable=False),
+    Column("rules_version", String(80), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_fbb_backtest_rebuild_requested",
+    fbb_backtest_rebuild_runs.c.requested_at,
+)
+
+
 market_timing_panel = Table(
     "market_timing_panel",
     metadata,
