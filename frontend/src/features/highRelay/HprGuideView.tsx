@@ -38,7 +38,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            五方案点×首刻过滤×E3卖出 全市场验证(2023-01 ~ 2026-09,3328笔);每条件都有分年证据,见研究文档
+            连板链七方案(A1~D2)全市场验证(2023-03 ~ 2026-09,正常开盘2303笔);每条件都有分年证据,见研究文档
           </span>
           <span className="ml-auto flex items-center gap-2">
             {POINT_ORDER.map((pk) => (
@@ -56,21 +56,22 @@ export function HprGuideView() {
         <div className="mb-2 text-sm font-semibold">一句话</div>
         <p className="text-sm leading-6 text-muted-foreground">
           昨天恰好 2 连板或 3 连板的票,今天冲第 N+1 板时按涨停价打板买入;
-          五种形态(方案点)才出手:A1跌透首启动、A2老龙缩量 是出手级,
-          B1高开确认、B2低开转强、B3贴线二波 是观察级轻仓;只在早盘 09:30~09:45 首刻触板打;
+          七种链式形态才出手:A1双低转强、A2双平转强(二接三阳),B1强强高启(二接三阴),
+          C1高板低吸、C2平强确认(三接四阳),D1低板转强、D2平推转强(三接四阴);
+          链条件收盘后可知,今天开档竞价定型对照,触板即打(开盘≥9.5%顶格不命中);
           炸板当天收盘走,封住拿到断板(15日兜底)。不挑就买是亏的(对照 -1.33),其余一概不碰。
         </p>
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">同花顺动态板块条件(盘前池 × 五方案点)</div>
+        <div className="mb-2 text-sm font-semibold">同花顺动态板块条件(盘前池 × 链式七方案)</div>
         <div className="space-y-3">
           {POINT_ORDER.map((pk) => (
             <div key={pk}>
               <div className="mb-1 flex items-center gap-2 text-xs">
                 <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${GROUP_STYLES[pk].badge}`}>
                   {rules.point_labels[pk]}
-                  {rules.point_levels[pk] === "A" ? " · 出手级" : " · 观察级"}
+                  
                 </span>
                 <span className="text-muted-foreground">{rules.point_desc[pk]}</span>
                 <CopyThsConditionsButton
@@ -143,10 +144,6 @@ export function HprGuideView() {
                   {k}: n={v.n} / 持有{v.bw_pct > 0 ? "+" : ""}{v.bw_pct} / 胜率{(v.bw_win * 100).toFixed(0)}%
                 </li>
               ))}
-              <li>
-                执行口径(首刻×E3): n={rules.exec_anchor.n} / E0胜{(rules.exec_anchor.e0_win * 100).toFixed(0)}%
-                / E3 +{rules.exec_anchor.e3_pct} / 最差 {rules.exec_anchor.e3_worst}
-              </li>
             </ul>
           </div>
           <div>

@@ -15,7 +15,7 @@ import { cn, formatPct, formatPrice } from "@/lib/utils";
 const SESSION_LABELS: Record<string, string> = {
   preopen: "盘前",
   auction: "竞价时段",
-  first_window: "首刻窗(09:30~09:45)",
+  first_window: "早盘(09:30~09:45)",
   morning: "上午盘",
   lunch: "午间休市",
   afternoon: "下午盘",
@@ -24,14 +24,12 @@ const SESSION_LABELS: Record<string, string> = {
 
 const STATUS_META: Record<string, { label: string; className: string }> = {
   watching: { label: "待触发", className: "text-muted-foreground" },
-  sealed_watch: { label: "T字观察", className: "text-amber-500" },
   entered: { label: "已买入", className: "text-rise font-semibold" },
   holding: { label: "持有中", className: "text-rise font-semibold" },
   pending_exit: { label: "待退出", className: "text-amber-600" },
   closed: { label: "已了结", className: "text-muted-foreground" },
   skipped_auction: { label: "竞价回避", className: "text-muted-foreground line-through" },
-  skipped_gap: { label: "一字·买不进", className: "text-muted-foreground line-through" },
-  late_touch: { label: "迟到·放弃", className: "text-muted-foreground/60" },
+  skipped_gap: { label: "顶格·买不进", className: "text-muted-foreground line-through" },
   no_trigger: { label: "未触发", className: "text-muted-foreground/60" },
 };
 
@@ -42,23 +40,27 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-/** 五方案点硬编码映射:label=短标签,full=全标签(悬浮提示),出手级金边、观察级普通。 */
+/** 链式七方案硬编码映射(A=二接三阳 B=二接三阴 C=三接四阳 D=三接四阴)。 */
 const POINT_BADGES: Record<string, { label: string; full: string; className: string }> = {
-  A1: { label: "A1", full: "A1 修复启动(三接四阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
-  A2: { label: "A2", full: "A2 老龙缩量(三接四阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
-  B1: { label: "B1", full: "B1 竞价确认(二接三阴)", className: "bg-primary/15 text-primary" },
-  B2: { label: "B2", full: "B2 低开转强(二接三阳)", className: "bg-orange-500/15 text-orange-500" },
-  B3: { label: "B3", full: "B3 二波贴线(三接四阳)", className: "bg-violet-500/15 text-violet-500" },
+  A1: { label: "A1", full: "A1 双低转强(二接三阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
+  A2: { label: "A2", full: "A2 双平转强(二接三阳)", className: "bg-emerald-500/15 text-emerald-500" },
+  B1: { label: "B1", full: "B1 强强高启(二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
+  C1: { label: "C1", full: "C1 高板低吸(三接四阳)", className: "bg-primary/15 text-primary" },
+  C2: { label: "C2", full: "C2 平强确认(三接四阳)", className: "bg-sky-500/15 text-sky-500" },
+  D1: { label: "D1", full: "D1 低板转强(三接四阴)", className: "bg-orange-500/15 text-orange-500" },
+  D2: { label: "D2", full: "D2 平推转强(三接四阴)", className: "bg-violet-500/15 text-violet-500" },
 };
 
-const POINT_KEYS = ["A1", "A2", "B1", "B2", "B3"] as const;
+const POINT_KEYS = ["A1", "A2", "B1", "C1", "C2", "D1", "D2"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
-  A2: "text-amber-500",
-  B1: "text-primary",
-  B2: "text-orange-500",
-  B3: "text-violet-500",
+  A2: "text-emerald-500",
+  B1: "text-amber-500",
+  C1: "text-primary",
+  C2: "text-sky-500",
+  D1: "text-orange-500",
+  D2: "text-violet-500",
 };
 
 export function HprLiveView({
@@ -146,7 +148,7 @@ export function HprLiveView({
             aria-expanded={playbookOpen}
           >
             <ChevronDown size={13} className={cn(playbookOpen && "rotate-180")} />
-            盘中执行要点(首刻09:30~09:45触板打,只对✅出手/🔵轻仓的票触发)
+            盘中执行要点(竞价定型对照「今天开」档,命中方案触板即打)
           </button>
           {playbookOpen ? (
             <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
@@ -223,9 +225,9 @@ function LiveRow({ entry }: { entry: HprLiveEntry }) {
       <td className="px-3 py-2.5 text-xs">
         {entry.actionable ? (
           entry.level === "A" ? (
-            <span className="font-semibold text-rise" title="出手级">✅出手</span>
+            <span className="font-semibold text-rise" title="链式方案命中">✅出手</span>
           ) : (
-            <span className="font-semibold text-primary" title="观察级轻仓">🔵轻仓</span>
+            <span className="font-semibold text-primary" title="候选(今天开窗待盘中确认)">🔵候选</span>
           )
         ) : entry.avoid_static ? (
           <span className="text-amber-600" title={entry.avoid_static}>回避</span>

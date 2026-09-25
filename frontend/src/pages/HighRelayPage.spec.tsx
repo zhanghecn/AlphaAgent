@@ -23,7 +23,7 @@ const LIVE_PAYLOAD: HprLivePayload = {
   trade_date: "2026-09-04",
   stale: false,
   session_stage: "first_window",
-  rules_version: "hpr-v1.3",
+  rules_version: "hpr-v2.0",
   counts: {
     pool: 2,
     actionable: 1,
@@ -40,13 +40,15 @@ const LIVE_PAYLOAD: HprLivePayload = {
     三接四阳: "三接四·阳地基",
   },
   point_labels: {
-    A1: "A1 修复启动",
-    A2: "A2 老龙缩量",
-    B1: "B1 竞价确认",
-    B2: "B2 低开转强",
-    B3: "B3 二波贴线",
+    A1: "A1 双低转强",
+    A2: "A2 双平转强",
+    B1: "B1 强强高启",
+    C1: "C1 高板低吸",
+    C2: "C2 平强确认",
+    D1: "D1 低板转强",
+    D2: "D2 平推转强",
   },
-  point_levels: { A1: "A", A2: "A", B1: "B", B2: "B", B3: "B" },
+  point_levels: { A1: "A", A2: "A", B1: "A", C1: "A", C2: "A", D1: "A", D2: "A" },
   last_scan: null,
   entries: [
     {
@@ -153,9 +155,9 @@ describe("HprLiveView", () => {
       ),
     );
     expect(html).toContain("高位接力 · 实时推荐");
-    expect(html).toContain("首刻窗(09:30~09:45)");
-    expect(html).toContain("B1 竞价确认(二接三阴)");
-    expect(html).toContain("🔵轻仓");
+    expect(html).toContain("早盘(09:30~09:45)");
+    expect(html).toContain("B1 强强高启");
+    expect(html).toContain("🔵候选");
     expect(html).toContain("雷达");
     expect(html).toContain("打3板");
     expect(html).toContain("打4板");

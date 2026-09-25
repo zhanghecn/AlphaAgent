@@ -10,23 +10,27 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const POINTS = ["A1", "A2", "B1", "B2", "B3"] as const;
+const POINTS = ["A1", "A2", "B1", "C1", "C2", "D1", "D2"] as const;
 const POINT_SHORT: Record<string, string> = {
-  A1: "A1 修复启动",
-  A2: "A2 老龙缩量",
-  B1: "B1 竞价确认",
-  B2: "B2 低开转强",
-  B3: "B3 二波贴线",
+  A1: "A1 双低转强",
+  A2: "A2 双平转强",
+  B1: "B1 强强高启",
+  C1: "C1 高板低吸",
+  C2: "C2 平强确认",
+  D1: "D1 低板转强",
+  D2: "D2 平推转强",
   A级: "仅A级",
   all: "方案合计",
   miss: "未命中对照",
 };
 const POINT_TONE: Record<string, string> = {
   A1: "stroke-rise",
-  A2: "stroke-amber-500",
-  B1: "stroke-primary",
-  B2: "stroke-orange-500",
-  B3: "stroke-violet-500",
+  A2: "stroke-emerald-500",
+  B1: "stroke-amber-500",
+  C1: "stroke-primary",
+  C2: "stroke-sky-500",
+  D1: "stroke-orange-500",
+  D2: "stroke-violet-500",
 };
 const SUMMARY_KEYS = [...POINTS, "A级", "all", "miss"] as const;
 
@@ -58,7 +62,6 @@ export function HprBacktestView({
   const anchors = report.anchors ?? {};
   const checks = report.anchor_check ?? {};
   const exec = report.execution;
-  const execAnchor = report.exec_anchor;
   return (
     <div className="space-y-4">
       <RebuildBar rebuild={rebuild} building={building} canRebuild={canRebuild}
@@ -72,7 +75,7 @@ export function HprBacktestView({
           <span>生成于 {formatGeneratedAt(report.generated_at)}</span>
         </div>
         <p>{report.caliber}</p>
-        <p className="mt-1">E0 = 持有到首次断板日收盘(研究主算法/锚点口径);E3 = 炸板当日收盘走、封住→E0(产品卖出纪律);胜率 = 次日收盘收益&gt;0。</p>
+        <p className="mt-1">E0 = 持有到首次断板日收盘(研究主算法/锚点口径);E3 = 炸板当日收盘走、封住→E0(产品卖出纪律);胜率 = 次日收盘收益≥0(好票率)。</p>
       </section>
 
       <section className="grid gap-3 md:grid-cols-3">
@@ -90,15 +93,10 @@ export function HprBacktestView({
 
       <section className="rounded-lg border p-4" aria-label="执行口径">
         <div className="mb-2 flex flex-wrap items-center gap-x-3">
-          <span className="text-sm font-semibold">执行口径:首刻过滤 × E3卖出</span>
+          <span className="text-sm font-semibold">执行口径:E0(持有到断板) vs E3(炸板当日走)</span>
           <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
             实盘口径
           </span>
-          {execAnchor ? (
-            <span className="text-xs text-muted-foreground">
-              锚点 n={execAnchor.n} / E0胜 {formatPct(execAnchor.e0_win * 100)} / E3 {formatPct(execAnchor.e3_pct)} / 最差 {execAnchor.e3_worst}
-            </span>
-          ) : null}
         </div>
         <p className="mb-2 text-xs text-muted-foreground">{exec?.caliber}</p>
         <div className="overflow-x-auto">
@@ -226,7 +224,7 @@ export function HprBacktestView({
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
           提示:五方案点分年全正;A2 的 2023 年只有 2 笔(+75.11),剔除后 2024~2026 温和全正;
-          B3 去最好3笔后 2024 微负=尾部微瑕,观察级轻仓。
+          每个方案点每年约5笔分年波动大,轻仓执行。
         </p>
       </section>
 

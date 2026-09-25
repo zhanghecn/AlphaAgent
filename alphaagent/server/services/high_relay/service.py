@@ -347,7 +347,6 @@ def get_rules() -> dict[str, object]:
         "intraday_playbook": contracts.INTRADAY_PLAYBOOK,
         "anchors": contracts.BACKTEST_ANCHORS,
         "anchor_tolerances": contracts.ANCHOR_TOLERANCES,
-        "exec_anchor": contracts.EXEC_ANCHOR,
         "case_gates": contracts.CASE_GATES,
     }
 

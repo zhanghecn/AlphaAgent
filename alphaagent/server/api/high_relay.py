@@ -15,7 +15,7 @@ router = APIRouter(prefix="/high-relay", tags=["high-relay"])
 
 @router.get("/live", response_model=None)
 def live(trade_date: date | None = Query(default=None, alias="date")):
-    """实时推荐:今日池(2/3连板全量 × 五方案点)× 触发状态(盘中 30s 轮询;?date= 回看历史)。"""
+    """实时推荐:今日池(2/3连板全量 × 链式七方案)× 触发状态(盘中 30s 轮询;?date= 回看历史)。"""
     try:
         return ok(service.get_live(trade_date))
     except Exception as exc:  # noqa: BLE001
@@ -95,5 +95,5 @@ def ledger(trade_date: date | None = Query(default=None, alias="date"),
 
 @router.get("/rules", response_model=None)
 def rules():
-    """规则契约:五方案点规则 + 回避清单 + 留档未收编 + 风险声明 + 同花顺条件 ×5。"""
+    """规则契约:链式七方案(A1~D2)规则 + 回避清单 + 留档 + 风险声明 + 同花顺条件。"""
     return ok(service.get_rules())

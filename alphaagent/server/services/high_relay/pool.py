@@ -1,15 +1,13 @@
-"""高位接力打板盘前池计算:全部条件来自 T-1 收盘数据(无未来函数)。
+"""高位接力打板池计算:T-1 收盘后给次日 2/3 连板票打链式方案候选标。
 
-口径 = 量化因子研究/高位接力/高位接力规则.md v1.3 定稿(2026-09-19),
-字段计算逐行对齐研究脚本 relay_research.py build_events + relay_foundation.py augment:
-  池入选 = 昨日收盘恰好 2 连板(二接三)或 3 连板(三接四),主板非ST非退,上市>5日;
-  分组 = 四组(二接三/三接四 × 地基日阴阳);
-  打标 = 五方案点 A1/A2/B1/B2/B3(全部为买入前可知信息;B2 的竞价 4~7% 是唯一的
-        盘中复核条件,池里先打标、9:30 首跳定型后由扫描判定);
-  回避 = 静态回避在池里打标(贴顶/板型链毒格),竞价回避由扫描判定(A2 0~9.5% / B2 4~7%);
-  触发价 = 今日涨停价 = round(昨收×1.10+1e-9, 2)(与研究浮点口径一致)。
+口径 = 连板链组合方案 A1~D2 七方案(2026-09-25 定稿,汇总/连板链组合总结.md):
+- 池 = 昨日恰好 2/3 连板的主板非ST票(全量,雷达);地基日=首板前一天,阴阳分组
+- 候选 = 链档条件(一板×二板[×三板]的开盘档;低<0/平0~3/高3~7毒区/强≥7);
+  今天开窗(竞价定型后由盘中扫描复核:低<0/平0~3/高3~6/强6~9.5,≥9.5顶格不命中)
+- 回避 = 一板或二板开3~7%(半温不火);二板开≥3%×首3日涨超5%(追高透支);
+  三接四阴今天低开(盘中判)
+- 字段与 relay_research.py/relay_summary2.py 同口径(事件静态字段含 b1/b2/b3 开盘档)
 """
-
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -198,57 +196,72 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     b1t = rec.get("b1_turn")
     b2t = rec.get("b2_turn")
     rec["turn_grad"] = round(b2t - b1t, 1) if b1t is not None and b2t is not None else None
+    # 首3日累计涨幅(含地基日): 地基日收盘 / 3个交易日前收盘 - 1(回避「追高透支」用)
+    if f - 3 >= 0 and int(sid[f - 3]) == s:
+        c3 = float(cols["close_price"][f - 3])
+        rec["pre3_pct"] = round((fc / c3 - 1) * 100, 1) if c3 > 0 else None
+    else:
+        rec["pre3_pct"] = None
     return rec
 
 
-def tag_point(group4: str, dist_h60, ma_state, prev_wave60, prev_wave120,
-              b2_open, turn_grad, dist_ma10, prior_height, auction_pct=None) -> str:
-    """五方案点打标(与 relay_scheme.py tag 逐字一致;auction_pct=买入开盘%%,
-    池计算时未知传 None → B2 只按静态部分打标,竞价窗由盘中扫描复核)。"""
+def chain_tier(open_pct) -> str | None:
+    """链上板的开盘档: 低<0 / 平0~3 / 高3~7(毒区) / 强≥7。"""
     c = contracts
-    d = dist_h60 if dist_h60 is not None else float("nan")
-    tg = turn_grad if turn_grad is not None else float("nan")
-    if group4 == "三接四阳" and c.A1_DIST_LO <= d < c.A1_DIST_HI \
-            and ma_state not in c.A1_MA_EXCLUDE and prev_wave60 == 0:
-        return "A1"
-    if group4 == "三接四阴" and prev_wave120 >= c.A2_PREV_WAVE120_MIN \
-            and tg == tg and tg < c.A2_TURN_GRAD_MAX:
-        return "A2"
-    if group4 == "二接三阴" and b2_open is not None \
-            and c.B1_B2OPEN_LO <= b2_open < c.B1_B2OPEN_HI \
-            and tg == tg and c.B1_TURN_GRAD_LO <= tg < c.B1_TURN_GRAD_HI:
-        return "B1"
-    if group4 == "二接三阳" and c.B2_DIST_LO <= d < c.B2_DIST_HI \
-            and b2_open is not None and b2_open < 0:
-        if auction_pct is None:
-            return "B2"  # 池打标:静态部分命中,竞价窗盘中复核
-        if c.B2_AUCTION_LO <= auction_pct < c.B2_AUCTION_HI:
-            return "B2"
-    if group4 == "三接四阳" and prior_height is not None \
-            and prior_height >= c.B3_PRIOR_HEIGHT_MIN \
-            and dist_ma10 is not None and dist_ma10 < c.B3_DIST_MA10_MAX:
-        return "B3"
+    if open_pct is None:
+        return None
+    if open_pct < c.CHAIN_LOW_HI:
+        return "低"
+    if open_pct < c.CHAIN_FLAT_HI:
+        return "平"
+    if open_pct < c.CHAIN_HIGH_HI:
+        return "高"
+    return "强"
+
+
+def tag_point(group4: str, b1_open, b2_open, b3_open, auction_pct=None) -> str:
+    """链式七方案打标(与 汇总/连板链组合总结.md 口径一致)。
+    auction_pct = 今天开盘 %(池计算时未知传 None → 只按链条件打候选标,
+    今天开窗由盘中扫描/回测复核;≥9.5 顶格一律不命中)。"""
+    c = contracts
+    if auction_pct is not None and auction_pct >= c.TODAY_CAP:
+        return "—"
+    t = (chain_tier(b1_open), chain_tier(b2_open), chain_tier(b3_open))
+    for s in c.SCHEMES:
+        if s["group4"] != group4:
+            continue
+        ct = s["chain"]
+        if all(w is None or w == tt for w, tt in zip(ct, t, strict=False)):
+            if auction_pct is None:
+                return str(s["no"])
+            lo, hi = s["today"]
+            return str(s["no"]) if lo <= auction_pct < hi else "—"
     return "—"
 
 
-def static_avoid(point: str, group4: str, dist_h60, prev_wave60,
-                 b1_type, b2_type) -> str:
-    """静态回避原因(命中也不买;空串=不回避)。规则=contracts 回避清单。"""
+def scheme_today_window(point: str):
+    """方案「今天开」窗 (lo, hi);非方案返回 None(供盘中扫描/前端展示)。"""
+    for s in contracts.SCHEMES:
+        if s["no"] == point:
+            return s["today"]
+    return None
+
+
+def static_avoid(point: str, group4: str, b1_open, b2_open, pre3_pct) -> str:
+    """静态回避原因(命中也不买;空串=不回避)。三接四阴今天低开属盘中回避(live_scan)。"""
     if point == "—":
         return ""
     reasons: list[str] = []
-    if group4 == "三接四阳" and dist_h60 is not None and dist_h60 > contracts.AVOID_TOP_DIST:
-        reasons.append("地基贴顶<3%")
-    for prefix in contracts.AVOID_CHAINS.get(group4, []):
-        if (b1_type, b2_type) == tuple(prefix):
-            reasons.append("链=" + "→".join(prefix))
-    if group4 == "二接三阳" and prev_wave60 == 0:
-        reasons.append("60日内无前波")
+    if chain_tier(b1_open) == "高" or chain_tier(b2_open) == "高":
+        reasons.append("一板或二板开过3~7%(半温不火)")
+    if chain_tier(b2_open) in ("高", "强") and pre3_pct is not None \
+            and pre3_pct > contracts.AVOID_PRE3_MAX:
+        reasons.append("二板开≥3%×首3日涨超5%(追高透支)")
     return ";".join(reasons)
 
 
 def compute_pool(data_date: date | None = None) -> dict[str, object]:
-    """以 data_date(默认最新日线日)为 T-1 计算次日池(2/3连板全量+五点打标)。
+    """以 data_date(默认最新日线日)为 T-1 计算次日池(2/3连板全量+链式方案候选打标)。
 
     返回 {data_date, exec_date, rules_version, mkt_lim_tm1, entries, filter_stats}。
     """
@@ -305,20 +318,17 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             continue
         yang = bool(rec["foundation_yang"])
         group4 = ("二接三" if n_board == 2 else "三接四") + ("阳" if yang else "阴")
-        point = tag_point(group4, rec["dist_h60"], rec["ma_state"],
-                          rec["prev_wave60"], rec["prev_wave120"],
-                          rec.get("b2_open"), rec["turn_grad"],
-                          rec["dist_ma10"], rec["prior_height"])
-        avoid = static_avoid(point, group4, rec["dist_h60"], rec["prev_wave60"],
-                             rec.get("b1_type"), rec.get("b2_type"))
+        point = tag_point(group4, rec.get("b1_open"), rec.get("b2_open"),
+                          rec.get("b3_open"))
+        avoid = static_avoid(point, group4, rec.get("b1_open"),
+                             rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid
         n_actionable += int(actionable)
-        # 竞价门: A2 回避<0/≥9.5; B2 条件 4~7%(点定义的一部分,盘中复核)
+        # 候选=链条件已命中,今天开窗(竞价定型后对照;顶格≥9.5不命中)
+        win = scheme_today_window(point) if point != "—" else None
         gate = None
-        if point == "A2":
-            gate = "a2_0_9.5"
-        elif point == "B2":
-            gate = "b2_4_7"
+        if win is not None:
+            gate = f"today_{win[0]:g}_{win[1]:g}"
         prev_close = float(row.close_price)
         entries.append({
             "vt_symbol": str(row.vt_symbol),
@@ -347,9 +357,11 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "b3_type": rec.get("b3_type"),
             "b1_open": rec.get("b1_open"),
             "b2_open": rec.get("b2_open"),
+            "b3_open": rec.get("b3_open"),
             "b1_turn": rec.get("b1_turn"),
             "b2_turn": rec.get("b2_turn"),
             "turn_grad": rec["turn_grad"],
+            "pre3_pct": rec.get("pre3_pct"),
             "mkt_lim_tm1": int(mkt_prev),
         })
     stats["actionable"] = n_actionable

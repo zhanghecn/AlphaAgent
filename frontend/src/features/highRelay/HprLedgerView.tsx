@@ -12,14 +12,16 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-const POINT_KEYS = ["A1", "A2", "B1", "B2", "B3"] as const;
+const POINT_KEYS = ["A1", "A2", "B1", "C1", "C2", "D1", "D2"] as const;
 
 const POINT_BADGES: Record<string, { label: string; className: string }> = {
   A1: { label: "A1", className: "bg-rise/15 text-rise" },
-  A2: { label: "A2", className: "bg-amber-500/15 text-amber-500" },
-  B1: { label: "B1", className: "bg-primary/15 text-primary" },
-  B2: { label: "B2", className: "bg-orange-500/15 text-orange-500" },
-  B3: { label: "B3", className: "bg-violet-500/15 text-violet-500" },
+  A2: { label: "A2", className: "bg-emerald-500/15 text-emerald-500" },
+  B1: { label: "B1", className: "bg-amber-500/15 text-amber-500" },
+  C1: { label: "C1", className: "bg-primary/15 text-primary" },
+  C2: { label: "C2", className: "bg-sky-500/15 text-sky-500" },
+  D1: { label: "D1", className: "bg-orange-500/15 text-orange-500" },
+  D2: { label: "D2", className: "bg-violet-500/15 text-violet-500" },
 };
 
 /** 高位接力历史交割单:横向平铺列表(全部命中信号逐笔,不限仓位),支持月份/点/搜票筛选。 */
@@ -64,7 +66,7 @@ export function HprLedgerView({
   return (
     <section aria-label="高位接力历史交割单" className="rounded-lg border">
       <div className="border-b px-4 py-2 text-xs text-muted-foreground">
-        回测模拟口径(非实盘):首刻触板买涨停价(一字排除,T字可买),炸板当日收盘走/封住→断板收盘卖(15日兜底,E3)
+        回测模拟口径(非实盘):链式方案命中(正常开盘,顶格≥9.5不计)触板买涨停价,炸板当日收盘走/封住→断板收盘卖(15日兜底,E3)
         ;收益列=E3,对照列E0=持有到断板;全部命中信号逐笔,不限仓位。实时前推成交随产品上线逐日沉淀。
       </div>
 

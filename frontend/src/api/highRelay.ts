@@ -1,11 +1,12 @@
 import { apiClient } from "./client";
 
 // ── 高位接力打板(二接三/三接四)产品线 API 契约 ──
-// 策略口径 = hpr-v1.3(量化因子研究/高位接力/高位接力规则.md 定稿)。
-// 买点 = 昨日恰好2/3连板,今日冲第N+1板首刻(09:30~09:45)触涨停价打板;
-// 池 = 昨日2/3连板全量(雷达),五方案点 A1/A2(出手级) B1/B2/B3(观察级) 命中才出手。
+// 策略口径 = hpr-v2.0 连板链组合方案(量化因子研究/高位接力/汇总/连板链组合总结.md,2026-09-25定稿)。
+// 买点 = 昨日恰好2/3连板,链条件(前几板开盘档)命中且今天开盘在方案窗内(6~9.5为主),
+// 触涨停价即打(无时间窗);开盘≥9.5%顶格不命中(正常开盘口径)。
+// 池 = 昨日2/3连板全量(雷达),七方案 A1/A2(二接三阳) B1(二接三阴) C1/C2(三接四阳) D1/D2(三接四阴)。
 
-export type HprPoint = "A1" | "A2" | "B1" | "B2" | "B3" | "—";
+export type HprPoint = "A1" | "A2" | "B1" | "C1" | "C2" | "D1" | "D2" | "—";
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
 
 export type HprStatus =
@@ -151,10 +152,6 @@ export interface HprBacktestReport {
   anchors: Record<string, HprAnchorStats>;
   anchor_tolerances: Record<string, number>;
   anchor_check: Record<string, HprAnchorCheck | string>;
-  exec_anchor: {
-    n: number; e0_win: number; e0_pct: number;
-    e3_pct: number; e3_win: number; e3_worst: number;
-  };
   case_gates: HprCaseGate[];
   avoid_stats: Record<string, { hit_n: number; avoid_n: number }>;
   radar: Record<string, { trigger_n: number; hit_n: number }>;
@@ -259,7 +256,6 @@ export interface HprRulesPayload {
   intraday_playbook: string[];
   anchors: Record<string, HprAnchorStats>;
   anchor_tolerances: Record<string, number>;
-  exec_anchor: HprBacktestReport["exec_anchor"];
   case_gates: Omit<HprCaseGate, "actual_points" | "pass">[];
 }
 

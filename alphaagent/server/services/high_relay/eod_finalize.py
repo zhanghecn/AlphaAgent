@@ -1,7 +1,7 @@
 """高位接力打板盘后定版:信号状态推进 + 次日池计算。
 
 退出推进用"从数据重算"而非增量状态,天然幂等(重复跑/补跑结果一致)。
-口径(高位接力规则.md v1.3 卖出纪律, E3):
+口径(连板链组合方案 A1~D2, E3 卖出纪律):
 - 买入日当天没封住(炸板)→ 当天收盘价卖(break_day_close),不隔夜赌
 - 封住了 → 买入次日起首个未涨停日收盘卖(next_close_fail/break_close)
 - 一路涨停到第 15 个交易日 → 当日收盘卖(max_hold_close,研究兜底口径)
@@ -10,7 +10,7 @@
 残留状态定版(扫描漏检/服务中断兜底,全部由日线+首触时间重推):
 - watching: 当日最高<涨停价 → no_trigger;首触≤09:45 → entered(回填);
   首触>09:45 或无时刻数据 → late_touch(保守不补买入)
-- sealed_watch(T字观察): 全天一字(开=收=高=低=涨停) → skipped_gap;
+- 竞价开盘≥9.5%(顶格/一字)→ skipped_gap(正常开盘口径外,补录兜底同判);
   盘中开过(最低<涨停) → entered(排板成交,买价=涨停价)
 """
 
@@ -142,7 +142,6 @@ def _settle_residual_signals(data_date: date) -> int:
     bars = _load_bars(vts, start, data_date)
     bmap = {(str(r.vt_symbol), r.trade_date): r for r in bars.itertuples()} \
         if not bars.empty else {}
-    touch_map = repository.load_touch_map()
 
     settled = 0
     for sig in pend:
@@ -155,31 +154,17 @@ def _settle_residual_signals(data_date: date) -> int:
             repository.upsert_signal(day, vt, status="no_trigger")
             settled += 1
             continue
-        if status == "sealed_watch":
-            # T字观察:全天一字(开=收=高=低)买不进;开过(最低<涨停)=排板成交
-            one_word = (abs(float(bar.open_price) - float(bar.close_price)) <= 1e-6
-                        and abs(float(bar.open_price) - float(bar.high_price)) <= 1e-6
-                        and abs(float(bar.open_price) - float(bar.low_price)) <= 1e-6)
-            if one_word and bool(bar.is_lim):
-                repository.upsert_signal(day, vt, status="skipped_gap")
-            elif float(bar.low_price) < limit_price - 1e-6:
-                repository.upsert_signal(day, vt, status="entered",
-                                         entry_price=limit_price, opened=True)
-            else:
-                repository.upsert_signal(day, vt, status="skipped_gap")
-            settled += 1
-            continue
-        # watching
-        if float(bar.high_price) < limit_price - 1e-6:
+        # 补录兜底(链式口径): 开盘≥9.5%顶格不命中;触板即买;没触板=no_trigger
+        prev_close = float(sig["prev_close"]) if sig.get("prev_close") else None
+        open_pct = (float(bar.open_price) / prev_close - 1) * 100 if prev_close else None
+        if open_pct is not None and open_pct >= contracts.TODAY_CAP:
+            repository.upsert_signal(day, vt, status="skipped_gap")
+        elif float(bar.high_price) < limit_price - 1e-6:
             repository.upsert_signal(day, vt, status="no_trigger")
         else:
-            bucket = touch_map.get((vt, day))
-            if bucket is not None and bucket <= "09:45":
-                repository.upsert_signal(day, vt, status="entered",
-                                         entry_price=limit_price)
-            else:
-                # 首触>09:45,或无时刻数据无法验证首刻 → 保守不补买入
-                repository.upsert_signal(day, vt, status="late_touch")
+            repository.upsert_signal(day, vt, status="entered",
+                                     entry_price=limit_price,
+                                     auction_pct=round(open_pct, 2) if open_pct is not None else None)
         settled += 1
     return settled
 

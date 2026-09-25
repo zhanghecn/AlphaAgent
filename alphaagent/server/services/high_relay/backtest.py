@@ -1,16 +1,17 @@
 """高位接力打板回测引擎:日线口径全量回放 + 物化报告。
 
-口径 = 量化因子研究/高位接力/高位接力规则.md v1.3 定稿(2026-09-19),
+口径 = 连板链组合方案 A1~D2 七方案(2026-09-25 定稿,汇总/连板链组合总结.md),
 事件构建逐行对齐研究脚本 relay_research.py build_events:
 - 事件 = 昨日收盘恰好 N 连板(N=2/3),当日盘中触涨停价(最高≥涨停价)且非一字全天
   (T字含在内);买价 = 涨停价(=昨收×1.10 四舍五入到分);样本自 2023-01 起
-- 打标 = 五方案点(静态字段 + 买入开盘%——回测里竞价已知,与研究打标完全一致)
+- 打标 = 链式七方案(链档条件 + 今天开窗——回测里竞价已知,与研究打标完全一致;
+  开盘≥9.5% 顶格一律不命中=正常开盘口径)
 - 收益主算法(E0/锚点口径) = 持有到首次不再涨停日收盘,15 个交易日兜底;
-  胜率 = 次日收盘收益>0(研究「胜」口径);未完(数据末端没走到卖出)不进统计
+  胜率 = 次日收盘收益≥0(研究「好票」口径:炸板次日涨回=好票,恰平也算);未完不进统计
 - 产品卖出纪律(E3) = 买入日没封住→当天收盘走;封住→E0;报告同时给 E3 均值/胜率
-- 执行口径(首刻过滤×E3) = 15m 覆盖窗(2024-08-15起)内,首刻=首触时刻桶≤09:45,
-  时刻表 = w2s_touch_times(全市场通用,pytdx历史+zt_pool每日增量)
-统计口径: avg_pct=次日收%均值;win=次日收%>0占比(=研究胜率);bw_pct=持有到断板均值;
+- 执行口径 = E0(持有到断板) vs E3(炸板当日收盘走/封住→E0)对比;
+  链式方案无首刻过滤(研究口径=触板即买),触板时刻表不再参与判定
+统计口径: avg_pct=次日收%均值;win=次日收%≥0占比(=研究好票率);bw_pct=持有到断板均值;
 bw_median=中位;e3_pct/e3_win=产品卖出纪律口径;锚点数字=研究定稿。
 """
 
@@ -37,15 +38,14 @@ def run_backtest() -> dict[str, object]:
     E = _build_events()
     done = E[~E["未完"]].copy()
 
-    keys = list(contracts.POINT_KEYS) + ["A级", "all", "miss"]
+    keys = list(contracts.POINT_KEYS) + ["all", "miss"]
 
     def subset(key: str) -> pd.DataFrame:
         if key == "all":
             return done[done["方案点"] != "—"]
-        if key == "A级":
-            return done[done["方案点"].isin(["A1", "A2"])]
         if key == "miss":
-            return done[done["方案点"] == "—"]
+            # 研究对照=正常开盘(顶格≥9.5不计)未命中池,顶格票剔出
+            return done[(done["方案点"] == "—") & (done["买入开盘%"] < contracts.TODAY_CAP)]
         return done[done["方案点"] == key]
 
     frames = {k: subset(k) for k in keys}
@@ -62,8 +62,8 @@ def run_backtest() -> dict[str, object]:
         "coverage": coverage,
         "caliber": ("日线口径:昨日恰好2/3连板,当日最高价触涨停价(=昨收×1.10)按涨停价买,"
                     "一字全天不开排除(T字可买);E0=持有到首次断板日收盘(15日兜底,锚点口径),"
-                    "E3=炸板当日收盘走/封住→E0(产品卖出纪律);胜率=次日收盘收益>0;"
-                    "无滑点,日线未复权。池=昨日2/3连板全量(雷达),出手=五方案点命中。"),
+                    "E3=炸板当日收盘走/封住→E0(产品卖出纪律);胜率=次日收盘收益≥0;"
+                    "无滑点,日线未复权。池=昨日2/3连板全量(雷达),出手=链式七方案命中(正常开盘口径)。"),
         "group4_labels": contracts.GROUP4_LABELS,
         "point_labels": contracts.POINT_LABELS,
         "point_levels": contracts.POINT_LEVELS,
@@ -76,7 +76,6 @@ def run_backtest() -> dict[str, object]:
         "anchors": contracts.BACKTEST_ANCHORS,
         "anchor_tolerances": contracts.ANCHOR_TOLERANCES,
         "anchor_check": _anchor_check(summary),
-        "exec_anchor": contracts.EXEC_ANCHOR,
         "case_gates": _case_gates(done),
         "avoid_stats": _avoid_stats(done),
         "radar": _radar_stats(done),
@@ -136,12 +135,10 @@ def _build_events() -> pd.DataFrame:
         buy_open = round((float(cols["open_price"][i])
                           / float(cols["prev_close"][i]) - 1) * 100, 2)
         point = pool_mod.tag_point(
-            group4, rec["dist_h60"], rec["ma_state"], rec["prev_wave60"],
-            rec["prev_wave120"], rec.get("b2_open"), rec["turn_grad"],
-            rec["dist_ma10"], rec["prior_height"], auction_pct=buy_open)
-        avoid = pool_mod.static_avoid(point, group4, rec["dist_h60"],
-                                      rec["prev_wave60"],
-                                      rec.get("b1_type"), rec.get("b2_type"))
+            group4, rec.get("b1_open"), rec.get("b2_open"),
+            rec.get("b3_open"), auction_pct=buy_open)
+        avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
+                                      rec.get("b2_open"), rec.get("pre3_pct"))
         sealed = bool(cols["is_lim"][i])
         n1c = bars["n1_close"].iat[i]
         n1o = bars["n1_open"].iat[i]
@@ -231,7 +228,7 @@ def _stats(e: pd.DataFrame) -> dict[str, object]:
         "n": int(len(e)),
         "seal": round(float(e["封住"].mean()), 3),
         "avg_pct": round(float(d1.mean()), 2) if len(d1) else None,
-        "win": round(float((d1 > 0).mean()), 3) if len(d1) else None,
+        "win": round(float((d1 >= 0).mean()), 3) if len(d1) else None,
         "bw_pct": round(float(bw.mean()), 2) if len(bw) else None,
         "bw_median": round(float(bw.median()), 2) if len(bw) else None,
         "bw_win": round(float((bw > 0).mean()), 3) if len(bw) else None,
@@ -278,15 +275,10 @@ def _yearly_totals(e: pd.DataFrame) -> list[dict[str, object]]:
 
 
 def _execution_caliber(done: pd.DataFrame) -> dict[str, object]:
-    """执行口径:首刻过滤×E3卖出(15m 覆盖窗内,触板时刻=w2s_touch_times)。"""
-    touch_map = repository.load_touch_map()
+    """执行口径:E0(持有到断板) vs E3(炸板当日走/封住→E0)对比(链式方案无首刻过滤)。"""
     hit = done[done["方案点"] != "—"].copy()
-    hit["触板"] = [touch_map.get((str(c), pd.Timestamp(d).date()))
-                   for c, d in zip(hit["代码"], hit["买入日"], strict=False)]
-    hm = hit[hit["触板"].notna()].copy()
-    if not len(hm):
-        return {"caliber": "15m覆盖窗 2024-08-15 起;无触板时刻数据", "subsets": []}
-    hm["首刻"] = hm["触板"] <= "09:45"
+    if not len(hit):
+        return {"caliber": "无命中样本", "subsets": []}
 
     def row(name: str, s: pd.DataFrame) -> dict[str, object]:
         e0 = s["持有到断板%"].dropna()
@@ -303,12 +295,10 @@ def _execution_caliber(done: pd.DataFrame) -> dict[str, object]:
                 "yearly": yearly}
 
     return {
-        "caliber": ("首刻过滤×E3卖出(15m覆盖窗 2024-08-15起):首刻=首触时刻桶≤09:45;"
-                    "E0=持有到断板,E3=炸板当日收盘走/封住→E0"),
+        "caliber": "E0=持有到断板(研究锚点口径);E3=炸板当日收盘走/封住→E0(产品卖出纪律)",
         "subsets": [
-            row("方案点命中全部", hm),
-            row("命中×首刻(v1.3执行口径)", hm[hm["首刻"]]),
-            row("命中×非首刻(放弃)", hm[~hm["首刻"]]),
+            row("方案命中全部·E0", hit),
+            row("方案命中全部·E3", hit),
         ],
     }
 
@@ -321,7 +311,7 @@ def _anchor_check(summary: dict[str, object]) -> dict[str, object]:
         s = summary.get(key) or {}
         n = int(s.get("n", 0) or 0)
         bw = float(s.get("bw_pct", 0.0) or 0.0)
-        # 锚点胜率=研究「胜率」列=次日收%>0 占比
+        # 锚点胜率=研究「好票率」=次日收%≥0 占比(恰平=好票)
         win = float(s.get("win", 0.0) or 0.0)
         n_diff = n - int(anchor["n"])
         bw_diff = round(bw - float(anchor["bw_pct"]), 2)
