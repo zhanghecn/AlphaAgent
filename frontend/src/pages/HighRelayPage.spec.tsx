@@ -40,15 +40,18 @@ const LIVE_PAYLOAD: HprLivePayload = {
     三接四阳: "三接四·阳地基",
   },
   point_labels: {
-    A1: "A1 双低转强",
-    A2: "A2 双平转强",
-    B1: "B1 强强高启",
-    C1: "C1 高板低吸",
-    C2: "C2 平强确认",
+    A1: "A1 双低贴零",
+    A2: "A2 平启贴零",
+    A3: "A3 一字急锁缓启",
+    B1: "B1 强强活跃温开",
+    B2: "B2 低洗走强",
+    C1: "C1 放量高板低吸",
+    C2: "C2 双一字确认",
     D1: "D1 低板转强",
-    D2: "D2 平推转强",
+    D2: "D2 低洗平推",
+    D3: "D3 贴零温开",
   },
-  point_levels: { A1: "A", A2: "A", B1: "A", C1: "A", C2: "A", D1: "A", D2: "A" },
+  point_levels: { A1: "A", A2: "A", A3: "A", B1: "A", B2: "A", C1: "A", C2: "A", D1: "A", D2: "A", D3: "A" },
   last_scan: null,
   entries: [
     {
@@ -156,7 +159,7 @@ describe("HprLiveView", () => {
     );
     expect(html).toContain("高位接力 · 实时推荐");
     expect(html).toContain("早盘(09:30~09:45)");
-    expect(html).toContain("B1 强强高启");
+    expect(html).toContain("B1 强强活跃温开");
     expect(html).toContain("🔵候选");
     expect(html).toContain("雷达");
     expect(html).toContain("打3板");

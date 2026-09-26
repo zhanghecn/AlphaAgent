@@ -205,37 +205,35 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     return rec
 
 
-def chain_tier(open_pct) -> str | None:
-    """链上板的开盘档: 低<0 / 平0~3 / 高3~7(毒区) / 强≥7。"""
-    c = contracts
-    if open_pct is None:
-        return None
-    if open_pct < c.CHAIN_LOW_HI:
-        return "低"
-    if open_pct < c.CHAIN_FLAT_HI:
-        return "平"
-    if open_pct < c.CHAIN_HIGH_HI:
-        return "高"
-    return "强"
-
-
-def tag_point(group4: str, b1_open, b2_open, b3_open, auction_pct=None) -> str:
-    """链式七方案打标(与 汇总/连板链组合总结.md 口径一致)。
+def tag_point(group4: str, b1_open, b2_open, b3_open,
+              auction_pct=None, b2_turn=None) -> str:
+    """链式十方案打标(与 汇总/连板链组合总结.md 口径一致)。
+    chain = 数值区间半开[lo,hi);vol2 = 二板换手率窗(缺数据视为不命中带换手窗的点);
     auction_pct = 今天开盘 %(池计算时未知传 None → 只按链条件打候选标,
     今天开窗由盘中扫描/回测复核;≥9.5 顶格一律不命中)。"""
     c = contracts
     if auction_pct is not None and auction_pct >= c.TODAY_CAP:
         return "—"
-    t = (chain_tier(b1_open), chain_tier(b2_open), chain_tier(b3_open))
     for s in c.SCHEMES:
         if s["group4"] != group4:
             continue
-        ct = s["chain"]
-        if all(w is None or w == tt for w, tt in zip(ct, t, strict=False)):
-            if auction_pct is None:
-                return str(s["no"])
-            lo, hi = s["today"]
-            return str(s["no"]) if lo <= auction_pct < hi else "—"
+        ok = True
+        for rng, val in zip(s["chain"], (b1_open, b2_open, b3_open), strict=False):
+            if rng is None:
+                continue
+            if val is None or not (rng[0] <= val < rng[1]):
+                ok = False
+                break
+        if not ok:
+            continue
+        vol = s.get("vol2")
+        if vol is not None and (b2_turn is None
+                                or not (vol[0] <= b2_turn < vol[1])):
+            continue
+        if auction_pct is None:
+            return str(s["no"])
+        lo, hi = s["today"]
+        return str(s["no"]) if lo <= auction_pct < hi else "—"
     return "—"
 
 
@@ -248,16 +246,9 @@ def scheme_today_window(point: str):
 
 
 def static_avoid(point: str, group4: str, b1_open, b2_open, pre3_pct) -> str:
-    """静态回避原因(命中也不买;空串=不回避)。三接四阴今天低开属盘中回避(live_scan)。"""
-    if point == "—":
-        return ""
-    reasons: list[str] = []
-    if chain_tier(b1_open) == "高" or chain_tier(b2_open) == "高":
-        reasons.append("一板或二板开过3~7%(半温不火)")
-    if chain_tier(b2_open) in ("高", "强") and pre3_pct is not None \
-            and pre3_pct > contracts.AVOID_PRE3_MAX:
-        reasons.append("二板开≥3%×首3日涨超5%(追高透支)")
-    return ";".join(reasons)
+    """静态回避原因(v3.0 起恒空:旧「半温不火/追高透支」两条废止为 miss 池观察注记,
+    见 contracts.AVOID_OBSERVE;保留签名兼容回测/池调用)。"""
+    return ""
 
 
 def compute_pool(data_date: date | None = None) -> dict[str, object]:
@@ -319,7 +310,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         yang = bool(rec["foundation_yang"])
         group4 = ("二接三" if n_board == 2 else "三接四") + ("阳" if yang else "阴")
         point = tag_point(group4, rec.get("b1_open"), rec.get("b2_open"),
-                          rec.get("b3_open"))
+                          rec.get("b3_open"), b2_turn=rec.get("b2_turn"))
         avoid = static_avoid(point, group4, rec.get("b1_open"),
                              rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid

@@ -136,7 +136,7 @@ def _build_events() -> pd.DataFrame:
                           / float(cols["prev_close"][i]) - 1) * 100, 2)
         point = pool_mod.tag_point(
             group4, rec.get("b1_open"), rec.get("b2_open"),
-            rec.get("b3_open"), auction_pct=buy_open)
+            rec.get("b3_open"), auction_pct=buy_open, b2_turn=rec.get("b2_turn"))
         avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
                                       rec.get("b2_open"), rec.get("pre3_pct"))
         sealed = bool(cols["is_lim"][i])
