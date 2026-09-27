@@ -95,5 +95,5 @@ def ledger(trade_date: date | None = Query(default=None, alias="date"),
 
 @router.get("/rules", response_model=None)
 def rules():
-    """规则契约:链式七方案(A1~D2)规则 + 回避清单 + 留档 + 风险声明 + 同花顺条件。"""
+    """规则契约:打板口诀卡九条(A1~E3,hpr-v4.0)规则 + 回避清单 + 留档 + 风险声明 + 同花顺条件。"""
     return ok(service.get_rules())

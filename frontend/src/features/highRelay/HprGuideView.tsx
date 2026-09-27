@@ -7,23 +7,25 @@ import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsBu
 
 const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   pool: { badge: "bg-primary/15 text-primary", label: "池" },
+  A: { badge: "bg-rise/15 text-rise", label: "A组" },
   A1: { badge: "bg-rise/15 text-rise", label: "A1" },
-  A2: { badge: "bg-emerald-500/15 text-emerald-500", label: "A2" },
-  A3: { badge: "bg-teal-500/15 text-teal-500", label: "A3" },
+  A2: { badge: "bg-teal-500/15 text-teal-500", label: "A2" },
+  B: { badge: "bg-amber-500/15 text-amber-500", label: "B组" },
   B1: { badge: "bg-amber-500/15 text-amber-500", label: "B1" },
   B2: { badge: "bg-yellow-500/15 text-yellow-500", label: "B2" },
-  C1: { badge: "bg-primary/15 text-primary", label: "C1" },
-  C2: { badge: "bg-sky-500/15 text-sky-500", label: "C2" },
-  D1: { badge: "bg-orange-500/15 text-orange-500", label: "D1" },
-  D2: { badge: "bg-violet-500/15 text-violet-500", label: "D2" },
-  D3: { badge: "bg-fuchsia-500/15 text-fuchsia-500", label: "D3" },
+  B3: { badge: "bg-emerald-500/15 text-emerald-500", label: "B3" },
+  B4: { badge: "bg-orange-500/15 text-orange-500", label: "B4" },
+  E: { badge: "bg-primary/15 text-primary", label: "E组" },
+  E1: { badge: "bg-primary/15 text-primary", label: "E1" },
+  E2: { badge: "bg-sky-500/15 text-sky-500", label: "E2" },
+  E3: { badge: "bg-fuchsia-500/15 text-fuchsia-500", label: "E3" },
   avoid: { badge: "bg-fall/15 text-fall", label: "回避" },
   time: { badge: "bg-primary/15 text-primary", label: "时间" },
   buy: { badge: "bg-rise/15 text-rise", label: "买" },
   sell: { badge: "bg-amber-500/15 text-amber-500", label: "卖" },
 };
 
-const POINT_ORDER = ["A1", "A2", "A3", "B1", "B2", "C1", "C2", "D1", "D2", "D3"] as const;
+const POINT_ORDER = ["A1", "A2", "B1", "B2", "B3", "B4", "E1", "E2", "E3"] as const;
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
 export function HprGuideView() {
@@ -43,7 +45,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            连板链十方案(A1~D3)全市场验证(2023-03 ~ 2026-09);每条件都有分年证据,见研究文档
+            打板口诀卡九条(hpr-v4.0 合体定稿)全市场验证(2023-03 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
           </span>
           <span className="ml-auto flex items-center gap-2">
             {POINT_ORDER.map((pk) => (
@@ -60,17 +62,20 @@ export function HprGuideView() {
       <section className="rounded-lg border p-4">
         <div className="mb-2 text-sm font-semibold">一句话</div>
         <p className="text-sm leading-6 text-muted-foreground">
-          昨天恰好 2 连板或 3 连板的票,今天冲第 N+1 板时按涨停价打板买入;
-          十种链式形态才出手:A1双低贴零、A2平启贴零、A3一字急锁缓启(二接三阳),
-          B1强强活跃温开、B2低洗走强(二接三阴),C1放量高板低吸、C2双一字确认(三接四阳),
-          D1低板转强、D2低洗平推、D3贴零温开(三接四阴);
-          链条件收盘后可知,今天开档竞价定型对照,触板即打(开盘≥9.5%顶格不命中);
-          炸板当天收盘走,封住拿到断板(15日兜底)。不挑就买是亏的(对照 -1.33),其余一概不碰。
+          昨天恰好 2 连板或 3 连板的票,今天冲第 N+1 板;九句口诀才出手——
+          速查树只问一句「二板开在哪个档」:贴零(&lt;1)→阳打今开6~9.5锁换手(A1双平贴零),
+          一字(≥9.5)→阳打今开7~8.5(A2一字转强),高开(3~7)→等今天弱开&lt;3阴阳都打(B3冒泡转弱),
+          强开(7~8.5)→阴打今开6~9.5(B4冒泡转强)或温开3~5强强链(B1强转弱),全低链→今天也低开小仓(B2三低);
+          打四板不用记形态:三板换手10~20+今开5~9.5直接打(E1四板便捷,不分阴阳),
+          三板高开5~7等今天低开低吸(E2),二板贴零今天温开3~6(E3);
+          换手心法:二接三看二板换手(阳锁阴活),三接四看三板换手,一板换手永远不用看;
+          触板即打(开盘≥9.5%顶格不命中);炸板当天收盘走,封住拿到断板(15日兜底)。
+          合计164笔 胜71% 均+8.13,月均3.8笔;不挑就买是亏的,其余一概不碰。
         </p>
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">同花顺动态板块条件(盘前池 × 链式十方案)</div>
+        <div className="mb-2 text-sm font-semibold">同花顺动态板块条件(盘前池 × 九条口诀)</div>
         <div className="space-y-3">
           {POINT_ORDER.map((pk) => (
             <div key={pk}>

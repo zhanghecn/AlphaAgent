@@ -40,33 +40,31 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-/** 链式十方案硬编码映射(A=二接三阳 B=二接三阴 C=三接四阳 D=三接四阴)。 */
+/** 打板口诀卡九条硬编码映射(hpr-v4.0;A=二接三阳 B=二接三阴 E=三接四,B3阴阳都打/E1不分)。 */
 const POINT_BADGES: Record<string, { label: string; full: string; className: string }> = {
-  A1: { label: "A1", full: "A1 双低贴零(二接三阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
-  A2: { label: "A2", full: "A2 平启贴零(二接三阳)", className: "bg-emerald-500/15 text-emerald-500" },
-  A3: { label: "A3", full: "A3 一字急锁缓启(二接三阳)", className: "bg-teal-500/15 text-teal-500" },
-  B1: { label: "B1", full: "B1 强强活跃温开(二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
-  B2: { label: "B2", full: "B2 低洗走强(二接三阴)", className: "bg-yellow-500/15 text-yellow-500" },
-  C1: { label: "C1", full: "C1 放量高板低吸(三接四阳)", className: "bg-primary/15 text-primary" },
-  C2: { label: "C2", full: "C2 双一字确认(三接四阳)", className: "bg-sky-500/15 text-sky-500" },
-  D1: { label: "D1", full: "D1 低板转强(三接四阴)", className: "bg-orange-500/15 text-orange-500" },
-  D2: { label: "D2", full: "D2 低洗平推(三接四阴)", className: "bg-violet-500/15 text-violet-500" },
-  D3: { label: "D3", full: "D3 贴零温开(三接四阴)", className: "bg-fuchsia-500/15 text-fuchsia-500" },
+  A1: { label: "A1", full: "A1 双平贴零(二接三阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
+  A2: { label: "A2", full: "A2 一字转强(二接三阳)", className: "bg-teal-500/15 text-teal-500" },
+  B1: { label: "B1", full: "B1 强转弱(二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
+  B2: { label: "B2", full: "B2 三低(二接三阴)", className: "bg-yellow-500/15 text-yellow-500" },
+  B3: { label: "B3", full: "B3 冒泡转弱(二接三,阴阳都打)", className: "bg-emerald-500/15 text-emerald-500" },
+  B4: { label: "B4", full: "B4 冒泡转强(二接三阴)", className: "bg-orange-500/15 text-orange-500" },
+  E1: { label: "E1", full: "E1 四板便捷(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
+  E2: { label: "E2", full: "E2 高开低吸(三接四阳)", className: "bg-sky-500/15 text-sky-500" },
+  E3: { label: "E3", full: "E3 贴零温开(三接四阴)", className: "bg-fuchsia-500/15 text-fuchsia-500" },
 };
 
-const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "C1", "C2", "D1", "D2", "D3"] as const;
+const POINT_KEYS = ["A1", "A2", "B1", "B2", "B3", "B4", "E1", "E2", "E3"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
-  A2: "text-emerald-500",
-  A3: "text-teal-500",
+  A2: "text-teal-500",
   B1: "text-amber-500",
   B2: "text-yellow-500",
-  C1: "text-primary",
-  C2: "text-sky-500",
-  D1: "text-orange-500",
-  D2: "text-violet-500",
-  D3: "text-fuchsia-500",
+  B3: "text-emerald-500",
+  B4: "text-orange-500",
+  E1: "text-primary",
+  E2: "text-sky-500",
+  E3: "text-fuchsia-500",
 };
 
 export function HprLiveView({

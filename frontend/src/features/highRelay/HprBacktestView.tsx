@@ -10,33 +10,31 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const POINTS = ["A1", "A2", "A3", "B1", "B2", "C1", "C2", "D1", "D2", "D3"] as const;
+const POINTS = ["A1", "A2", "B1", "B2", "B3", "B4", "E1", "E2", "E3"] as const;
 const POINT_SHORT: Record<string, string> = {
-  A1: "A1 双低贴零",
-  A2: "A2 平启贴零",
-  A3: "A3 一字急锁缓启",
-  B1: "B1 强强活跃温开",
-  B2: "B2 低洗走强",
-  C1: "C1 放量高板低吸",
-  C2: "C2 双一字确认",
-  D1: "D1 低板转强",
-  D2: "D2 低洗平推",
-  D3: "D3 贴零温开",
+  A1: "A1 双平贴零",
+  A2: "A2 一字转强",
+  B1: "B1 强转弱",
+  B2: "B2 三低",
+  B3: "B3 冒泡转弱",
+  B4: "B4 冒泡转强",
+  E1: "E1 四板便捷",
+  E2: "E2 高开低吸",
+  E3: "E3 贴零温开",
   A级: "仅A级",
   all: "方案合计",
   miss: "未命中对照",
 };
 const POINT_TONE: Record<string, string> = {
   A1: "stroke-rise",
-  A2: "stroke-emerald-500",
-  A3: "stroke-teal-500",
+  A2: "stroke-teal-500",
   B1: "stroke-amber-500",
   B2: "stroke-yellow-500",
-  C1: "stroke-primary",
-  C2: "stroke-sky-500",
-  D1: "stroke-orange-500",
-  D2: "stroke-violet-500",
-  D3: "stroke-fuchsia-500",
+  B3: "stroke-emerald-500",
+  B4: "stroke-orange-500",
+  E1: "stroke-primary",
+  E2: "stroke-sky-500",
+  E3: "stroke-fuchsia-500",
 };
 const SUMMARY_KEYS = [...POINTS, "A级", "all", "miss"] as const;
 
@@ -229,7 +227,7 @@ export function HprBacktestView({
           </table>
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          提示:十点合计 95 笔胜率 79%/+8.84,分年 23~26 年 77%/76%/80%/84% 全正;
+          提示:九条合计 168 笔胜率 71%/+8.27,覆盖 39/43 个月月均 3.8 笔;2024 年偏弱(59%)注意仓位;
           A1/B2 加换手窗后 2024/2025 年样本空白,方案可靠性来自四组方向一致性;轻仓执行。
         </p>
       </section>

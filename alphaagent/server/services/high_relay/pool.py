@@ -206,16 +206,18 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
 
 
 def tag_point(group4: str, b1_open, b2_open, b3_open,
-              auction_pct=None, b2_turn=None) -> str:
-    """链式十方案打标(与 汇总/连板链组合总结.md 口径一致)。
-    chain = 数值区间半开[lo,hi);vol2 = 二板换手率窗(缺数据视为不命中带换手窗的点);
+              auction_pct=None, b2_turn=None, b3_turn=None) -> str:
+    """打板口诀卡九条打标(hpr-v4.0,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
+    chain = 数值区间半开[lo,hi);vol2/vol3 = 二板/三板换手率窗(缺数据不命中带窗点);
+    vol2_when_b1_low = A2 条件换手(一板<3 板弱时二板一字须换手<5,假锁排除);
+    group4 支持 tuple:B3 冒泡转弱阴阳都打,E1 四板便捷不分阴阳;
     auction_pct = 今天开盘 %(池计算时未知传 None → 只按链条件打候选标,
     今天开窗由盘中扫描/回测复核;≥9.5 顶格一律不命中)。"""
     c = contracts
     if auction_pct is not None and auction_pct >= c.TODAY_CAP:
         return "—"
     for s in c.SCHEMES:
-        if s["group4"] != group4:
+        if group4 not in s["group4"]:
             continue
         ok = True
         for rng, val in zip(s["chain"], (b1_open, b2_open, b3_open), strict=False):
@@ -230,10 +232,21 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
         if vol is not None and (b2_turn is None
                                 or not (vol[0] <= b2_turn < vol[1])):
             continue
+        v2wl = s.get("vol2_when_b1_low")
+        if v2wl is not None and b1_open is not None and b1_open < c.CHAIN_FLAT_HI:
+            if b2_turn is None or not (v2wl[0] <= b2_turn < v2wl[1]):
+                continue
+        vol3 = s.get("vol3")
+        if vol3 is not None and (b3_turn is None
+                                 or not (vol3[0] <= b3_turn < vol3[1])):
+            continue
         if auction_pct is None:
             return str(s["no"])
         lo, hi = s["today"]
-        return str(s["no"]) if lo <= auction_pct < hi else "—"
+        # v4.0 链区间存在包含关系(E1 链全不限/B1 含 B4 的二板段):
+        # 链过但今开不在窗 → 继续尝试后面的方案,不能提前返回 —
+        if lo <= auction_pct < hi:
+            return str(s["no"])
     return "—"
 
 
@@ -310,7 +323,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         yang = bool(rec["foundation_yang"])
         group4 = ("二接三" if n_board == 2 else "三接四") + ("阳" if yang else "阴")
         point = tag_point(group4, rec.get("b1_open"), rec.get("b2_open"),
-                          rec.get("b3_open"), b2_turn=rec.get("b2_turn"))
+                          rec.get("b3_open"), b2_turn=rec.get("b2_turn"),
+                          b3_turn=rec.get("b3_turn"))
         avoid = static_avoid(point, group4, rec.get("b1_open"),
                              rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid
