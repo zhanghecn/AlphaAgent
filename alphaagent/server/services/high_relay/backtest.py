@@ -172,9 +172,10 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             exit_idx = i + MAX_K
             capped = True
         unfinished = exit_e0 != exit_e0
-        # E3 退出价(v4.1 起)= 退出日(最高+最低)/2 中间价(主人2026-09-28拍板):
-        # 卖出日多为冲高回落(断板/炸板),机械收盘卖系统性贴低点,中间价更接近
-        # 现实可达成成交价;炸板→当天中间价(break_day_close),封住→断板日中间价
+        # E3 退出价(v4.2 起,T+1 合规,主人点名利通电子案例):
+        # 封住→断板日中间价(持有超一天,T+1 已过,可卖);
+        # 炸板→当天买入卖不了,次日中间价走;次日一字跌停锁死(高=低=全天一个价)
+        # 顺延到首个开板日中间价。v4.1 及以前的「炸板当天走」物理上不可能。
         if sealed:
             if hold_days is not None:
                 e3h = bars[f"n{hold_days}_high"].iat[i]
@@ -186,9 +187,23 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             else:  # 数据尾部未完(封住但后续日线未出):保持 NaN/None
                 exit_e3, e3_date, e3_reason = np.nan, None, None
         else:
-            exit_e3 = (float(bars["high_price"].iat[i])
-                       + float(bars["low_price"].iat[i])) / 2
-            e3_date, e3_reason = i, "break_day_close"
+            exit_e3, e3_date, e3_reason = np.nan, None, None
+            prev_c = float(cols["close_price"][i])
+            for k in range(1, MAX_K + 1):
+                ko = float(bars[f"n{k}_open"].iat[i])
+                kc = float(bars[f"n{k}_close"].iat[i])
+                if kc != kc:
+                    break
+                kh = float(bars[f"n{k}_high"].iat[i])
+                kl = float(bars[f"n{k}_low"].iat[i])
+                locked = ko == kc == kh == kl and (kc / prev_c - 1) <= -0.095
+                prev_c = kc
+                if locked:
+                    continue  # 一字跌停锁死:排队也卖不掉,顺延
+                exit_e3 = (kh + kl) / 2
+                e3_date = i + k
+                e3_reason = "break_day_close"
+                break
         e3_exit_date = None
         if not unfinished and e3_date is not None:
             e3_exit_date = pd.Timestamp(bars["trade_date"].iat[e3_date]).date().isoformat()
@@ -213,6 +228,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "E3退出日": e3_exit_date,
             "E3退出价": round(float(exit_e3), 3) if not unfinished else None,
             "E3原因": e3_reason if not unfinished else None,
+            "_e3_exit_i": e3_date,  # E3 退出日在 bars 中的行号(答题切K线窗/持有天数用)
             "持有天数": hold_days,
             "未完": unfinished,
             "地基涨跌%": rec["foundation_chg"],

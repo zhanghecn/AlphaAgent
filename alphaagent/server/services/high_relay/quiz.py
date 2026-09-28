@@ -5,9 +5,9 @@
   miss 口径一致。q4 起顶格票(今开≥9.5)不再出题:一字开盘排队也买不到,「买」这个
   选项现实中不存在,上千道送分废题只会稀释训练(主人2026-09-28拍板:「一字不是选
   不了么」);「开盘≥9.5一律不打」作为硬规则留在规则页,不占用题目。
-- 收益 = E3%(产品卖出纪律:炸板当日走/封住→断板,15日兜底;v4.1起退出价=
-  退出日(最高+最低)/2中间价——主人拍板:卖出日多冲高回落,中间价更接近现实可达成
-  成交价),与交割单同口径;E2/B2 低吸类回测统一按触板价买入计(实盘低开买成本更低)。
+- 收益 = E3%(产品卖出纪律,T+1合规:炸板→次日走(一字跌停顺延),封住→断板日,15日兜底;
+  退出价=退出日(最高+最低)/2中间价——主人拍板:卖出日多冲高回落,中间价更接近现实
+  可达成成交价),与交割单同口径;E2/B2 低吸类回测统一按触板价买入计(实盘低开买成本更低)。
 - K线 = 未复权日线(与回测同口径,除权日可见跳空,题卡页脚注明)。
 
 版本纪律:讲解文案/题库结构变更必升 QUIZ_CONTENT_VERSION;版本串进表/进API/进前端
@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 5  # 讲解文案/题库结构变更必升(v5:E3退出价改中间价判分全变+题目加盘中最高显示)
+QUIZ_CONTENT_VERSION = 6  # 讲解文案/题库结构变更必升(v6:T+1修复——炸板次日中间价卖+顺延,持有天数改E3口径)
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -65,8 +65,10 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
         first = i - int(b_pos[i])               # 该票首行 iloc(防跨票切窗)
         before = [_bar(j) for j in range(max(first, i - BARS_BEFORE), i)]
         sealed = bool(r["封住"])
-        hold = r["持有天数"]
-        exit_off = int(hold) if sealed and hold == hold else 0
+        # 揭示K线窗与持有天数按 E3 口径(v4.2,T+1):炸板=次日(一字跌停顺延),
+        # 封住=断板日;不再用 E0 持有天数(曾致「炸板当日卖」却显示持有2天的矛盾)
+        e3i = r["_e3_exit_i"]
+        exit_off = int(e3i) - i if e3i is not None and e3i == e3i else 0
         after = [_bar(j) for j in range(i, i + exit_off + 1)]
 
         point = str(r["方案点"])
@@ -114,7 +116,7 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                     buy_open=buy_open, pre20_pct=pre20),
             }
 
-        hold_days = int(hold) if hold == hold and hold is not None else None
+        hold_days = exit_off  # E3 口径持有交易日数(炸板=1,顺延>1,封住=到断板)
         payload = {
             "seq": int(r["seq"]),
             "vt_symbol": str(r["代码"]),
