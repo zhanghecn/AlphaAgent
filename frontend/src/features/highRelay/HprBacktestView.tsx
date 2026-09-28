@@ -10,17 +10,15 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const POINTS = ["A1", "A2", "B1", "B2", "B3", "B4", "E1", "E2", "E3"] as const;
+const POINTS = ["A1", "A2", "B1", "B2", "B4", "E1", "E2"] as const;  // v4.4 七条(B3/E3退休)
 const POINT_SHORT: Record<string, string> = {
   A1: "A1 双平贴零",
   A2: "A2 一字转强",
   B1: "B1 强转弱",
-  B2: "B2 三低",
-  B3: "B3 冒泡转弱",
+  B2: "B2 弱开系",
   B4: "B4 冒泡转强",
   E1: "E1 四板便捷",
-  E2: "E2 高开低吸",
-  E3: "E3 贴零温开",
+  E2: "E2 四板捡漏",
   A级: "仅A级",
   all: "方案合计",
   miss: "未命中对照",
@@ -30,11 +28,9 @@ const POINT_TONE: Record<string, string> = {
   A2: "stroke-teal-500",
   B1: "stroke-amber-500",
   B2: "stroke-yellow-500",
-  B3: "stroke-emerald-500",
   B4: "stroke-orange-500",
   E1: "stroke-primary",
   E2: "stroke-sky-500",
-  E3: "stroke-fuchsia-500",
 };
 const SUMMARY_KEYS = [...POINTS, "A级", "all", "miss"] as const;
 
@@ -79,7 +75,7 @@ export function HprBacktestView({
           <span>生成于 {formatGeneratedAt(report.generated_at)}</span>
         </div>
         <p>{report.caliber}</p>
-        <p className="mt-1">E0 = 持有到首次断板日收盘(研究主算法/锚点口径);E3 = 炸板当日收盘走、封住→E0(产品卖出纪律);胜率 = 次日收盘收益≥0(好票率)。</p>
+        <p className="mt-1">E0 = 持有到首次断板日收盘(研究主算法/锚点口径);E3 = 炸板次日走(T+1)/封住→断板日,退出价=max(收盘,(高+低)/2)(产品卖出纪律);胜率 = 次日收盘收益≥0(好票率)。</p>
       </section>
 
       <section className="grid gap-3 md:grid-cols-3">
@@ -97,7 +93,7 @@ export function HprBacktestView({
 
       <section className="rounded-lg border p-4" aria-label="执行口径">
         <div className="mb-2 flex flex-wrap items-center gap-x-3">
-          <span className="text-sm font-semibold">执行口径:E0(持有到断板) vs E3(炸板当日走)</span>
+          <span className="text-sm font-semibold">执行口径:E0(持有到断板收盘) vs E3(T+1合规,退出价max(收盘,中间价))</span>
           <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
             实盘口径
           </span>

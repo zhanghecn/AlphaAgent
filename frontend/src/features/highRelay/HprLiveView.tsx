@@ -40,20 +40,18 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-/** 打板口诀卡九条硬编码映射(hpr-v4.0;A=二接三阳 B=二接三阴 E=三接四,B3阴阳都打/E1不分)。 */
+/** 打板口诀卡七条硬编码映射(hpr-v4.4;A=二接三阳 B=二接三阴 E=三接四,弱开系冒泡分支阴阳都打/E1不分)。 */
 const POINT_BADGES: Record<string, { label: string; full: string; className: string }> = {
   A1: { label: "A1", full: "A1 双平贴零(二接三阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
   A2: { label: "A2", full: "A2 一字转强(二接三阳)", className: "bg-teal-500/15 text-teal-500" },
   B1: { label: "B1", full: "B1 强转弱(二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
-  B2: { label: "B2", full: "B2 三低(二接三阴)", className: "bg-yellow-500/15 text-yellow-500" },
-  B3: { label: "B3", full: "B3 冒泡转弱(二接三,阴阳都打)", className: "bg-emerald-500/15 text-emerald-500" },
+  B2: { label: "B2", full: "B2 弱开系(捡尸/冒泡洗盘,今开<3)", className: "bg-yellow-500/15 text-yellow-500" },
   B4: { label: "B4", full: "B4 冒泡转强(二接三阴)", className: "bg-orange-500/15 text-orange-500" },
   E1: { label: "E1", full: "E1 四板便捷(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
-  E2: { label: "E2", full: "E2 高开低吸(三接四阳)", className: "bg-sky-500/15 text-sky-500" },
-  E3: { label: "E3", full: "E3 贴零温开(三接四阴)", className: "bg-fuchsia-500/15 text-fuchsia-500" },
+  E2: { label: "E2", full: "E2 四板捡漏(低开吸/贴零温开)", className: "bg-sky-500/15 text-sky-500" },
 };
 
-const POINT_KEYS = ["A1", "A2", "B1", "B2", "B3", "B4", "E1", "E2", "E3"] as const;
+const POINT_KEYS = ["A1", "A2", "B1", "B2", "B4", "E1", "E2"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
