@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 11  # v11:阴组二板一字专门讲解(一字≠强开)+口诀文案去黑话
+QUIZ_CONTENT_VERSION = 12  # v12:口诀换行结构化(一板/二板/今天开一行一条)+按阴阳×二板档排序
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
