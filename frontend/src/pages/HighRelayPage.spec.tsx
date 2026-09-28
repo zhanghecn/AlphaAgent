@@ -307,7 +307,11 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
     b2_turn: 28.8, b3_turn: null, pre20_pct: 20.0, auction_pct: 4.16,
     prev_close: 15.0, limit_price: 16.5, decision_open: 15.62, chain: "实体→一字",
   },
-  bars_before: [{ d: "2024-11-12", o: 14, h: 15, l: 13.5, c: 15, v: 1000 }],
+  bars_before: [
+    { d: "2024-11-08", o: 13.2, h: 13.5, l: 12.9, c: 13.0, v: 800 },  // 地基日 阴(c<o)
+    { d: "2024-11-11", o: 13.0, h: 14.3, l: 12.9, c: 14.3, v: 1500 },  // 一板
+    { d: "2024-11-12", o: 14, h: 15, l: 13.5, c: 15, v: 1000 },        // 二板
+  ],
   bars_after: [{ d: "2024-11-13", o: 15.62, h: 16.5, l: 15.3, c: 16.5, v: 3000 }],
   answer: {
     point: "B1", should_buy: true, ret_pct: 93.07, buy_price: 16.5,
@@ -333,7 +337,12 @@ const QUIZ_MISS_Q: HprQuizQuestion = {
     b2_turn: 10.1, b3_turn: 1.1, pre20_pct: 4.4, auction_pct: 9.98,
     prev_close: 20.0, limit_price: 22.0, decision_open: 22.0, chain: "实体→一字→一字",
   },
-  bars_before: [{ d: "2024-11-28", o: 18, h: 20, l: 17.5, c: 20, v: 2000 }],
+  bars_before: [
+    { d: "2024-11-25", o: 16.0, h: 16.8, l: 15.9, c: 16.6, v: 900 },   // 地基日 阳(c>o)
+    { d: "2024-11-26", o: 16.6, h: 18.3, l: 16.5, c: 18.3, v: 1400 },  // 一板
+    { d: "2024-11-27", o: 18.0, h: 20.0, l: 17.8, c: 20.0, v: 1800 },  // 二板
+    { d: "2024-11-28", o: 18, h: 20, l: 17.5, c: 20, v: 2000 },        // 三板
+  ],
   bars_after: [{ d: "2024-11-29", o: 22.0, h: 22.0, l: 21.5, c: 21.13, v: 5000 }],
   answer: {
     point: "—", should_buy: false, ret_pct: -5.64, buy_price: 22.0,
@@ -377,6 +386,10 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("+4.2");
     expect(html).toContain("买入");
     expect(html).toContain("不买");
+    // 阴阳组判定依据亮出:地基日格 + 徽标写全「·阴地基」(主人点名:阴阳不像正常逻辑)
+    expect(html).toContain("二接三·阴地基");
+    expect(html).toContain("地基日 11-08");
+    expect(html).toContain("阴地基");
     // 板位勾选:默认只勾打3板(本轮1题),打4板 chip 未选中可勾
     expect(html).toContain("第 1/1 题");
     expect(html).toContain("✓ 打3板 0/1");

@@ -203,6 +203,12 @@ export function QuizRunner({
 
   const d = question.display;
   const a = question.answer;
+  // 地基日 = 首板前一天(bars_before 倒数第 n_board+1 根):阴阳组的判定依据——
+  // 阴地基=启动前还在跌/洗盘,阳地基=前一天已在涨的顺势加速;亮出来对照K线(主人点名)
+  const fBar =
+    question.bars_before.length > question.n_board
+      ? question.bars_before[question.bars_before.length - (question.n_board + 1)]
+      : null;
   // 匿名题干不带题号(乱序后题号无意义,防按序号背答案)
   const title = showName
     ? `${question.name} ${question.vt_symbol.split(".")[0]}`
@@ -271,7 +277,9 @@ export function QuizRunner({
           <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary">
             {d.board_label}
           </span>
-          <span className="text-xs text-muted-foreground">{question.group4}</span>
+          <span className="text-xs text-muted-foreground">
+            {question.group4.replace(/(阴|阳)$/, "·$1地基")}
+          </span>
           {!showName ? (
             <span className="ml-auto text-[11px] text-muted-foreground">
               匿名模式（答完揭示票名）
@@ -294,7 +302,14 @@ export function QuizRunner({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 lg:grid-cols-7">
+          {fBar ? (
+            <InfoCell
+              label={`地基日 ${fBar.d.slice(5)}`}
+              value={fmtSigned(Math.round((fBar.c / fBar.o - 1) * 1000) / 10)}
+              extra={fBar.c >= fBar.o ? "阳地基" : "阴地基"}
+            />
+          ) : null}
           <InfoCell label="一板开" value={fmtSigned(d.b1_open)} />
           <InfoCell
             label="二板开"
