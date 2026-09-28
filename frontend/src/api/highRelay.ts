@@ -403,9 +403,11 @@ export function fetchHprQuizQuestions(month: string) {
   );
 }
 
-// 综合挑战卷(主人定 2026-09-28):七条口诀每条随机2道好票+21道陷阱差票
+// 综合挑战卷(主人定 2026-09-28):六条口诀每条随机2道好票+21道陷阱差票
 // (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序;
+// year 指定=只在该年抽(按年份练市场环境,单年池不足的口诀有多少抽多少);
 // 结构与月题一致(month 缺省),进度与月题共享(同一题 key)。
-export function fetchHprQuizMixed() {
-  return apiClient.get<HprQuizQuestionsPayload>("/high-relay/quiz/mixed");
+export function fetchHprQuizMixed(year?: string) {
+  const query = year ? `?year=${encodeURIComponent(year)}` : "";
+  return apiClient.get<HprQuizQuestionsPayload>(`/high-relay/quiz/mixed${query}`);
 }

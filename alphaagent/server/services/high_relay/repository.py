@@ -348,16 +348,18 @@ def quiz_bank_status() -> dict[str, object]:
     return {"rules_versions": [str(v) for v in versions], "count": int(count)}
 
 
-def load_quiz_mix_projection() -> list[dict[str, object]]:
+def load_quiz_mix_projection(year: str | None = None) -> list[dict[str, object]]:
     """综合挑战卷抽题投影:[{decision_date, vt_symbol, point, trap_kind}](轻量,
-    trap_kind 从 payload.explain JSON 抽取,命中题为 NULL→None;不读K线大字段)。"""
+    trap_kind 从 payload.explain JSON 抽取,命中题为 NULL→None;不读K线大字段)。
+    year 非空时只抽该年(主人定:按年份练市场环境,2023熊尾/2024牛市/2025-26结构牛)。"""
     schema.ensure_schema_once(get_engine())
     t = schema.hpr_quiz_questions
+    stmt = select(t.c.decision_date, t.c.vt_symbol, t.c.point,
+                  t.c.payload["explain"]["trap_kind"].astext.label("trap_kind"))
+    if year:
+        stmt = stmt.where(t.c.year == year)
     with session_scope() as session:
-        rows = session.execute(
-            select(t.c.decision_date, t.c.vt_symbol, t.c.point,
-                   t.c.payload["explain"]["trap_kind"].astext.label("trap_kind"))
-        ).mappings().all()
+        rows = session.execute(stmt).mappings().all()
     return [dict(r) for r in rows]
 
 

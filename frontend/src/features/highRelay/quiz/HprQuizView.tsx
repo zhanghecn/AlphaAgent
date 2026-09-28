@@ -32,7 +32,9 @@ export function HprQuizView() {
   const [year, setYear] = useState<string | null>(null);
   const [month, setMonth] = useState<string | null>(null);
   // 综合挑战卷:nonce=null 未进卷;每点一次「开始挑战」+1 → queryKey 变 →
-  // 强制重新随机抽题(禁缓存,主人要每次重抽不重样)
+  // 强制重新随机抽题(禁缓存,主人要每次重抽不重样);mixYear=null 全库,
+  // 指定年=只在该年抽(主人定:按年份练市场环境)
+  const [mixYear, setMixYear] = useState<string | null>(null);
   const [mixedNonce, setMixedNonce] = useState<number | null>(null);
   const [showName, setShowName] = useState(false);
   const [answers, setAnswers] = useState<Record<string, QuizAnswerRec>>({});
@@ -55,8 +57,8 @@ export function HprQuizView() {
   });
 
   const mixedQuery = useQuery({
-    queryKey: ["hprQuizMixed", mixedNonce],
-    queryFn: fetchHprQuizMixed,
+    queryKey: ["hprQuizMixed", mixedNonce, mixYear],
+    queryFn: () => fetchHprQuizMixed(mixYear ?? undefined),
     enabled: mixedNonce != null,
     staleTime: 0,
     gcTime: 0,
@@ -172,7 +174,7 @@ export function HprQuizView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold text-primary">综合挑战卷</span>
           <span className="text-xs text-muted-foreground">
-            七条口诀各抽 2 道好票 + 21 道陷阱票（阴阳反串／形态接近／毒段），共 35 题——
+            六条口诀各抽 2 道好票 + 21 道陷阱票（阴阳反串／形态接近／毒段）——
             每卷练全所有口诀，认熟「看着像但不能打」的票；每次进入重新随机抽题。
           </span>
           <button
@@ -182,6 +184,19 @@ export function HprQuizView() {
           >
             开始挑战
           </button>
+        </div>
+        {/* 年份筛选(主人定):选年=只在该年抽题练该年市场环境;单年某口诀不足2道有多少抽多少 */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] text-muted-foreground">抽题范围</span>
+          <MixYearChip label="全部年份" active={mixYear == null} onClick={() => setMixYear(null)} />
+          {years.map((y) => (
+            <MixYearChip
+              key={y.year}
+              label={`${y.year}年`}
+              active={mixYear === y.year}
+              onClick={() => setMixYear(y.year)}
+            />
+          ))}
         </div>
       </section>
 
@@ -209,6 +224,31 @@ export function HprQuizView() {
         K线未复权；主力心理为事后合理解释而非实证。题库版本 {rulesVersion}。
       </p>
     </div>
+  );
+}
+
+function MixYearChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "rounded-md border px-2.5 py-0.5 text-[11px]",
+        active
+          ? "border-primary bg-primary/10 font-semibold text-primary"
+          : "text-muted-foreground hover:bg-muted/40",
+      )}
+      onClick={onClick}
+    >
+      {label}
+    </button>
   );
 }
 
