@@ -41,10 +41,10 @@ const TIER_STYLES: Record<string, string> = {
 };
 
 const EXIT_REASON_LABELS: Record<string, string> = {
-  break_day_close: "炸板次日·中间价卖",
-  next_close_fail: "次日未涨停·中间价卖",
-  break_close: "断板日·中间价卖",
-  max_hold_close: "15日兜底·中间价卖",
+  break_day_close: "炸板次日卖",
+  next_close_fail: "次日未涨停卖",
+  break_close: "断板日卖",
+  max_hold_close: "15日兜底卖",
 };
 
 type Board = 2 | 3;

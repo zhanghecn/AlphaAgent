@@ -469,7 +469,7 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("主力怎么想");
     expect(html).toContain("典型样例");            // case_note
     expect(html).toContain("落在窗3~5");           // matched_line
-    expect(html).toContain("断板日·中间价卖");      // 退出原因(v4.1中间价口径)
+    expect(html).toContain("断板日卖");              // 退出原因(v4.3:max(收盘,中间价))
   });
 
   it("已答未命中题(拒对):避免理由列表+段末入口", () => {

@@ -172,15 +172,15 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             exit_idx = i + MAX_K
             capped = True
         unfinished = exit_e0 != exit_e0
-        # E3 退出价(v4.2 起,T+1 合规,主人点名利通电子案例):
-        # 封住→断板日中间价(持有超一天,T+1 已过,可卖);
-        # 炸板→当天买入卖不了,次日中间价走;次日一字跌停锁死(高=低=全天一个价)
-        # 顺延到首个开板日中间价。v4.1 及以前的「炸板当天走」物理上不可能。
+        # E3 退出价(v4.3 起)= max(退出日收盘, (退出日高+低)/2)(主人2026-09-28拍板):
+        # 中间价保底,收盘更高按实际收盘算(尾盘卖出≈收盘价,可执行不吃亏);
+        # 判别器不稀释(口诀-miss均收差9.58→9.77)。v4.2=T+1:封住→断板日,
+        # 炸板→次日(当天卖不了),一字跌停锁死(高=低全天一价)顺延首个开板日。
         if sealed:
             if hold_days is not None:
                 e3h = bars[f"n{hold_days}_high"].iat[i]
                 e3l = bars[f"n{hold_days}_low"].iat[i]
-                exit_e3 = (float(e3h) + float(e3l)) / 2
+                exit_e3 = max(float(exit_e0), (float(e3h) + float(e3l)) / 2)
                 e3_date = exit_idx
                 e3_reason = ("next_close_fail" if hold_days == 1 else
                              ("max_hold_close" if capped else "break_close"))
@@ -200,7 +200,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
                 prev_c = kc
                 if locked:
                     continue  # 一字跌停锁死:排队也卖不掉,顺延
-                exit_e3 = (kh + kl) / 2
+                exit_e3 = max(kc, (kh + kl) / 2)
                 e3_date = i + k
                 e3_reason = "break_day_close"
                 break
