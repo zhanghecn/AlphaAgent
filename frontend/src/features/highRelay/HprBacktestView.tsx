@@ -14,9 +14,8 @@ const POINTS = ["A1", "A2", "B1", "B2", "B4", "E1", "E2"] as const;  // v4.4 七
 const POINT_SHORT: Record<string, string> = {
   A1: "A1 双平贴零",
   A2: "A2 一字转强",
-  B1: "B1 强转弱",
+  B1: "B1 强开系",
   B2: "B2 弱开系",
-  B4: "B4 冒泡转强",
   E1: "E1 四板便捷",
   E2: "E2 四板捡漏",
   A级: "仅A级",
@@ -28,7 +27,6 @@ const POINT_TONE: Record<string, string> = {
   A2: "stroke-teal-500",
   B1: "stroke-amber-500",
   B2: "stroke-yellow-500",
-  B4: "stroke-orange-500",
   E1: "stroke-primary",
   E2: "stroke-sky-500",
 };

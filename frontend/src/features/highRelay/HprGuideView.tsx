@@ -13,7 +13,6 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   B: { badge: "bg-amber-500/15 text-amber-500", label: "二接三阴" },
   B1: { badge: "bg-amber-500/15 text-amber-500", label: "B1" },
   B2: { badge: "bg-yellow-500/15 text-yellow-500", label: "B2" },
-  B4: { badge: "bg-orange-500/15 text-orange-500", label: "B4" },
   E: { badge: "bg-primary/15 text-primary", label: "三接四" },
   E1: { badge: "bg-primary/15 text-primary", label: "E1" },
   E2: { badge: "bg-sky-500/15 text-sky-500", label: "E2" },
@@ -24,7 +23,7 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
 };
 
 // 口诀卡顺序(主人定):阴阳分组,组内按二板开盘从低到高;与后端 RULES A/B/E 组序一致
-const POINT_ORDER = ["A1", "A2", "B2", "B4", "B1", "E1", "E2"] as const;
+const POINT_ORDER = ["A1", "A2", "B2", "B1", "E1", "E2"] as const;
 
 // 速查表(主人定 2026-09-28):只要「阴阳地基 → 二板开 → 今天开 → 附加」四列,
 // 数据注记不进表;文案与后端 contracts.RULES/SCHEMES desc 同步(改一边必须改另一边)
@@ -33,8 +32,8 @@ const CHEAT_ROWS: { name: string; yang: string; board: string; today: string; ex
   { name: "A2 一字转强", yang: "阳", board: "≥9.5一字", today: "7~8.5", extra: "一板<3时换手<5" },
   { name: "B2 弱开系·捡尸", yang: "阴", board: "<0或2~3", today: "<0", extra: "一板<0" },
   { name: "B2 弱开系·冒泡洗盘", yang: "阴阳", board: "3~7", today: "<3", extra: "一板≥7" },
-  { name: "B4 冒泡转强", yang: "阴", board: "7~8.5(一字不算)", today: "6~9.5", extra: "一板不限" },
-  { name: "B1 强转弱", yang: "阴", board: "≥7", today: "3~5", extra: "一板≥7·换手≥5" },
+  { name: "B1 强开系·转温", yang: "阴", board: "≥7", today: "3~5", extra: "一板≥7·换手≥5" },
+  { name: "B1 强开系·续强", yang: "阴", board: "7~8.5(一字不算)", today: "6~9.5", extra: "一板不限" },
   { name: "E1 四板便捷", yang: "不分", board: "三板换手10~20", today: "5~9.5", extra: "一字系:换手3~5·今开6~9.5" },
   { name: "E2 捡漏·低吸", yang: "阳", board: "三板5~7", today: "<0", extra: "低开直接买" },
   { name: "E2 捡漏·温开", yang: "阴", board: "二板<1", today: "3~6" },

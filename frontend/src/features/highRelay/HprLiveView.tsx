@@ -44,22 +44,19 @@ const EXIT_REASON_LABELS: Record<string, string> = {
 const POINT_BADGES: Record<string, { label: string; full: string; className: string }> = {
   A1: { label: "A1", full: "A1 双平贴零(二接三阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
   A2: { label: "A2", full: "A2 一字转强(二接三阳)", className: "bg-teal-500/15 text-teal-500" },
-  B1: { label: "B1", full: "B1 强转弱(二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
+  B1: { label: "B1", full: "B1 强开系(转温/续强,二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
   B2: { label: "B2", full: "B2 弱开系(捡尸/冒泡洗盘,今开<3)", className: "bg-yellow-500/15 text-yellow-500" },
-  B4: { label: "B4", full: "B4 冒泡转强(二接三阴)", className: "bg-orange-500/15 text-orange-500" },
   E1: { label: "E1", full: "E1 四板便捷(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
   E2: { label: "E2", full: "E2 四板捡漏(低开吸/贴零温开)", className: "bg-sky-500/15 text-sky-500" },
 };
 
-const POINT_KEYS = ["A1", "A2", "B1", "B2", "B4", "E1", "E2"] as const;
+const POINT_KEYS = ["A1", "A2", "B1", "B2", "E1", "E2"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
   A2: "text-teal-500",
   B1: "text-amber-500",
   B2: "text-yellow-500",
-  B3: "text-emerald-500",
-  B4: "text-orange-500",
   E1: "text-primary",
   E2: "text-sky-500",
   E3: "text-fuchsia-500",

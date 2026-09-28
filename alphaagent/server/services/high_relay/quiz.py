@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 13  # v13:口诀三行式(二板开/今天开/一板附加)+删全部数据注记黑话
+QUIZ_CONTENT_VERSION = 14  # v14:v5.0六条合体(B4并入B1强开系退休)+THS区统一心理文案
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -226,7 +226,7 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
         # 是锁仓没换手的另一形态,不是B4的「强开」(主人点名:走强上限必须讲清楚)
         if b2_open is not None and b2_open >= 9.5:
             reasons.append(
-                f"二板开{_pct(b2_open)}是一字开盘,不是冒泡转强的「强开」:口诀的强开是7~8.5"
+                f"二板开{_pct(b2_open)}是一字开盘,不是强开系续强档的「强开」:口诀的强开是7~8.5"
                 "(强而换手充分,11笔82%/+12.3);一字开盘=获利盘锁在里面没换手,"
                 "阴地基接三板只是抛硬币(58笔50%/+0.8,和不挑就买一样),"
                 "8.5~9.5剧强段更毒(6笔33%/-1.6)")

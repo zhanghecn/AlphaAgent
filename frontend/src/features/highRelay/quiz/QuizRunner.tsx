@@ -20,13 +20,12 @@ import { overwriteAnswer, resetMonth, saveAnswer } from "./quizProgress";
  *   答对出列、答错留池,成绩以最后一次为准。
  */
 
-// 方案点徽标配色(v4.4 七条;与 HprGuideView/HprLiveView 同色系)
+// 方案点徽标配色(v5.0 六条;与 HprGuideView/HprLiveView 同色系)
 const POINT_BADGES: Record<string, string> = {
   A1: "bg-rise/15 text-rise",
   A2: "bg-teal-500/15 text-teal-500",
   B1: "bg-amber-500/15 text-amber-500",
   B2: "bg-yellow-500/15 text-yellow-500",
-  B4: "bg-orange-500/15 text-orange-500",
   E1: "bg-primary/15 text-primary",
   E2: "bg-sky-500/15 text-sky-500",
 };

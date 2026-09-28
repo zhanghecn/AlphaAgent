@@ -12,14 +12,13 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底卖",
 };
 
-const POINT_KEYS = ["A1", "A2", "B1", "B2", "B4", "E1", "E2"] as const;  // v4.4 七条
+const POINT_KEYS = ["A1", "A2", "B1", "B2", "E1", "E2"] as const;  // v5.0 六条
 
 const POINT_BADGES: Record<string, { label: string; className: string }> = {
   A1: { label: "A1", className: "bg-rise/15 text-rise" },
   A2: { label: "A2", className: "bg-teal-500/15 text-teal-500" },
   B1: { label: "B1", className: "bg-amber-500/15 text-amber-500" },
   B2: { label: "B2", className: "bg-yellow-500/15 text-yellow-500" },
-  B4: { label: "B4", className: "bg-orange-500/15 text-orange-500" },
   E1: { label: "E1", className: "bg-primary/15 text-primary" },
   E2: { label: "E2", className: "bg-sky-500/15 text-sky-500" },
 };

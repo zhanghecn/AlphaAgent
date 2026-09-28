@@ -48,13 +48,12 @@ const LIVE_PAYLOAD: HprLivePayload = {
   point_labels: {
     A1: "A1 双平贴零",
     A2: "A2 一字转强",
-    B1: "B1 强转弱",
+    B1: "B1 强开系",
     B2: "B2 弱开系",
-    B4: "B4 冒泡转强",
     E1: "E1 四板便捷",
     E2: "E2 四板捡漏",
   },
-  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", B4: "A", E1: "A", E2: "A" },
+  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", E1: "A", E2: "A" },
   last_scan: null,
   entries: [
     {
@@ -166,7 +165,7 @@ describe("HprLiveView", () => {
     );
     expect(html).toContain("高位接力 · 实时推荐");
     expect(html).toContain("早盘(09:30~09:45)");
-    expect(html).toContain("B1 强转弱");
+    expect(html).toContain("B1 强开系");
     expect(html).toContain("🔵候选");
     expect(html).toContain("雷达");
     expect(html).toContain("打3板");
@@ -371,7 +370,7 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
     exit_reason: "break_close",
   },
   explain: {
-    kind: "hit", scheme_no: "B1", scheme_name: "B1 强转弱",
+    kind: "hit", scheme_no: "B1", scheme_name: "B1 强开系",
     scheme_desc: "一板二板都强开(各≥7),二板换手要活(≥5),今天温开3~5",
     psycho: "弱势票连开两天强开,人气已经聚起来了……",
     today_window: [3, 5],
@@ -471,7 +470,7 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("口诀对,行情也对");
     expect(html).toContain("+10");
     expect(html).toContain("粤桂股份");          // 答完揭示票名
-    expect(html).toContain("B1 强转弱");           // 口诀卡
+    expect(html).toContain("B1 强开系");           // 口诀卡
     expect(html).toContain("主力怎么想");
     expect(html).toContain("典型样例");            // case_note
     expect(html).toContain("落在窗3~5");           // matched_line
