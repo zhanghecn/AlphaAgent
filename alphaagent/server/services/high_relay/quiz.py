@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 7  # 讲解文案/题库结构变更必升(v7:退出价=max(收盘,中间价),判分基准再变)
+QUIZ_CONTENT_VERSION = 8  # v8:hpr-v4.4七条合体(弱开系/捡漏/便捷一字系档,B3/E3退休)
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -92,7 +92,7 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                 f"题库构建自检失败:{r['名称']} {d_date} E标={point} 重算={recalc}")
 
         if should_buy:
-            win = pool_mod.scheme_today_window(point)
+            win = pool_mod.scheme_today_window(point, buy_open)  # v4.4多分支:返回今开实际命中的分支窗
             explain: dict[str, object] = {
                 "kind": "hit",
                 "scheme_no": point,
@@ -194,12 +194,21 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
             reasons.append(f"二板开{_pct(b2_open)}落在8.5~9.5剧强段:仅次一字的毒档,"
                            "今开6~9.5仅25%/-8.1")
     if n_board == 3:
-        # 6. 三板换手毒(在 四板便捷今开窗语境下才报;低开语境归 高开低吸/贴零温开 判定走兜底)
+        # 6. 三板换手毒(v4.4 分档:一字系(二板/三板一字)窗=3~5×今开6~9.5,非一字=10~20)
+        is_yizi = ((b2_open is not None and b2_open >= 9.5)
+                   or (b3_open is not None and b3_open >= 9.5))
         if b3_turn is not None and 5 <= buy_open < contracts.TODAY_CAP:
-            if b3_turn < 10:
+            if is_yizi:
+                if not (3 <= b3_turn < 5):
+                    reasons.append(f"三板换手{b3_turn:.1f}:一字系(锁仓板)的换手窗是3~5,"
+                                   "四板便捷版一字系档不能打")
+                elif buy_open < 6:
+                    reasons.append(f"一字系换手{b3_turn:.1f}在3~5但今开{_pct(buy_open)}<6:"
+                                   "温吞=让利没人接(5~6段全灭),四板便捷版一字系档须今开6~9.5")
+            elif b3_turn < 10:
                 reasons.append(f"三板换手{b3_turn:.1f}不在10~20:换手不足=没人气的假强缩量板,"
                                "四板便捷版(三板换手10~20、今开5~9.5直接打)不能打")
-            else:
+            elif b3_turn >= 20:
                 reasons.append(f"三板换手{b3_turn:.1f}≥20:主力对倒出货,"
                                "四板便捷版(三板换手10~20、今开5~9.5直接打)不能打")
         # 7. 今开温吞毒段(换手合格但开得不冷不热)
@@ -266,8 +275,9 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
                            f"这题{';'.join(fails[:2])},不能打")
     if best is not None:
         return best[1]
-    # 阶段2:链全不符——报链形 + 本组(阴阳分清)能对照的口诀清单
-    names = [str(s["name"]) for s in contracts.SCHEMES if group4 in s["group4"]]
+    # 阶段2:链全不符——报链形 + 本组(阴阳分清)能对照的口诀清单(v4.4多分支共享名,去重)
+    names = list(dict.fromkeys(
+        str(s["name"]) for s in contracts.SCHEMES if group4 in s["group4"]))
     yang_label = "阳" if group4.endswith("阳") else "阴"
     pos_label = "二接三" if group4.startswith("二接三") else "三接四"
     chain_desc = f"一板开{_pct(b1_open)} × 二板开{_pct(b2_open)}"

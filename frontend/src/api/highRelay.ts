@@ -8,8 +8,8 @@ import { apiClient } from "./client";
 // E1四板便捷(三接四不分阴阳)/E2高开低吸(三接四阳)/E3贴零温开(三接四阴)。
 
 export type HprPoint =
-  | "A1" | "A2" | "B1" | "B2" | "B3" | "B4"
-  | "E1" | "E2" | "E3" | "—";
+  | "A1" | "A2" | "B1" | "B2" | "B4"
+  | "E1" | "E2" | "—";   // v4.4 七条:B3/E3 退休(并入弱开系/四板捡漏)
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
 
 export type HprStatus =

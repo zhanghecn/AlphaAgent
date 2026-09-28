@@ -13,19 +13,17 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   B: { badge: "bg-amber-500/15 text-amber-500", label: "二接三阴" },
   B1: { badge: "bg-amber-500/15 text-amber-500", label: "B1" },
   B2: { badge: "bg-yellow-500/15 text-yellow-500", label: "B2" },
-  B3: { badge: "bg-emerald-500/15 text-emerald-500", label: "B3" },
   B4: { badge: "bg-orange-500/15 text-orange-500", label: "B4" },
   E: { badge: "bg-primary/15 text-primary", label: "三接四" },
   E1: { badge: "bg-primary/15 text-primary", label: "E1" },
   E2: { badge: "bg-sky-500/15 text-sky-500", label: "E2" },
-  E3: { badge: "bg-fuchsia-500/15 text-fuchsia-500", label: "E3" },
   avoid: { badge: "bg-fall/15 text-fall", label: "回避" },
   time: { badge: "bg-primary/15 text-primary", label: "时间" },
   buy: { badge: "bg-rise/15 text-rise", label: "买" },
   sell: { badge: "bg-amber-500/15 text-amber-500", label: "卖" },
 };
 
-const POINT_ORDER = ["A1", "A2", "B1", "B2", "B3", "B4", "E1", "E2", "E3"] as const;
+const POINT_ORDER = ["A1", "A2", "B1", "B2", "B4", "E1", "E2"] as const;  // v4.4 七条(B3/E3退休)
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
 export function HprGuideView() {
@@ -39,7 +37,7 @@ export function HprGuideView() {
     return <ErrorState message="规则契约暂时不可用" onRetry={() => void query.refetch()} />;
   }
   const rules = query.data;
-  // 九条口诀卡数据:A/B/E 组 items 按序 flatten,与 POINT_ORDER 一一对应
+  // 七条口诀卡数据:A/B/E 组 items 按序 flatten,与 POINT_ORDER 一一对应
   const schemeCards = rules.rules
     .filter((g) => g.group === "A" || g.group === "B" || g.group === "E")
     .flatMap((g) => g.items.map((it) => ({ ...it, group: g.group })));
@@ -52,7 +50,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            打板口诀卡九条(hpr-v4.0 合体定稿)全市场验证(2023-03 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
+            打板口诀卡七条(hpr-v4.4 合体定稿)全市场验证(2023-03 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
           </span>
         </div>
       </section>
@@ -60,20 +58,22 @@ export function HprGuideView() {
       <section className="rounded-lg border p-4">
         <div className="mb-2 text-sm font-semibold">一句话</div>
         <p className="text-sm leading-6 text-muted-foreground">
-          昨天恰好 2 连板或 3 连板的票,今天冲第 N+1 板;九句口诀才出手——
+          昨天恰好 2 连板或 3 连板的票,今天冲第 N+1 板;七句口诀才出手——
           速查树只问一句「二板开在哪个档」:贴零(&lt;1)→阳打今开6~9.5锁换手(双平贴零),
-          一字(≥9.5)→阳打今开7~8.5(一字转强),高开(3~7)→等今天弱开&lt;3阴阳都打(冒泡转弱),
-          强开(7~8.5)→阴打今开6~9.5(冒泡转强)或温开3~5强强链(强转弱),全低链→今天也低开小仓(三低);
-          打四板不用记形态:三板换手10~20+今开5~9.5直接打(四板便捷,不分阴阳),
-          三板高开5~7等今天低开低吸(高开低吸),二板贴零今天温开3~6(贴零温开);
+          一字(≥9.5)→阳打今开7~8.5(一字转强),
+          强开(7~8.5)→阴打今开6~9.5(冒泡转强)或温开3~5强强链(强转弱);
+          今开&lt;3 走弱开系:一板低开=捡尸(二板贴地&lt;0或有承接2~3,今开须&lt;0),
+          一板强开≥7=冒泡洗盘(二板3~7,阴阳都打,一板不强开的弱开=真没人要);
+          打四板不用记形态:三板换手10~20+今开5~9.5直接打(四板便捷,不分阴阳;
+          一字系换手3~5即可但今开须6+),捡漏两条:阳三板强开5~7今天低开吸/阴二板贴零温开3~6;
           换手心法:二接三看二板换手(阳锁阴活),三接四看三板换手,一板换手永远不用看;
-          触板即打(开盘≥9.5%顶格不命中);炸板当天收盘走,封住拿到断板(15日兜底)。
-          合计164笔 胜71% 均+8.13,月均3.8笔;不挑就买是亏的,其余一概不碰。
+          触板即打(开盘≥9.5%顶格不命中);炸板次日走(T+1,一字跌停顺延),封住拿到断板(15日兜底)。
+          合计184笔 月均4.2笔(v4.4);不挑就买是亏的,其余一概不碰。
         </p>
       </section>
 
-      <section className="rounded-lg border p-4" aria-label="九条口诀卡">
-        <div className="mb-2 text-sm font-semibold">九条口诀(全文 + 成绩 + 主力怎么想)</div>
+      <section className="rounded-lg border p-4" aria-label="七条口诀卡">
+        <div className="mb-2 text-sm font-semibold">七条口诀(全文 + 成绩 + 主力怎么想)</div>
         <div className="grid gap-3 lg:grid-cols-2">
           {schemeCards.map((it, i) => {
             const pk = POINT_ORDER[i] ?? String(i);

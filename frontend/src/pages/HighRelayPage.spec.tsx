@@ -49,14 +49,12 @@ const LIVE_PAYLOAD: HprLivePayload = {
     A1: "A1 双平贴零",
     A2: "A2 一字转强",
     B1: "B1 强转弱",
-    B2: "B2 三低",
-    B3: "B3 冒泡转弱",
+    B2: "B2 弱开系",
     B4: "B4 冒泡转强",
     E1: "E1 四板便捷",
-    E2: "E2 高开低吸",
-    E3: "E3 贴零温开",
+    E2: "E2 四板捡漏",
   },
-  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", B3: "A", B4: "A", E1: "A", E2: "A", E3: "A" },
+  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", B4: "A", E1: "A", E2: "A" },
   last_scan: null,
   entries: [
     {
@@ -214,11 +212,11 @@ describe("HprLedgerView", () => {
         />,
       ),
     );
-    expect(html).toContain("断板日收盘卖");
+    expect(html).toContain("断板日卖");
     expect(html).toContain("2板");
     expect(html).toContain("B1");
     expect(html).toContain("对照E0");
-    expect(html).toContain("炸板当日收盘走");
+    expect(html).toContain("炸板次日走");
   });
 });
 

@@ -253,12 +253,18 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
     return "—"
 
 
-def scheme_today_window(point: str):
-    """方案「今天开」窗 (lo, hi);非方案返回 None(供盘中扫描/前端展示)。"""
-    for s in contracts.SCHEMES:
-        if s["no"] == point:
-            return s["today"]
-    return None
+def scheme_today_window(point: str, auction_pct=None):
+    """方案「今天开」窗 (lo, hi);非方案返回 None(供盘中扫描/前端展示)。
+    v4.4 多分支方案(弱开系/捡漏/便捷一字系档)共享编号:有今开时返回包含今开的
+    分支窗,否则返回首条分支窗。"""
+    wins = [s["today"] for s in contracts.SCHEMES if s["no"] == point]
+    if not wins:
+        return None
+    if auction_pct is not None:
+        for w in wins:
+            if w[0] <= auction_pct < w[1]:  # type: ignore[index]
+                return w
+    return wins[0]
 
 
 def static_avoid(point: str, group4: str, b1_open, b2_open, pre3_pct) -> str:
