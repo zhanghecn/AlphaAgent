@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
 
-from sqlalchemy import delete, desc, func, select, update
+from sqlalchemy import delete, desc, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphaagent.server.db import schema
@@ -343,3 +343,30 @@ def quiz_bank_status() -> dict[str, object]:
         versions = session.execute(select(t.c.rules_version).distinct()).scalars().all()
         count = session.execute(select(func.count()).select_from(t)).scalar_one()
     return {"rules_versions": [str(v) for v in versions], "count": int(count)}
+
+
+def load_quiz_mix_projection() -> list[dict[str, object]]:
+    """综合挑战卷抽题投影:[{decision_date, vt_symbol, point, trap_kind}](轻量,
+    trap_kind 从 payload.explain JSON 抽取,命中题为 NULL→None;不读K线大字段)。"""
+    schema.ensure_schema_once(get_engine())
+    t = schema.hpr_quiz_questions
+    with session_scope() as session:
+        rows = session.execute(
+            select(t.c.decision_date, t.c.vt_symbol, t.c.point,
+                   t.c.payload["explain"]["trap_kind"].astext.label("trap_kind"))
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def load_quiz_questions_by_keys(keys: list[tuple]) -> list[dict[str, object]]:
+    """按 (decision_date, vt_symbol) 主键批量拉完整 payload(综合挑战卷用)。"""
+    if not keys:
+        return []
+    schema.ensure_schema_once(get_engine())
+    t = schema.hpr_quiz_questions
+    with session_scope() as session:
+        rows = session.execute(
+            select(t.c.payload).where(
+                tuple_(t.c.decision_date, t.c.vt_symbol).in_(keys))
+        ).scalars().all()
+    return [dict(r) for r in rows if isinstance(r, Mapping)]

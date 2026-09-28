@@ -49,7 +49,10 @@ type Board = 2 | 3;
 type Phase = "quiz" | "boardSummary" | "monthSummary";
 
 interface QuizRunnerProps {
-  month: string;
+  /** month 模式必填(显示用);mixed(综合挑战卷)跨月,标题改用各题 decision_date */
+  month?: string;
+  /** month=按月刷题(默认);mixed=综合挑战卷(七条口诀好票+陷阱票混编) */
+  variant?: "month" | "mixed";
   questions: HprQuizQuestion[];
   rulesVersion: string;
   showName: boolean;
@@ -60,6 +63,7 @@ interface QuizRunnerProps {
 
 export function QuizRunner({
   month,
+  variant = "month",
   questions,
   rulesVersion,
   showName,
@@ -67,6 +71,11 @@ export function QuizRunner({
   onAnswersChange,
   onBack,
 }: QuizRunnerProps) {
+  const mixed = variant === "mixed";
+  // 范围标题:月题=x年x月;综合卷=「综合挑战卷」(进度行/总结卡共用)
+  const scopeTitle = mixed
+    ? "综合挑战卷"
+    : `${Number((month ?? "0000-00").slice(0, 4))}年${Number((month ?? "0000-00").slice(5))}月`;
   // 打3板(昨日2连板,n_board=2)与打4板(n_board=3):板位可勾选——
   // 单勾=分开练(A/B组与E组口诀体系不同),两个都勾=合并混做(主人定的交互)
   const board3 = useMemo(() => questions.filter((q) => q.n_board === 2), [questions]);
@@ -170,7 +179,8 @@ export function QuizRunner({
   if (phase === "monthSummary") {
     return (
       <MonthSummary
-        month={month}
+        scopeTitle={scopeTitle}
+        unitLabel={mixed ? "本卷" : "本月"}
         summary={monthSummary}
         segments={[
           board3.length > 0 ? { label: "打3板", summary: summarize(board3, answers) } : null,
@@ -189,7 +199,8 @@ export function QuizRunner({
       sel.b2 && sel.b3 ? "打3板+打4板" : sel.b2 ? "打3板" : "打4板";
     return (
       <BoardSummaryCard
-        month={month}
+        scopeTitle={scopeTitle}
+        unitLabel={mixed ? "本卷" : "本月"}
         scopeLabel={scopeLabel}
         total={activeQuestions.length}
         summary={boardSummary}
@@ -209,10 +220,12 @@ export function QuizRunner({
     question.bars_before.length > question.n_board
       ? question.bars_before[question.bars_before.length - (question.n_board + 1)]
       : null;
-  // 匿名题干不带题号(乱序后题号无意义,防按序号背答案)
+  // 匿名题干不带题号(乱序后题号无意义,防按序号背答案);时间背景取该题自己的
+  // 决策日(综合卷跨月也能正确显示「x年x月」)
+  const dd = question.decision_date;
   const title = showName
     ? `${question.name} ${question.vt_symbol.split(".")[0]}`
-    : `${Number(month.slice(0, 4))}年${Number(month.slice(5))}月 · ${d.board_label}`;
+    : `${Number(dd.slice(0, 4))}年${Number(dd.slice(5, 7))}月 · ${d.board_label}`;
   const boardAnswered = activeQuestions.filter(
     (q) => answers[quizQuestionId(q)] != null,
   ).length;
@@ -226,7 +239,7 @@ export function QuizRunner({
             className="text-xs text-muted-foreground hover:text-foreground"
             onClick={onBack}
           >
-            ← 返回月份
+            ← 返回
           </button>
           <span className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">板位</span>
@@ -257,7 +270,7 @@ export function QuizRunner({
             )}
           </span>
           <span className="text-xs text-muted-foreground tabular-nums">
-            本轮 {boardAnswered}/{activeQuestions.length} · 本月得分{" "}
+            本轮 {boardAnswered}/{activeQuestions.length} · {mixed ? "本卷" : "本月"}得分{" "}
             {monthSummary.score >= 0 ? "+" : ""}
             {monthSummary.score}
           </span>
@@ -266,7 +279,7 @@ export function QuizRunner({
             className="ml-auto text-xs text-muted-foreground hover:text-foreground"
             onClick={handleReset}
           >
-            重置本月
+            重置{mixed ? "本卷" : "本月"}
           </button>
         </div>
       </section>
@@ -405,7 +418,8 @@ function BoardChip({
 }
 
 function BoardSummaryCard({
-  month,
+  scopeTitle,
+  unitLabel,
   scopeLabel,
   total,
   summary,
@@ -414,7 +428,8 @@ function BoardSummaryCard({
   onMonthSummary,
   onBack,
 }: {
-  month: string;
+  scopeTitle: string;
+  unitLabel: string;
   scopeLabel: string;
   total: number;
   summary: QuizMonthSummary;
@@ -430,7 +445,7 @@ function BoardSummaryCard({
     <section className="rounded-lg border px-4 py-4">
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
         <span className="text-sm font-semibold">
-          {Number(month.slice(0, 4))}年{Number(month.slice(5))}月 · {scopeLabel} · 本轮总结
+          {scopeTitle} · {scopeLabel} · 本轮总结
         </span>
         <span className="font-mono text-lg font-bold tabular-nums text-primary">
           得分 {summary.score >= 0 ? "+" : ""}
@@ -445,7 +460,7 @@ function BoardSummaryCard({
             className="text-xs text-muted-foreground hover:text-foreground"
             onClick={onBack}
           >
-            ← 返回月份
+            ← 返回
           </button>
         </span>
       </div>
@@ -467,7 +482,7 @@ function BoardSummaryCard({
           className="h-9 rounded-md border px-4 text-sm font-semibold text-muted-foreground hover:bg-muted/40"
           onClick={onMonthSummary}
         >
-          看月度总结
+          看{unitLabel}总结
         </button>
       </div>
     </section>
@@ -652,7 +667,8 @@ function RevealSection({
 }
 
 function MonthSummary({
-  month,
+  scopeTitle,
+  unitLabel,
   summary,
   segments,
   questions,
@@ -660,7 +676,8 @@ function MonthSummary({
   onRestart,
   onBack,
 }: {
-  month: string;
+  scopeTitle: string;
+  unitLabel: string;
   summary: QuizMonthSummary;
   segments: { label: string; summary: QuizMonthSummary }[];
   questions: HprQuizQuestion[];
@@ -676,7 +693,7 @@ function MonthSummary({
     <section className="rounded-lg border px-4 py-4">
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
         <span className="text-sm font-semibold">
-          {Number(month.slice(0, 4))}年{Number(month.slice(5))}月 · 本月总结
+          {scopeTitle} · {unitLabel}总结
         </span>
         <span className="font-mono text-lg font-bold tabular-nums text-primary">
           总得分 {summary.score >= 0 ? "+" : ""}
@@ -691,14 +708,14 @@ function MonthSummary({
             className="text-xs text-muted-foreground hover:text-foreground"
             onClick={onBack}
           >
-            ← 返回月份
+            ← 返回
           </button>
           <button
             type="button"
             className="text-xs text-muted-foreground hover:text-foreground"
             onClick={onRestart}
           >
-            重新作答本月
+            重新作答{unitLabel}
           </button>
         </span>
       </div>
@@ -707,7 +724,7 @@ function MonthSummary({
           <div className="rounded-md border px-3 py-2">
             <div className="mb-0.5 font-semibold">你的操作（答「买入」的票按E3收益计）</div>
             <div className="tabular-nums text-muted-foreground">
-              出手 {pnl.mine.trades} 笔 · 胜率 {pnl.mine.win}% · 本月收益{" "}
+              出手 {pnl.mine.trades} 笔 · 胜率 {pnl.mine.win}% · {unitLabel}收益{" "}
               <span className={cn("font-mono font-semibold", pnl.mine.ret >= 0 ? "text-rise" : "text-fall")}>
                 {pnl.mine.ret >= 0 ? "+" : ""}{pnl.mine.ret}%
               </span>
@@ -716,7 +733,7 @@ function MonthSummary({
           <div className="rounded-md border px-3 py-2">
             <div className="mb-0.5 font-semibold">口诀标准操作（命中全买·未命中全拒）</div>
             <div className="tabular-nums text-muted-foreground">
-              出手 {pnl.rule.trades} 笔 · 胜率 {pnl.rule.win}% · 本月收益{" "}
+              出手 {pnl.rule.trades} 笔 · 胜率 {pnl.rule.win}% · {unitLabel}收益{" "}
               <span className={cn("font-mono font-semibold", pnl.rule.ret >= 0 ? "text-rise" : "text-fall")}>
                 {pnl.rule.ret >= 0 ? "+" : ""}{pnl.rule.ret}%
               </span>

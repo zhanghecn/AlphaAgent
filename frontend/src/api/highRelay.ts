@@ -363,6 +363,7 @@ export interface HprQuizExplainHit {
 
 export interface HprQuizExplainMiss {
   kind: "miss";
+  trap_kind?: "yin_yang" | "near" | "toxic" | "plain";  // 陷阱类型(q10起,综合挑战卷抽题用)
   reasons: string[];            // 为什么不该买(1~3条)
 }
 
@@ -396,4 +397,11 @@ export function fetchHprQuizQuestions(month: string) {
   return apiClient.get<HprQuizQuestionsPayload>(
     `/high-relay/quiz/questions?month=${encodeURIComponent(month)}`,
   );
+}
+
+// 综合挑战卷(主人定 2026-09-28):七条口诀每条随机2道好票+21道陷阱差票
+// (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序;
+// 结构与月题一致(month 缺省),进度与月题共享(同一题 key)。
+export function fetchHprQuizMixed() {
+  return apiClient.get<HprQuizQuestionsPayload>("/high-relay/quiz/mixed");
 }

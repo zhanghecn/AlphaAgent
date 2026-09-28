@@ -19,10 +19,22 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 9  # v9:阴组二板温吞段专门讲解(平开≠低开,弱开系三低缺一不可)
+QUIZ_CONTENT_VERSION = 10  # v10:miss题物化trap_kind(综合挑战卷抽题用)+阴阳反串专门讲解
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
+
+# ── 综合挑战卷组卷规则(主人定 2026-09-28) ──
+# 好票:七条口诀每条随机≥2道(无上限,固定2保证每套覆盖全部口诀);差票:好票=1:1~3:1,
+# 取 1.5:1 偏挑战侧;差票=相似口诀票(形态接近+毒段)与阴阳反串票三等分混搭。
+MIX_PER_POINT = 2
+MIX_TRAP_TOTAL = 21
+MIX_TRAP_KINDS = ("yin_yang", "near", "toxic")
+
+# 阴阳反串判定:对面地基组完整命中某条口诀(链+换手+今开全判)。
+# 弱开系冒泡洗盘/四板便捷两组都含,天然不会误判(哪组判都命中的票不是 miss)。
+_OPPOSITE_GROUP4 = {"二接三阳": "二接三阴", "二接三阴": "二接三阳",
+                    "三接四阳": "三接四阴", "三接四阴": "三接四阳"}
 
 
 def quiz_rules_version() -> str:
@@ -107,14 +119,27 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                                       and pre20 is not None and 5 <= pre20 <= 15),
             }
         else:
-            explain = {
-                "kind": "miss",
-                "reasons": explain_miss(
-                    n_board=n_board, yang=yang, group4=group4,
-                    b1_open=b1_open, b2_open=b2_open, b3_open=b3_open,
-                    b2_turn=b2_turn, b3_turn=b3_turn,
-                    buy_open=buy_open, pre20_pct=pre20),
-            }
+            reasons, trap_kind = explain_miss(
+                n_board=n_board, yang=yang, group4=group4,
+                b1_open=b1_open, b2_open=b2_open, b3_open=b3_open,
+                b2_turn=b2_turn, b3_turn=b3_turn,
+                buy_open=buy_open, pre20_pct=pre20)
+            # 阴阳反串:链形完整命中对面地基组的某条口诀(跨阴阳铁律陷阱,
+            # 教学标签最鲜明,覆盖 near/toxic/plain),讲解首位说明
+            opp_point = pool_mod.tag_point(
+                _OPPOSITE_GROUP4[group4], b1_open, b2_open, b3_open,
+                auction_pct=buy_open, b2_turn=b2_turn, b3_turn=b3_turn)
+            if opp_point != "—":
+                trap_kind = "yin_yang"
+                opp_yang = "阳" if _OPPOSITE_GROUP4[group4].endswith("阳") else "阴"
+                my_yang = "阳" if yang else "阴"
+                reasons = [
+                    f"链形是口诀【{contracts.POINT_LABELS.get(opp_point, opp_point)}】"
+                    f"的形态,但那条只在{opp_yang}地基成立——这题是{my_yang}地基,"
+                    "阴阳反了不能打(跨阴阳铁律:同一条链换个地基就是陷阱)",
+                    *reasons[:2],
+                ]
+            explain = {"kind": "miss", "trap_kind": trap_kind, "reasons": reasons}
 
         hold_days = exit_off  # E3 口径持有交易日数(炸板=1,顺延>1,封住=到断板)
         payload = {
@@ -170,11 +195,14 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
 
 def explain_miss(*, n_board: int, yang: bool, group4: str,
                  b1_open, b2_open, b3_open, b2_turn, b3_turn,
-                 buy_open: float, pre20_pct) -> list[str]:
-    """未命中题的「为什么不该买」:按优先级产 1~3 条人话理由(全部正常中文)。"""
+                 buy_open: float, pre20_pct) -> tuple[list[str], str]:
+    """未命中题的「为什么不该买」:按优先级产 1~3 条人话理由(全部正常中文)。
+    返回 (reasons, trap_kind):toxic=毒段规则命中/near=形态接近(链全符差条件)/
+    plain=链形不沾边;yin_yang(阴阳反串)由 build_questions 单独判定覆盖。"""
     # 1. 顶格:终结论,只报这条(q4 起题库已剔顶格,此为防御分支,正常不会触发)
     if buy_open >= contracts.TODAY_CAP:
-        return [f"今开{_pct(buy_open)}顶格:排队也买不到,口诀一律不打(硬规则)"]
+        return ([f"今开{_pct(buy_open)}顶格:排队也买不到,口诀一律不打(硬规则)"],
+                "plain")
     reasons: list[str] = []
     if n_board == 2 and yang:
         # 2. 三连加速毒格(阳组)
@@ -228,16 +256,17 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
             reasons.append(f"今开{_pct(buy_open)}落在6~7温吞段:不冷不热,四板便捷版体系内"
                            "也可以跳过的38%毒段(金核在7~8.5)")
     if reasons:
-        return reasons[:3]
+        return reasons[:3], "toxic"
     # 8. 兜底:形态接近(链全符差条件) 或 链形不沾边(含本组口诀清单),恒非 None
-    nearest = _nearest_scheme_line(group4, b1_open, b2_open, b3_open,
-                                   b2_turn, b3_turn, buy_open)
-    return [nearest, _MISS_WIN_LINE]
+    nearest, near_hit = _nearest_scheme_line(group4, b1_open, b2_open, b3_open,
+                                             b2_turn, b3_turn, buy_open)
+    return [nearest, _MISS_WIN_LINE], ("near" if near_hit else "plain")
 
 
 def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
-                         b2_turn, b3_turn, buy_open: float) -> str | None:
+                         b2_turn, b3_turn, buy_open: float) -> tuple[str, bool]:
     """「为什么不买」的兜底讲解(复刻 tag_point 判定收集明细,只讲解不打标)。
+    返回 (文案, 是否形态接近)。
 
     两阶段(主人定:链腿不符的方案不能叫「最接近」——核心形态都不对,推荐即误导;
     阴阳分组必须说清楚):
@@ -285,7 +314,7 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
             best = (score, f"形态接近口诀【{s['name']}:{s['desc']}】——"
                            f"这题{';'.join(fails[:2])},不能打")
     if best is not None:
-        return best[1]
+        return best[1], True
     # 阶段2:链全不符——报链形 + 本组(阴阳分清)能对照的口诀清单(v4.4多分支共享名,去重)
     names = list(dict.fromkeys(
         str(s["name"]) for s in contracts.SCHEMES if group4 in s["group4"]))
@@ -295,7 +324,7 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
     if pos_label == "三接四":
         chain_desc += f" × 三板开{_pct(b3_open)}"
     return (f"链形({chain_desc})不在任何口诀区间——这题是{yang_label}地基的{pos_label},"
-            f"能对照的口诀:{'/'.join(names)},形态都不沾,不用买")
+            f"能对照的口诀:{'/'.join(names)},形态都不沾,不用买"), False
 
 
 def _matched_line(n_board: int, b1_open, b2_open, b3_open,
@@ -338,3 +367,38 @@ def _f(v) -> float | None:
     except (TypeError, ValueError):
         return None
     return x if x == x else None
+
+
+def mix_question_keys(rows, per_point: int = MIX_PER_POINT,
+                      trap_total: int = MIX_TRAP_TOTAL,
+                      rng=None) -> list[tuple[str, str]]:
+    """综合挑战卷抽题(纯函数,可注入种子复现)。
+
+    rows = 题库轻量投影 [{decision_date, vt_symbol, point, trap_kind}]
+    (point=标量列,trap_kind 从 payload 抽取,命中题为 None)。
+    规则(主人定 2026-09-28):好票=七条口诀每条随机 per_point 道(无上限,
+    固定2即保证每套覆盖全部口诀);差票=MIX_TRAP_KINDS 均分 trap_total,
+    某类不够由后面的类补,总量落在好票的 1~3 倍区间(14好×1.5=21差)。
+    返回 [(decision_date, vt_symbol)]——洗牌在 service 层拉全量后统一做。"""
+    import random
+    rnd = random.Random(rng)
+    by_point: dict[str, list[tuple[str, str]]] = {}
+    by_trap: dict[str, list[tuple[str, str]]] = {k: [] for k in MIX_TRAP_KINDS}
+    for r in rows:
+        key = (str(r["decision_date"]), str(r["vt_symbol"]))
+        point = r["point"]
+        if point and point != "—":
+            by_point.setdefault(str(point), []).append(key)
+        elif r["trap_kind"] in by_trap:
+            by_trap[str(r["trap_kind"])].append(key)
+    picked: list[tuple[str, str]] = []
+    for pool_keys in by_point.values():
+        picked.extend(rnd.sample(pool_keys, min(per_point, len(pool_keys))))
+    quota = max(1, trap_total // len(MIX_TRAP_KINDS))
+    deficit = 0
+    for kind in MIX_TRAP_KINDS:
+        want = quota + deficit
+        got = rnd.sample(by_trap[kind], min(want, len(by_trap[kind])))
+        picked.extend(got)
+        deficit = want - len(got)
+    return picked

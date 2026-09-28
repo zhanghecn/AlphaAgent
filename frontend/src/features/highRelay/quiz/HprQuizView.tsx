@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchHprQuizOverview, fetchHprQuizQuestions } from "@/api/highRelay";
+import { fetchHprQuizMixed, fetchHprQuizOverview, fetchHprQuizQuestions } from "@/api/highRelay";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
@@ -12,7 +12,8 @@ import type { QuizAnswerRec } from "./quizScore";
 import { loadProgress, resetAll } from "./quizProgress";
 
 /**
- * 答题训练页签根:年份 chip → 月份格子(题数/进度/得分) → QuizRunner。
+ * 答题训练页签根:综合挑战卷(七条口诀好票+陷阱票随机混编) + 年份 chip →
+ * 月份格子(题数/进度/得分) → QuizRunner。
  * 进度存 localStorage(key 含题库版本串);默认匿名,实名开关切题干显示。
  */
 export function HprQuizView() {
@@ -30,6 +31,9 @@ export function HprQuizView() {
   );
   const [year, setYear] = useState<string | null>(null);
   const [month, setMonth] = useState<string | null>(null);
+  // 综合挑战卷:nonce=null 未进卷;每点一次「开始挑战」+1 → queryKey 变 →
+  // 强制重新随机抽题(禁缓存,主人要每次重抽不重样)
+  const [mixedNonce, setMixedNonce] = useState<number | null>(null);
   const [showName, setShowName] = useState(false);
   const [answers, setAnswers] = useState<Record<string, QuizAnswerRec>>({});
   const [progressLoaded, setProgressLoaded] = useState(false);
@@ -50,6 +54,14 @@ export function HprQuizView() {
     staleTime: 600_000,
   });
 
+  const mixedQuery = useQuery({
+    queryKey: ["hprQuizMixed", mixedNonce],
+    queryFn: fetchHprQuizMixed,
+    enabled: mixedNonce != null,
+    staleTime: 0,
+    gcTime: 0,
+  });
+
   if (overviewQuery.isLoading && !overview) return <LoadingState rows={6} />;
   if (overviewQuery.isError || !overview) {
     return <ErrorState message="答题题库暂时不可用" onRetry={() => void overviewQuery.refetch()} />;
@@ -60,6 +72,29 @@ export function HprQuizView() {
         message="答题题库尚未生成"
         description="题库随回测一起重建——请到「回测」页签触发一次重算，完成后回来即可做题。"
       />
+    );
+  }
+
+  if (mixedNonce != null) {
+    const questions = mixedQuery.data?.questions ?? [];
+    return (
+      <div>
+        {mixedQuery.isLoading && !mixedQuery.data ? (
+          <LoadingState rows={6} />
+        ) : mixedQuery.isError || !mixedQuery.data ? (
+          <ErrorState message="综合挑战卷加载失败" onRetry={() => void mixedQuery.refetch()} />
+        ) : (
+          <QuizRunner
+            variant="mixed"
+            questions={questions}
+            rulesVersion={rulesVersion}
+            showName={showName}
+            answers={answers}
+            onAnswersChange={setAnswers}
+            onBack={() => setMixedNonce(null)}
+          />
+        )}
+      </div>
     );
   }
 
@@ -133,6 +168,23 @@ export function HprQuizView() {
         </div>
       </section>
 
+      <section className="rounded-lg border border-primary/40 bg-primary/5 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-sm font-semibold text-primary">综合挑战卷</span>
+          <span className="text-xs text-muted-foreground">
+            七条口诀各抽 2 道好票 + 21 道陷阱票（阴阳反串／形态接近／毒段），共 35 题——
+            每卷练全所有口诀，认熟「看着像但不能打」的票；每次进入重新随机抽题。
+          </span>
+          <button
+            type="button"
+            className="ml-auto h-8 rounded-md bg-primary px-4 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+            onClick={() => setMixedNonce((n) => (n ?? 0) + 1)}
+          >
+            开始挑战
+          </button>
+        </div>
+      </section>
+
       <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
         {activeMonths.map((m) => (
           <MonthCell
@@ -151,7 +203,8 @@ export function HprQuizView() {
         判分（主人四档·对称版）：口诀对×行情对 +10 ／ 口诀对×行情不配合 +3 ／ 没按口诀但你判断对了 +5 ／
         没按口诀判断错了 -10；总结有满分参照（每题满分10）和本月收益测算（你的操作 vs 口诀标准操作）。
         月内分「打3板」「打4板」两段，题目每次进入乱序（防背答案）；
-        答错的题（没按口诀的）可在段末反复乱序重练直到答对。今开≥9.5顶格票开盘即涨停买不到，
+        答错的题（没按口诀的）可在段末反复乱序重练直到答对。综合挑战卷与月题共享进度（同一题只答一次）。
+        今开≥9.5顶格票开盘即涨停买不到，
         不出题。收益=E3卖出纪律口径：退出价=max(收盘价, (最高+最低)/2)，炸板次日走（T+1合规）；
         K线未复权；主力心理为事后合理解释而非实证。题库版本 {rulesVersion}。
       </p>

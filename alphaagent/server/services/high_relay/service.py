@@ -377,6 +377,22 @@ def get_quiz_questions(month: str) -> dict[str, object]:
             "count": len(questions), "questions": questions}
 
 
+def get_quiz_mixed() -> dict[str, object]:
+    """综合挑战卷(主人定 2026-09-28):七条口诀每条随机≥2道好票 + 陷阱差票
+    (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序。"""
+    import random
+    expect = quiz_mod.quiz_rules_version()
+    status = repository.quiz_bank_status()
+    if status.get("rules_versions") != [expect]:
+        return {"status": "unavailable", "rules_version": expect}
+    projection = repository.load_quiz_mix_projection()
+    keys = quiz_mod.mix_question_keys(projection)
+    questions = repository.load_quiz_questions_by_keys(keys)
+    random.shuffle(questions)
+    return {"status": "ok", "rules_version": expect,
+            "count": len(questions), "questions": questions}
+
+
 # ── 规则契约 ──
 
 def get_rules() -> dict[str, object]:

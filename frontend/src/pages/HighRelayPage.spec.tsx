@@ -520,3 +520,55 @@ describe("quizProgress 首答不改/重练覆盖", () => {
     expect(all[qid].score).toBe(-5);
   });
 });
+
+// ── 综合挑战卷(variant="mixed"):七条口诀好票+陷阱票跨月混编(主人定) ──
+describe("QuizRunner 综合挑战卷(mixed)", () => {
+  // 跨月题:decision_date=2025-03,与 QUIZ_HIT_Q(2024-11)混编——
+  // 题干时间背景必须取各题自己的决策日(综合卷没有单一月份)
+  const CROSS_MONTH_Q: HprQuizQuestion = {
+    ...QUIZ_MISS_Q,
+    vt_symbol: "603569.SSE",
+    name: "长久物流",
+    decision_date: "2025-03-12",
+    n_board: 2,
+    display: { ...QUIZ_MISS_Q.display, board_label: "打3板" },
+    explain: {
+      kind: "miss",
+      trap_kind: "yin_yang",
+      reasons: ["链形是口诀【A2 一字转强】的形态,但那条只在阳地基成立——这题是阴地基,阴阳反了不能打(跨阴阳铁律)"],
+    },
+  };
+
+  function renderMixed(answers?: Record<string, { choice: "buy" | "reject"; score: number }>) {
+    return renderToStaticMarkup(
+      withProviders(
+        <QuizRunner
+          variant="mixed"
+          questions={[CROSS_MONTH_Q]}
+          rulesVersion="hpr-v4.4·q10"
+          showName={false}
+          answers={answers ?? {}}
+          onAnswersChange={() => undefined}
+          onBack={() => undefined}
+        />,
+      ),
+    );
+  }
+
+  it("进度行与按钮用「本卷」口径,匿名题干取各题自己的决策年月", () => {
+    const html = renderMixed();
+    expect(html).toContain("本卷得分");
+    expect(html).toContain("重置本卷");
+    expect(html).toContain("← 返回");
+    // mixed 无 month prop:题干显示 2025年3月 证明取的是该题 decision_date(跨月混编各自正确)
+    expect(html).toContain("2025年3月 · 打3板");
+  });
+
+  it("已答跨月陷阱题:讲解含阴阳反串说明", () => {
+    const html = renderMixed({
+      [quizQuestionId(CROSS_MONTH_Q)]: { choice: "reject", score: 10 },
+    });
+    expect(html).toContain("阴阳反了不能打");
+    expect(html).toContain("跨阴阳铁律");
+  });
+});
