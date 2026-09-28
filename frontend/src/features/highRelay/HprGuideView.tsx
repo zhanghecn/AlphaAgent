@@ -99,12 +99,12 @@ export function HprGuideView() {
                     />
                   </span>
                 </div>
-                <p className="text-xs leading-5 text-foreground">{ruleText}</p>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                <p className="whitespace-pre-line text-xs leading-5 text-foreground">{ruleText}</p>
+                <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
                   成绩:{it.evidence}
                 </p>
                 {rules.point_psycho?.[pk] ? (
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
                     主力怎么想:{rules.point_psycho[pk]}
                   </p>
                 ) : null}
@@ -129,7 +129,7 @@ export function HprGuideView() {
                 </div>
                 <ul className="space-y-1.5">
                   {g.items.map((it) => (
-                    <li key={it.no} className="text-xs leading-5">
+                    <li key={it.no} className="whitespace-pre-line text-xs leading-5">
                       <span className="font-mono text-muted-foreground">{it.no}.</span> {it.rule}
                       <span className="block pl-5 text-muted-foreground">依据:{it.evidence}</span>
                     </li>

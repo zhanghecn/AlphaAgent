@@ -613,8 +613,8 @@ function RevealSection({
               {ex.matched_line}
             </span>
           </div>
-          <p className="text-xs leading-5 text-foreground">{ex.scheme_desc}</p>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          <p className="whitespace-pre-line text-xs leading-5 text-foreground">{ex.scheme_desc}</p>
+          <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
             主力怎么想：{ex.psycho}
           </p>
           {ex.case_note ? (
