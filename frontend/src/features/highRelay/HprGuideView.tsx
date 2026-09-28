@@ -26,6 +26,20 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
 // 口诀卡顺序(主人定):阴阳分组,组内按二板开盘从低到高;与后端 RULES A/B/E 组序一致
 const POINT_ORDER = ["A1", "A2", "B2", "B4", "B1", "E1", "E2"] as const;
 
+// 速查表(主人定 2026-09-28):只要「阴阳地基 → 二板开 → 今天开 → 附加」四列,
+// 数据注记不进表;文案与后端 contracts.RULES/SCHEMES desc 同步(改一边必须改另一边)
+const CHEAT_ROWS: { name: string; yang: string; board: string; today: string; extra?: string }[] = [
+  { name: "A1 双平贴零", yang: "阳", board: "<1", today: "6~9.5", extra: "一板<3·换手<12" },
+  { name: "A2 一字转强", yang: "阳", board: "≥9.5一字", today: "7~8.5", extra: "一板<3时换手<5" },
+  { name: "B2 弱开系·捡尸", yang: "阴", board: "<0或2~3", today: "<0", extra: "一板<0" },
+  { name: "B2 弱开系·冒泡洗盘", yang: "阴阳", board: "3~7", today: "<3", extra: "一板≥7" },
+  { name: "B4 冒泡转强", yang: "阴", board: "7~8.5(一字不算)", today: "6~9.5", extra: "一板不限" },
+  { name: "B1 强转弱", yang: "阴", board: "≥7", today: "3~5", extra: "一板≥7·换手≥5" },
+  { name: "E1 四板便捷", yang: "不分", board: "三板换手10~20", today: "5~9.5", extra: "一字系:换手3~5·今开6~9.5" },
+  { name: "E2 捡漏·低吸", yang: "阳", board: "三板5~7", today: "<0", extra: "低开直接买" },
+  { name: "E2 捡漏·温开", yang: "阴", board: "二板<1", today: "3~6" },
+];
+
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
 export function HprGuideView() {
   const query = useQuery({
@@ -57,20 +71,42 @@ export function HprGuideView() {
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">一句话</div>
-        <p className="whitespace-pre-line text-sm leading-6 text-muted-foreground">{`昨天恰好 2 连板或 3 连板的票,今天冲第 N+1 板;七句口诀才出手。
-二接三只问一句「二板开在哪个档」(先阳后阴,档位从低到高):
-阳·贴零(<1)   → 今天开6~9.5,换手<12                    【双平贴零 69%】
-阳·一字(≥9.5) → 今天开7~8.5;一板开<3时换手须<5          【一字转强 67%】
-阴·弱开(今开<3) → 捡尸:一板<0、二板<0或2~3、今开<0;
-                  冒泡洗盘:一板≥7、二板3~7、今开<3(阴阳都打) 【弱开系 82%】
-阴·强开(7~8.5) → 今天开6~9.5(一字开盘不算)              【冒泡转强 82%】
-阴·强开(≥7)   → 一板也≥7+换手≥5,今天温开3~5            【强转弱 100%】
-三接四:三板换手10~20 → 今开5~9.5直接打(不分阴阳;一字系换手3~5,今开须6+)【四板便捷 71%】
-       捡漏:阳·三板5~7今低开低吸 / 阴·二板<1今温开3~6   【四板捡漏 79%】
-换手心法:二接三看二板换手(阳锁阴活),三接四看三板换手,一板换手永远不用看;
-触板即打(开盘≥9.5%顶格不命中);炸板次日走(T+1,一字跌停顺延),封住拿到断板(15日兜底)。
-合计184笔 月均4.2笔(v4.4);不挑就买是亏的,其余一概不碰。`}</p>
+        <div className="mb-1 text-sm font-semibold">
+          一句话：昨天恰好 2/3 连板的票，今天冲下一板——只对这七句口诀出手
+        </div>
+        <div className="mb-2 text-xs text-muted-foreground">
+          用法：看地基阴阳 → 看二板开在哪档 → 对照今天开；三接四看三板（与 contracts.RULES 同步）
+        </div>
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b text-left text-xs text-muted-foreground">
+              <th className="py-1.5 pr-3 font-medium">口诀</th>
+              <th className="py-1.5 pr-3 font-medium">地基</th>
+              <th className="py-1.5 pr-3 font-medium">二板开</th>
+              <th className="py-1.5 pr-3 font-medium">今天开</th>
+              <th className="py-1.5 font-medium">附加</th>
+            </tr>
+          </thead>
+          <tbody className="tabular-nums">
+            {CHEAT_ROWS.map((r) => (
+              <tr key={r.name} className="border-b border-muted/40 last:border-0">
+                <td className="py-1.5 pr-3 font-medium">{r.name}</td>
+                <td className={`py-1.5 pr-3 ${r.yang === "阳" ? "text-rise" : r.yang === "阴" ? "text-fall" : "text-muted-foreground"}`}>
+                  {r.yang}
+                </td>
+                <td className="py-1.5 pr-3 font-mono">{r.board}</td>
+                <td className="py-1.5 pr-3 font-mono font-semibold text-primary">{r.today}</td>
+                <td className="py-1.5 font-mono text-muted-foreground">{r.extra ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
+          换手心法：二接三看二板换手（阳锁阴活），三接四看三板换手，一板换手永远不用看；
+          盘中首次触涨停价打（低吸类低开直接买），开盘≥9.5%顶格不命中；
+          炸板次日走（T+1，一字跌停顺延），封住拿到断板（15日兜底）。
+          合计184笔 月均4.2笔（v4.4）；不挑就买是亏的，其余一概不碰。
+        </p>
       </section>
 
       <section className="rounded-lg border p-4" aria-label="七条口诀卡">
@@ -100,7 +136,7 @@ export function HprGuideView() {
                     />
                   </span>
                 </div>
-                <p className="whitespace-pre-line text-xs leading-5 text-foreground">{ruleText}</p>
+                <p className="whitespace-pre-line font-mono text-sm leading-6 text-foreground">{ruleText}</p>
                 <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
                   成绩:{it.evidence}
                 </p>
