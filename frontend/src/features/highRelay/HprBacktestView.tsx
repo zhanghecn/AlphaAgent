@@ -10,7 +10,7 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const POINTS = ["A1", "A2", "B1", "B2", "B4", "E1", "E2"] as const;  // v4.4 七条(B3/E3退休)
+const POINTS = ["A1", "A2", "B1", "B2", "E1", "E2"] as const;  // v5.0 六条(B3/E3/B4退休)
 const POINT_SHORT: Record<string, string> = {
   A1: "A1 双平贴零",
   A2: "A2 一字转强",
