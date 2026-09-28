@@ -26,6 +26,10 @@ export interface HprLiveEntry {
   actionable: boolean;
   avoid_static: string | null;
   auction_gate: "a2_0_9.5" | "b2_4_7" | null;
+  /** 出手条件人话(今天开多少+怎么买;多分支链重叠票为条件表;point="—"为 null) */
+  action_hint: string | null;
+  /** 出手今开窗列表(全部候选分支窗;无窗为空数组) */
+  today_window: [number, number][];
   prev_close: number | null;
   limit_price: number | null;
   foundation_yang: boolean | null;

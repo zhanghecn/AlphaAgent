@@ -252,6 +252,74 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
     return "—"
 
 
+def match_schemes(group4: str, b1_open, b2_open, b3_open,
+                  b2_turn=None, b3_turn=None) -> list[dict]:
+    """按链条件(不含今开)定位全部链全过分支,按 SCHEMES 优先级序返回。
+
+    多分支口诀(弱开系/捡漏/便捷一字系档)共享编号,且存在跨方案链重叠
+    (E1 链全不限含 E2;B1 链含 B4 二板段):该票今天按哪条出手由今开决定,
+    盘前出手条件=全部候选分支窗的条件表(今开落在哪窗就按哪条);
+    今开定型后归属=tag_point(首窗命中者,与本列表顺序一致)。
+    镜像 tag_point 的链段判定(改任何一处另一处必须同步)。"""
+    c = contracts
+    out: list[dict] = []
+    for s in c.SCHEMES:
+        if group4 not in s["group4"]:
+            continue
+        ok = True
+        for rng, val in zip(s["chain"], (b1_open, b2_open, b3_open), strict=False):
+            if rng is None:
+                continue
+            if val is None or not (rng[0] <= val < rng[1]):
+                ok = False
+                break
+        if not ok:
+            continue
+        vol = s.get("vol2")
+        if vol is not None and (b2_turn is None
+                                or not (vol[0] <= b2_turn < vol[1])):
+            continue
+        v2wl = s.get("vol2_when_b1_low")
+        if v2wl is not None and b1_open is not None and b1_open < c.CHAIN_FLAT_HI:
+            if b2_turn is None or not (v2wl[0] <= b2_turn < v2wl[1]):
+                continue
+        vol3 = s.get("vol3")
+        if vol3 is not None and (b3_turn is None
+                                 or not (vol3[0] <= b3_turn < vol3[1])):
+            continue
+        out.append(s)
+    return out
+
+
+def _fmt_window(win) -> str:
+    lo, hi = win
+    if lo <= -90:
+        return f"<{hi:g}"
+    if hi >= 90:
+        return f"≥{lo:g}"
+    return f"{lo:g}~{hi:g}"
+
+
+def action_hint(schemes: list[dict]) -> str | None:
+    """出手条件人话(主人定:实时推荐必须提示今天开多少+怎么买)。
+    单分支=「今天开6~9.5,盘中触涨停价打」;多分支链重叠(E1×E2/B1×B4)=
+    条件表「开X按甲打;开Y按乙买」(顺序=归属优先级,与 tag_point 一致)。
+    弱开/低开系(窗 lo<0 且 hi≤3:捡尸/冒泡洗盘/高开低吸)=开盘直接买(低吸)。"""
+    if not schemes:
+        return None
+    if len(schemes) == 1:
+        s = schemes[0]
+        lo, hi = s["today"]
+        buy = "开盘直接买(低吸)" if lo < 0 and hi <= 3 else "盘中触涨停价打"
+        return f"今天开{_fmt_window(s['today'])},{buy}"
+    parts = []
+    for s in schemes:
+        lo, hi = s["today"]
+        buy = "低开直接买" if lo < 0 and hi <= 3 else "触板打"
+        parts.append(f"开{_fmt_window(s['today'])}按{s['name']}{buy}")
+    return ";".join(parts)
+
+
 def scheme_today_window(point: str, auction_pct=None):
     """方案「今天开」窗 (lo, hi);非方案返回 None(供盘中扫描/前端展示)。
     v4.4 多分支方案(弱开系/捡漏/便捷一字系档)共享编号:有今开时返回包含今开的
@@ -337,11 +405,15 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                              rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid
         n_actionable += int(actionable)
-        # 候选=链条件已命中,今天开窗(竞价定型后对照;顶格≥9.5不命中)
-        win = scheme_today_window(point) if point != "—" else None
-        gate = None
-        if win is not None:
-            gate = f"today_{win[0]:g}_{win[1]:g}"
+        # 候选=链条件已命中,今天开窗(竞价定型后对照;顶格≥9.5不命中)。
+        # 多分支按链定位全部候选分支(v4.4 修复:曾按编号取首分支窗——冒泡洗盘/
+        # E1一字系/E2温开竞价门全错;且 E1×E2、B1×B4 链重叠票今开落次方案窗时
+        # 被误判 skipped_auction)→ 竞价门=全部候选窗,出手条件=条件表
+        branches = match_schemes(group4, rec.get("b1_open"), rec.get("b2_open"),
+                                 rec.get("b3_open"), b2_turn=rec.get("b2_turn"),
+                                 b3_turn=rec.get("b3_turn")) if point != "—" else []
+        wins = [s["today"] for s in branches]
+        gate = ",".join(f"today_{w[0]:g}_{w[1]:g}" for w in wins) or None
         prev_close = float(row.close_price)
         entries.append({
             "vt_symbol": str(row.vt_symbol),
@@ -353,6 +425,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "actionable": actionable,
             "avoid_static": avoid or None,
             "auction_gate": gate,
+            "action_hint": action_hint(branches),
+            "today_windows": [[w[0], w[1]] for w in wins],
             "prev_close": prev_close,
             "limit_price": round(prev_close * 1.10 + 1e-9, 2),
             "foundation_yang": yang,

@@ -109,6 +109,8 @@ def _live_row(entry: dict[str, object] | None,
             "actionable": bool(entry.get("actionable")),
             "avoid_static": entry.get("avoid_static"),
             "auction_gate": entry.get("auction_gate"),
+            "action_hint": entry.get("action_hint"),
+            "today_window": _parse_gate(entry.get("auction_gate")),
             "prev_close": entry.get("prev_close"),
             "limit_price": entry.get("limit_price"),
             "foundation_yang": entry.get("foundation_yang"),
@@ -155,6 +157,23 @@ def _live_row(entry: dict[str, object] | None,
     row.setdefault("point", "—")
     row.setdefault("level", "—")
     return row
+
+
+def _parse_gate(gate: object) -> list[list[float]]:
+    """auction_gate 多窗字符串(today_{lo}_{hi}[,...])解析成今开窗列表;
+    无门→空列表(多分支/链重叠票有多个候选窗,与 action_hint 条件表对应)。"""
+    if not gate:
+        return []
+    out: list[list[float]] = []
+    for part in str(gate).split(","):
+        seg = part.split("_")
+        if len(seg) != 3 or seg[0] != "today":
+            continue
+        try:
+            out.append([float(seg[1]), float(seg[2])])
+        except ValueError:
+            continue
+    return out
 
 
 def _live_sort_key(row: dict[str, object]) -> tuple:

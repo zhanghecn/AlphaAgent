@@ -2060,7 +2060,8 @@ hpr_pool_entries = Table(
     Column("level", String(2), nullable=False, server_default="—"),  # A/B/—
     Column("actionable", Boolean, nullable=False, server_default="false"),  # 命中且非静态回避
     Column("avoid_static", String(160), nullable=True),   # 静态回避原因(命中也不买)
-    Column("auction_gate", String(16), nullable=True),    # 竞价门: a2_0_9.5 / b2_4_7 / None
+    Column("auction_gate", String(64), nullable=True),    # 竞价门多窗: today_3_5[,today_6_9.5](逗号分隔全部候选分支窗)
+    Column("action_hint", String(64), nullable=True),     # 出手条件人话(今天开多少+怎么买;2026-09-28)
     Column("prev_close", Float, nullable=False),     # T-1 收盘
     Column("limit_price", Float, nullable=False),    # 触发价 = 今日涨停价
     # 地基快照(T-1 口径,首板前一天)
@@ -2079,8 +2080,10 @@ hpr_pool_entries = Table(
     Column("b3_type", String(8), nullable=True),
     Column("b1_open", Float, nullable=True),             # 首板开盘 %
     Column("b2_open", Float, nullable=True),             # 二板开盘 %
+    Column("b3_open", Float, nullable=True),             # 三板开盘 %(2026-09-28,竞价定型重算方案点用)
     Column("b1_turn", Float, nullable=True),             # 首板换手 %
     Column("b2_turn", Float, nullable=True),             # 二板换手 %
+    Column("b3_turn", Float, nullable=True),             # 三板换手 %(2026-09-28)
     Column("turn_grad", Float, nullable=True),           # 换手梯度 b2-b1
     Column("mkt_lim_tm1", Integer, nullable=True),       # 昨日大盘涨停家数(信息项)
     Column("rules_version", String(80), nullable=False),
@@ -2426,6 +2429,10 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE low_suction_adjusted_daily_bars ADD COLUMN IF NOT EXISTS sync_run_id BIGINT",
         "ALTER TABLE low_suction_adjusted_daily_bar_scopes ADD COLUMN IF NOT EXISTS sync_run_id BIGINT",
         "ALTER TABLE sync_batch_schedules ADD COLUMN IF NOT EXISTS action VARCHAR(40) NOT NULL DEFAULT 'sync'",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS action_hint VARCHAR(64)",
+        "ALTER TABLE hpr_pool_entries ALTER COLUMN auction_gate TYPE VARCHAR(64)",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS b3_open FLOAT",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS b3_turn FLOAT",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",

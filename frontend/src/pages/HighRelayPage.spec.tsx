@@ -67,6 +67,8 @@ const LIVE_PAYLOAD: HprLivePayload = {
       actionable: true,
       avoid_static: null,
       auction_gate: null,
+      action_hint: "今天开3~5,盘中触涨停价打",
+      today_window: [[3.0, 5.0]],
       prev_close: 15.0,
       limit_price: 16.5,
       foundation_yang: false,
@@ -108,6 +110,8 @@ const LIVE_PAYLOAD: HprLivePayload = {
       actionable: false,
       avoid_static: null,
       auction_gate: null,
+      action_hint: null,
+      today_window: [],
       prev_close: 20.0,
       limit_price: 22.0,
       foundation_yang: true,
@@ -170,6 +174,10 @@ describe("HprLiveView", () => {
     expect(html).toContain("持有中");
     expect(html).toContain("爱仕达");
     expect(html).toContain("下影→实体");
+    // 出手条件(主人定):今开列下显示「需多少」并对照今开(mock: 今开+2.1 不在窗3~5 → ✗)
+    expect(html).toContain("需3~5");
+    expect(html).toContain(" ✗");
+    expect(html).toContain("今天开3~5,盘中触涨停价打");  // title 悬浮完整条件
   });
 });
 

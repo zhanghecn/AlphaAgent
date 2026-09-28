@@ -256,6 +256,26 @@ function LiveRow({ entry }: { entry: HprLiveEntry }) {
       <td className={cn("px-3 py-2.5 text-right font-mono tabular-nums",
         entry.status === "skipped_auction" ? "text-amber-600" : pctTone(entry.auction_pct))}>
         {entry.auction_pct == null ? "--" : formatPct(entry.auction_pct)}
+        {entry.today_window && entry.today_window.length > 0 ? (
+          // 出手条件(主人定):盘前显示「需多少」待竞价对照;竞价后对照今开 ✓/✗;
+          // 多分支链重叠票(E1×E2/B1×B4)多窗并列,悬浮见完整条件表(action_hint)
+          <div
+            className={cn(
+              "text-[10px]",
+              entry.auction_pct == null
+                ? "text-muted-foreground"
+                : inAnyWindow(entry.today_window, entry.auction_pct)
+                  ? "text-rise"
+                  : "text-amber-600",
+            )}
+            title={entry.action_hint ?? undefined}
+          >
+            需{entry.today_window.map(fmtWindow).join("或")}
+            {entry.auction_pct != null
+              ? inAnyWindow(entry.today_window, entry.auction_pct) ? " ✓" : " ✗"
+              : ""}
+          </div>
+        ) : null}
       </td>
       <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatPrice(entry.last_price)}</td>
       <td className={cn("px-3 py-2.5 text-right font-mono tabular-nums", pctTone(entry.change_pct))}>
@@ -285,6 +305,19 @@ function LiveRow({ entry }: { entry: HprLiveEntry }) {
 function pctTone(value: number | null | undefined) {
   if (value == null) return "";
   return value >= 0 ? "text-rise" : "text-fall";
+}
+
+/** 今开窗格式化:[lo,hi] → "<3" / "≥6" / "6~9.5"(与后端 action_hint 同口径) */
+function fmtWindow(win: [number, number]) {
+  const [lo, hi] = win;
+  if (lo <= -90) return `<${hi}`;
+  if (hi >= 90) return `≥${lo}`;
+  return `${lo}~${hi}`;
+}
+
+/** 今开是否落在任一候选窗(多分支链重叠票有多个窗,任一含即合规) */
+function inAnyWindow(wins: [number, number][], auctionPct: number) {
+  return wins.some(([lo, hi]) => lo <= auctionPct && auctionPct < hi);
 }
 
 function fmtNum(value: number | null | undefined) {

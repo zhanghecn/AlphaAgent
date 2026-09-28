@@ -74,12 +74,20 @@ def _first_jump_status(entry: dict[str, object], auction_pct: float) -> str | No
         return "skipped_gap"        # 顶格≥9.5%,排队买不到,正常开盘口径外
     if str(entry.get("group4")) == "三接四阴" and auction_pct < 0:
         return "skipped_auction"    # 板深低开=没人接(盘中回避)
-    gate = entry.get("auction_gate")            # 格式 today_{lo}_{hi}
+    gate = entry.get("auction_gate")            # 多窗: today_{lo}_{hi}[,...]
     if gate:
-        parts = str(gate).split("_")
-        lo, hi = float(parts[1]), float(parts[2])
-        if not (lo <= auction_pct < hi):
-            return "skipped_auction"            # 不在方案「今天开」窗
+        in_any = False
+        for part in str(gate).split(","):
+            seg = part.split("_")
+            if len(seg) == 3 and seg[0] == "today":
+                try:
+                    if float(seg[1]) <= auction_pct < float(seg[2]):
+                        in_any = True
+                        break
+                except ValueError:
+                    continue
+        if not in_any:
+            return "skipped_auction"            # 不在任何候选「今天开」窗
     return None
 
 
@@ -141,6 +149,17 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
                     auction_skipped += 1
                     writes.append((vt, patch))
                     continue
+                # 在窗:多分支/链重叠票(E1×E2、B1×B4、多分支共享编号)按今开重算
+                # 方案点——盘前标是链首过点,今开定型后归首窗命中者(与回测一致)
+                from alphaagent.server.services.high_relay import pool as pool_mod
+                real_point = pool_mod.tag_point(
+                    str(entry.get("group4")), entry.get("b1_open"),
+                    entry.get("b2_open"), entry.get("b3_open"),
+                    auction_pct=auction_pct,
+                    b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"))
+                if real_point != str(entry.get("point")):
+                    patch["point"] = real_point
+                    patch["level"] = contracts.POINT_LEVELS.get(real_point, "—")
 
         if status == "watching":
             # 触板即买:现价首次 ≥ 涨停价 → 按涨停价打(链式研究口径,无时间窗)
