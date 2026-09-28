@@ -240,16 +240,16 @@ describe("ShortTermResearchPage", () => {
 describe("quizScore.judge 四档矩阵", () => {
   const cases: Array<[boolean, number, "buy" | "reject", number, string]> = [
     // [shouldBuy, retPct, choice, 期望分, 期望文案]
-    [true, 12.6, "buy", 10, "口诀对,行情也对"],        // 该买买对赚钱
-    [true, -4.2, "buy", 3, "口诀对,这次行情不配合"],    // 该买买对但亏
-    [true, 12.6, "reject", -5, "违背口诀,代价实打实"],  // 该买不买踏空大涨
-    [true, -4.2, "reject", 2, "违背口诀,这次侥幸对了"], // 该买不买却躲过
-    [false, -7.5, "reject", 10, "口诀对,行情也对"],     // 该拒拒对躲过
-    [false, 8.8, "reject", 3, "口诀对,这次行情不配合"], // 该拒拒对但踏空
-    [false, 8.8, "buy", 2, "违背口诀,这次侥幸对了"],    // 不该买瞎买侥幸赚
-    [false, -7.5, "buy", -5, "违背口诀,代价实打实"],    // 不该买买了亏
-    [true, 0, "buy", 10, "口诀对,行情也对"],            // 恰平算配合买(好票口径)
-    [false, 0, "reject", 3, "口诀对,这次行情不配合"],   // 恰平对拒=不配合
+    [true, 12.6, "buy", 10, "口诀对,行情也对"],         // 该买买对赚钱
+    [true, -4.2, "buy", 3, "口诀对,这次行情不配合"],     // 该买买对但亏
+    [true, 12.6, "reject", -5, "没按口诀,这次判断错了"], // 该买不买踏空大涨
+    [true, -4.2, "reject", 5, "没按口诀,但你判断对了"],  // 该买不买却躲过(v5去侥幸化+5)
+    [false, -7.5, "reject", 10, "口诀对,行情也对"],      // 该拒拒对躲过
+    [false, 8.8, "reject", 3, "口诀对,这次行情不配合"],  // 该拒拒对但踏空
+    [false, 8.8, "buy", 5, "没按口诀,但你判断对了"],     // 不该买但自己分析判断对(v5+5)
+    [false, -7.5, "buy", -5, "没按口诀,这次判断错了"],   // 不该买买了亏
+    [true, 0, "buy", 10, "口诀对,行情也对"],             // 恰平算配合买(好票口径)
+    [false, 0, "reject", 3, "口诀对,这次行情不配合"],    // 恰平对拒=不配合
   ];
   it.each(cases)(
     "shouldBuy=%s ret=%s choice=%s → %s分",
@@ -293,6 +293,8 @@ describe("quizScore.summarize 月度统计", () => {
     expect(s.answered).toBe(2);
     expect(s.score).toBe(20);
     expect(s.great).toBe(2);
+    expect(s.ruleMatched).toBe(2);   // 双维:两题都与口诀一致
+    expect(s.marketRight).toBe(2);   // 双维:两题方向都判断正确
     expect(s.byPoint).toEqual([{ point: "A1", n: 1, correct: 1 }]);
   });
 });
@@ -305,7 +307,8 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
   display: {
     board_label: "打3板", b1_open: 8.4, b2_open: 10.0, b3_open: null,
     b2_turn: 28.8, b3_turn: null, pre20_pct: 20.0, auction_pct: 4.16,
-    prev_close: 15.0, limit_price: 16.5, decision_open: 15.62, chain: "实体→一字",
+    prev_close: 15.0, limit_price: 16.5, decision_open: 15.62, day_high_pct: 9.98,
+    chain: "实体→一字",
   },
   bars_before: [
     { d: "2024-11-08", o: 13.2, h: 13.5, l: 12.9, c: 13.0, v: 800 },  // 地基日 阴(c<o)
@@ -335,7 +338,8 @@ const QUIZ_MISS_Q: HprQuizQuestion = {
   display: {
     board_label: "打4板", b1_open: 1.3, b2_open: -3.1, b3_open: 10.0,
     b2_turn: 10.1, b3_turn: 1.1, pre20_pct: 4.4, auction_pct: 9.98,
-    prev_close: 20.0, limit_price: 22.0, decision_open: 22.0, chain: "实体→一字→一字",
+    prev_close: 20.0, limit_price: 22.0, decision_open: 22.0, day_high_pct: 10.0,
+    chain: "实体→一字→一字",
   },
   bars_before: [
     { d: "2024-11-25", o: 16.0, h: 16.8, l: 15.9, c: 16.6, v: 900 },   // 地基日 阳(c>o)
@@ -384,6 +388,8 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("换手28.8");
     expect(html).toContain("今开");
     expect(html).toContain("+4.2");
+    expect(html).toContain("盘中最高");               // 第二决策信息(主人v5)
+    expect(html).toContain("冲到9%+");
     expect(html).toContain("买入");
     expect(html).toContain("不买");
     // 阴阳组判定依据亮出:地基日格 + 徽标写全「·阴地基」(主人点名:阴阳不像正常逻辑)
@@ -420,7 +426,7 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("主力怎么想");
     expect(html).toContain("典型样例");            // case_note
     expect(html).toContain("落在窗3~5");           // matched_line
-    expect(html).toContain("断板日收盘卖");        // 退出原因
+    expect(html).toContain("断板日·中间价卖");      // 退出原因(v4.1中间价口径)
   });
 
   it("已答未命中题(拒对):避免理由列表+段末入口", () => {
@@ -436,13 +442,13 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("看本段总结");          // 最后一题揭示后的入口
   });
 
-  it("违背口诀买入:扣分横幅", () => {
+  it("没按口诀买入:扣分横幅", () => {
     const html = renderRunner({
       questions: [QUIZ_MISS_Q],
       answers: { [quizQuestionId(QUIZ_MISS_Q)]: { choice: "buy", score: -5 } },
     });
-    // miss 票 ret=-5.64,违背口诀买入亏损 → -5
-    expect(html).toContain("违背口诀,代价实打实");
+    // miss 票 ret=-5.64,没按口诀买入亏损 → -5
+    expect(html).toContain("没按口诀,这次判断错了");
     expect(html).toContain("-5");
     expect(html).toContain("标准答案");
   });

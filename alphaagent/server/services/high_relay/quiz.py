@@ -5,8 +5,9 @@
   miss 口径一致。q4 起顶格票(今开≥9.5)不再出题:一字开盘排队也买不到,「买」这个
   选项现实中不存在,上千道送分废题只会稀释训练(主人2026-09-28拍板:「一字不是选
   不了么」);「开盘≥9.5一律不打」作为硬规则留在规则页,不占用题目。
-- 收益 = E3%(产品卖出纪律:炸板当日收盘走/封住→断板收盘,15日兜底),与交割单同口径;
-  E2/B2 低吸类回测统一按触板价买入计(实盘低开买成本更低,题卡注明)。
+- 收益 = E3%(产品卖出纪律:炸板当日走/封住→断板,15日兜底;v4.1起退出价=
+  退出日(最高+最低)/2中间价——主人拍板:卖出日多冲高回落,中间价更接近现实可达成
+  成交价),与交割单同口径;E2/B2 低吸类回测统一按触板价买入计(实盘低开买成本更低)。
 - K线 = 未复权日线(与回测同口径,除权日可见跳空,题卡页脚注明)。
 
 版本纪律:讲解文案/题库结构变更必升 QUIZ_CONTENT_VERSION;版本串进表/进API/进前端
@@ -18,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 4  # 讲解文案/题库结构变更必升(v4:剔除顶格废题——今开≥9.5买不到,不再出题)
+QUIZ_CONTENT_VERSION = 5  # 讲解文案/题库结构变更必升(v5:E3退出价改中间价判分全变+题目加盘中最高显示)
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -130,6 +131,9 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                 "prev_close": round(float(b_close[i - 1]), 2),
                 "limit_price": _f(r["买价"]),
                 "decision_open": round(float(b_open[i]), 2),
+                # 决策日盘中最高涨幅(打板日冲到哪):主人要的第二决策信息——
+                # 真实打板=看到冲到9%快触板才决定打不打,与回测「触板价买」口径自洽
+                "day_high_pct": round((float(b_high[i]) / float(b_close[i - 1]) - 1) * 100, 2),
                 "chain": str(r["链"]) if r["链"] == r["链"] else None,
             },
             "bars_before": before,

@@ -41,10 +41,10 @@ const TIER_STYLES: Record<string, string> = {
 };
 
 const EXIT_REASON_LABELS: Record<string, string> = {
-  break_day_close: "炸板当日·收盘卖",
-  next_close_fail: "次日未涨停·收盘卖",
-  break_close: "断板日收盘卖",
-  max_hold_close: "15日兜底·收盘卖",
+  break_day_close: "炸板当日·中间价卖",
+  next_close_fail: "次日未涨停·中间价卖",
+  break_close: "断板日·中间价卖",
+  max_hold_close: "15日兜底·中间价卖",
 };
 
 type Board = 2 | 3;
@@ -302,7 +302,7 @@ export function QuizRunner({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 lg:grid-cols-7">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 lg:grid-cols-8">
           {fBar ? (
             <InfoCell
               label={`地基日 ${fBar.d.slice(5)}`}
@@ -325,6 +325,12 @@ export function QuizRunner({
             />
           ) : null}
           <InfoCell label="今开" value={fmtSigned(d.auction_pct)} highlight />
+          <InfoCell
+            label="盘中最高"
+            value={fmtSigned(d.day_high_pct)}
+            extra={d.day_high_pct >= 9 ? "冲到9%+" : "未到9%"}
+            highlight
+          />
           <InfoCell label="首板前20日" value={fmtSigned(d.pre20_pct)} />
           <InfoCell label="板型链" value={d.chain ?? "--"} plain />
         </div>
@@ -467,19 +473,37 @@ function BoardSummaryCard({
 
 function TierGrid({ summary }: { summary: QuizMonthSummary }) {
   return (
-    <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-      <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.great)}>
-        口诀对行情也对 <span className="font-mono font-semibold">{summary.great}</span> 题
+    <div>
+      <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+        <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.great)}>
+          口诀对行情也对 <span className="font-mono font-semibold">{summary.great}</span> 题
+        </div>
+        <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.good)}>
+          口诀对行情不配合 <span className="font-mono font-semibold">{summary.good}</span> 题
+        </div>
+        <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.lucky)}>
+          没按口诀但判断对 <span className="font-mono font-semibold">{summary.lucky}</span> 题
+        </div>
+        <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.bad)}>
+          没按口诀判断错了 <span className="font-mono font-semibold">{summary.bad}</span> 题
+        </div>
       </div>
-      <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.good)}>
-        口诀对行情不配合 <span className="font-mono font-semibold">{summary.good}</span> 题
-      </div>
-      <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.lucky)}>
-        违背口诀侥幸对 <span className="font-mono font-semibold">{summary.lucky}</span> 题
-      </div>
-      <div className={cn("rounded-md border px-3 py-2", TIER_STYLES.bad)}>
-        违背口诀实打实错 <span className="font-mono font-semibold">{summary.bad}</span> 题
-      </div>
+      {summary.answered > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs tabular-nums text-muted-foreground">
+          <span>
+            口诀维度·与口诀一致{" "}
+            <span className="font-semibold text-foreground">
+              {summary.ruleMatched}/{summary.answered}
+            </span>
+          </span>
+          <span>
+            市场维度·方向判断正确{" "}
+            <span className="font-semibold text-foreground">
+              {summary.marketRight}/{summary.answered}
+            </span>
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }

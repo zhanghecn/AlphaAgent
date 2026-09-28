@@ -333,6 +333,7 @@ export interface HprQuizDisplay {
   prev_close: number;
   limit_price: number | null;   // 涨停价(打板买入价)
   decision_open: number;        // 决策日开盘价(今开十字bar用)
+  day_high_pct: number;         // 决策日盘中最高涨幅%(第二决策信息:冲到9%快触板才决定打不打)
   chain: string | null;         // 板型链 实体→一字
 }
 

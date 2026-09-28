@@ -8,8 +8,8 @@
   开盘≥9.5% 顶格一律不命中=正常开盘口径)
 - 收益主算法(E0/锚点口径) = 持有到首次不再涨停日收盘,15 个交易日兜底;
   胜率 = 次日收盘收益≥0(研究「好票」口径:炸板次日涨回=好票,恰平也算);未完不进统计
-- 产品卖出纪律(E3) = 买入日没封住→当天收盘走;封住→E0;报告同时给 E3 均值/胜率
-- 执行口径 = E0(持有到断板) vs E3(炸板当日收盘走/封住→E0)对比;
+- 产品卖出纪律(E3) = 买入日没封住→当天走;封住→E0;退出价=(退出日最高+最低)/2中间价(v4.1起)
+- 执行口径 = E0(持有到断板,收盘) vs E3(炸板当日走/封住→E0,退出日中间价)对比;
   链式方案无首刻过滤(研究口径=触板即买),触板时刻表不再参与判定
 统计口径: avg_pct=次日收%均值;win=次日收%≥0占比(=研究好票率);bw_pct=持有到断板均值;
 bw_median=中位;e3_pct/e3_win=产品卖出纪律口径;锚点数字=研究定稿。
@@ -67,7 +67,7 @@ def assemble_report(E: pd.DataFrame) -> dict[str, object]:
         "coverage": coverage,
         "caliber": ("日线口径:昨日恰好2/3连板,当日最高价触涨停价(=昨收×1.10)按涨停价买,"
                     "一字全天不开排除(T字可买);E0=持有到首次断板日收盘(15日兜底,锚点口径),"
-                    "E3=炸板当日收盘走/封住→E0(产品卖出纪律);胜率=次日收盘收益≥0;"
+                    "E3=炸板当日走/封住→E0,退出价=(退出日高+低)/2中间价;胜率=次日收盘收益≥0;"
                     "无滑点,日线未复权。池=昨日2/3连板全量(雷达),出手=链式七方案命中(正常开盘口径)。"),
         "group4_labels": contracts.GROUP4_LABELS,
         "point_labels": contracts.POINT_LABELS,
@@ -117,6 +117,8 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
     for k in range(1, MAX_K + 1):
         bars[f"n{k}_close"] = g["close_price"].shift(-k)
         bars[f"n{k}_open"] = g["open_price"].shift(-k)
+        bars[f"n{k}_high"] = g["high_price"].shift(-k)
+        bars[f"n{k}_low"] = g["low_price"].shift(-k)
         bars[f"n{k}_is_lim"] = g["is_lim"].shift(-k)
 
     # 事件 = 昨日恰好 2/3 连板 × 当日触板 × 非一字全天(研究 ev_mask 口径)
@@ -170,14 +172,23 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             exit_idx = i + MAX_K
             capped = True
         unfinished = exit_e0 != exit_e0
-        buy_close = float(cols["close_price"][i])
-        # E3: 炸板→当天收盘(break_day_close);封住→E0
+        # E3 退出价(v4.1 起)= 退出日(最高+最低)/2 中间价(主人2026-09-28拍板):
+        # 卖出日多为冲高回落(断板/炸板),机械收盘卖系统性贴低点,中间价更接近
+        # 现实可达成成交价;炸板→当天中间价(break_day_close),封住→断板日中间价
         if sealed:
-            exit_e3, e3_date, e3_reason = exit_e0, exit_idx, (
-                "next_close_fail" if hold_days == 1 else
-                ("max_hold_close" if capped else "break_close"))
+            if hold_days is not None:
+                e3h = bars[f"n{hold_days}_high"].iat[i]
+                e3l = bars[f"n{hold_days}_low"].iat[i]
+                exit_e3 = (float(e3h) + float(e3l)) / 2
+                e3_date = exit_idx
+                e3_reason = ("next_close_fail" if hold_days == 1 else
+                             ("max_hold_close" if capped else "break_close"))
+            else:  # 数据尾部未完(封住但后续日线未出):保持 NaN/None
+                exit_e3, e3_date, e3_reason = np.nan, None, None
         else:
-            exit_e3, e3_date, e3_reason = buy_close, i, "break_day_close"
+            exit_e3 = (float(bars["high_price"].iat[i])
+                       + float(bars["low_price"].iat[i])) / 2
+            e3_date, e3_reason = i, "break_day_close"
         e3_exit_date = None
         if not unfinished and e3_date is not None:
             e3_exit_date = pd.Timestamp(bars["trade_date"].iat[e3_date]).date().isoformat()
@@ -311,7 +322,7 @@ def _execution_caliber(done: pd.DataFrame) -> dict[str, object]:
                 "yearly": yearly}
 
     return {
-        "caliber": "E0=持有到断板(研究锚点口径);E3=炸板当日收盘走/封住→E0(产品卖出纪律)",
+        "caliber": "E0=持有到断板(研究锚点口径,收盘);E3=炸板当日走/封住→E0,退出价=退出日(高+低)/2中间价(v4.1)",
         "subsets": [
             row("方案命中全部·E0", hit),
             row("方案命中全部·E3", hit),
@@ -388,7 +399,7 @@ def _radar_stats(done: pd.DataFrame) -> dict[str, object]:
 def _ledger_days(trades: pd.DataFrame, touch_map: dict | None = None) -> list[dict[str, object]]:
     """全历史模拟交割单(方案点命中口径,全点合并,不限仓位不限天数;月份筛选由 API 层切片)。
 
-    退出 = 产品卖出纪律(E3):炸板当日收盘走/封住→断板收盘(15日兜底);
+    退出 = 产品卖出纪律(E3):炸板当日走/封住→断板日(15日兜底),退出价=(高+低)/2中间价;
     ret_e0 = 研究主算法(持有到断板)收益,对照列。
     touch: {(vt_symbol, 买入日): 'HH:MM'} 首触板15分钟末刻;无数据=None(2024-08前)。
     """

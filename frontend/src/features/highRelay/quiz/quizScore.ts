@@ -1,10 +1,10 @@
 // 高位接力答题训练 · 判分(纯函数,组件与测试共用)
-// 主人定的四档矩阵:
+// 主人定的四档矩阵(v5 去侥幸化:基于自己形态/基本面判断做对是真实能力不是运气):
 //   决策符合口诀 × 结果配合(买对赚钱/拒对躲过) → 大加分 +10
 //   决策符合口诀 × 结果不配合(买对但亏/拒对踏空) → 小加分 +3
-//   决策违背口诀 × 结果配合(瞎买侥幸赚/错拒躲过) → 小加分 +2
-//   决策违背口诀 × 结果不配合(买亏/踏空大涨) → 扣分 -5
-// 「结果」= 该事件按 E3 卖出纪律模拟的真实收益 ret_pct。
+//   没按口诀 × 结果配合(自己分析判断对了) → 中加分 +5(主人:不是侥幸,不一定是错的)
+//   没按口诀 × 结果不配合(判断错了) → 扣分 -5
+// 「结果」= 该事件按 E3 卖出纪律模拟的真实收益 ret_pct(v4.1起退出价=退出日(高+低)/2中间价)。
 
 import type { HprQuizQuestion } from "@/api/highRelay";
 
@@ -35,11 +35,11 @@ export function judge(
              text: "口诀对,这次行情不配合" };
   }
   if (favorable) {
-    return { matchesRule, favorable, score: 2, tier: "lucky",
-             text: "违背口诀,这次侥幸对了" };
+    return { matchesRule, favorable, score: 5, tier: "lucky",
+             text: "没按口诀,但你判断对了" };
   }
   return { matchesRule, favorable, score: -5, tier: "bad",
-           text: "违背口诀,代价实打实" };
+           text: "没按口诀,这次判断错了" };
 }
 
 export interface QuizMonthSummary {
@@ -50,6 +50,9 @@ export interface QuizMonthSummary {
   good: number;
   lucky: number;
   bad: number;
+  // 双维度统计(主人v5):口诀维度=你的选择与口诀一致;市场维度=你的选择方向与真实走势一致
+  ruleMatched: number;   // 与口诀一致的题数
+  marketRight: number;   // 市场判断正确的题数(favorable:买则涨/拒则跌)
   // 按口诀分组的对错(只统计命中题): [{point, n, correct}]
   byPoint: { point: string; n: number; correct: number }[];
 }
@@ -65,7 +68,8 @@ export function summarize(
 ): QuizMonthSummary {
   const out: QuizMonthSummary = {
     total: questions.length, answered: 0, score: 0,
-    great: 0, good: 0, lucky: 0, bad: 0, byPoint: [],
+    great: 0, good: 0, lucky: 0, bad: 0,
+    ruleMatched: 0, marketRight: 0, byPoint: [],
   };
   const pointAcc = new Map<string, { n: number; correct: number }>();
   for (const q of questions) {
@@ -75,6 +79,8 @@ export function summarize(
     out.score += rec.score;
     const verdict = judge(q.answer.should_buy, q.answer.ret_pct ?? 0, rec.choice);
     out[verdict.tier] += 1;
+    if (verdict.matchesRule) out.ruleMatched += 1;
+    if (verdict.favorable) out.marketRight += 1;
     if (q.answer.point !== "—") {
       const acc = pointAcc.get(q.answer.point) ?? { n: 0, correct: 0 };
       acc.n += 1;
