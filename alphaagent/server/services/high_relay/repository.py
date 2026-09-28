@@ -276,3 +276,70 @@ def latest_rebuild_run() -> dict[str, object] | None:
             .limit(1)
         ).mappings().one_or_none()
     return dict(row) if row else None
+
+
+# ── 答题训练题库(随回测重建整表替换;API 只读) ──
+
+def save_quiz_questions(rules_version: str, rows: list[Mapping[str, object]]) -> int:
+    """整表替换题库(单事务 delete-all + 逐行写入;幂等)。"""
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        session.execute(delete(schema.hpr_quiz_questions))
+        for row in rows:
+            session.execute(
+                pg_insert(schema.hpr_quiz_questions).values(
+                    decision_date=row["decision_date"],
+                    vt_symbol=row["vt_symbol"],
+                    year=row["year"],
+                    month=row["month"],
+                    seq=row["seq"],
+                    name=row["name"],
+                    group4=row["group4"],
+                    point=row["point"],
+                    ret_pct=row.get("ret_pct"),
+                    payload=row["payload"],
+                    rules_version=rules_version,
+                )
+            )
+    return len(rows)
+
+
+def load_quiz_overview() -> dict[str, object]:
+    """题库标量聚合:year→month→{total,buy_count,reject_count}+全库合计+版本。"""
+    schema.ensure_schema_once(get_engine())
+    t = schema.hpr_quiz_questions
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                t.c.year, t.c.month,
+                func.count().label("total"),
+                func.count().filter(t.c.point != "—").label("buy_count"),
+                func.count().filter(t.c.point == "—").label("reject_count"),
+            ).group_by(t.c.year, t.c.month).order_by(t.c.year, t.c.month)
+        ).mappings().all()
+        versions = session.execute(
+            select(t.c.rules_version).distinct()
+        ).scalars().all()
+    return {"months": [dict(r) for r in rows],
+            "rules_versions": [str(v) for v in versions]}
+
+
+def load_quiz_questions(month: str) -> list[dict[str, object]]:
+    """该月全部题目 payload,按 seq 升序。"""
+    schema.ensure_schema_once(get_engine())
+    t = schema.hpr_quiz_questions
+    with session_scope() as session:
+        rows = session.execute(
+            select(t.c.payload).where(t.c.month == month).order_by(t.c.seq)
+        ).scalars().all()
+    return [dict(r) for r in rows if isinstance(r, Mapping)]
+
+
+def quiz_bank_status() -> dict[str, object]:
+    """{rules_version, count}(reconcile 自检:版本漂移/空表→触发重建)。"""
+    schema.ensure_schema_once(get_engine())
+    t = schema.hpr_quiz_questions
+    with session_scope() as session:
+        versions = session.execute(select(t.c.rules_version).distinct()).scalars().all()
+        count = session.execute(select(func.count()).select_from(t)).scalar_one()
+    return {"rules_versions": [str(v) for v in versions], "count": int(count)}

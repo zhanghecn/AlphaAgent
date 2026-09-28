@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from alphaagent.server.services.high_relay import (
     backtest as backtest_mod,
     contracts,
+    quiz as quiz_mod,
     repository,
 )
 
@@ -252,7 +253,10 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     repository.update_rebuild_run(run_id, status="running", stage="全量回放", started_at=now)
     try:
-        payload = backtest_mod.run_backtest()
+        E, bars = backtest_mod.build_events()
+        payload = backtest_mod.assemble_report(E)
+        repository.update_rebuild_run(run_id, status="running", stage="题库构建")
+        questions = quiz_mod.build_questions(E, bars)
     except Exception as exc:  # noqa: BLE001
         logger.warning("hpr backtest rebuild failed: %s", exc, exc_info=True)
         repository.update_rebuild_run(
@@ -261,6 +265,7 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
         raise
     repository.update_rebuild_run(run_id, status="running", stage="写库")
     repository.save_backtest_report(contracts.HPR_RULES_VERSION, payload)
+    quiz_count = repository.save_quiz_questions(quiz_mod.quiz_rules_version(), questions)
     summary = payload.get("summary") or {}
     repository.update_rebuild_run(
         run_id, status="done", stage="完成",
@@ -268,7 +273,8 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
         message="; ".join(f"{pk}: n={(summary.get(pk) or {}).get('n')}"
                           for pk in contracts.POINT_KEYS),
         metrics={"summary": summary,
-                 "anchor_check": payload.get("anchor_check") or {}},
+                 "anchor_check": payload.get("anchor_check") or {},
+                 "quiz": {"count": quiz_count}},
     )
     return payload
 
@@ -330,6 +336,47 @@ def get_forward_ledger(trade_date: date) -> dict[str, object]:
             "trade_date": trade_date.isoformat(), "trades": entered}
 
 
+# ── 答题训练题库 ──
+
+def get_quiz_overview() -> dict[str, object]:
+    """题库年→月分布(前端年份选择/月份格子);版本不符或空表 → unavailable。"""
+    data = repository.load_quiz_overview()
+    months = data.get("months") or []
+    versions = data.get("rules_versions") or []
+    expect = quiz_mod.quiz_rules_version()
+    if not months or versions != [expect]:
+        return {"status": "unavailable", "rules_version": expect,
+                "stored_versions": versions}
+    years: dict[str, list[dict[str, object]]] = {}
+    total = 0
+    for row in months:
+        y = str(row["year"])
+        years.setdefault(y, []).append({
+            "month": str(row["month"]),
+            "total": int(row["total"]),
+            "buy_count": int(row["buy_count"]),
+            "reject_count": int(row["reject_count"]),
+        })
+        total += int(row["total"])
+    return {
+        "status": "ok",
+        "rules_version": expect,
+        "total": total,
+        "years": [{"year": y, "months": ms} for y, ms in sorted(years.items())],
+    }
+
+
+def get_quiz_questions(month: str) -> dict[str, object]:
+    """该月全部题目(含K线窗口/答案/讲解,一次下发;前端本地判分)。"""
+    questions = repository.load_quiz_questions(month)
+    status = repository.quiz_bank_status()
+    expect = quiz_mod.quiz_rules_version()
+    if status.get("rules_versions") != [expect]:
+        return {"status": "unavailable", "rules_version": expect}
+    return {"status": "ok", "month": month, "rules_version": expect,
+            "count": len(questions), "questions": questions}
+
+
 # ── 规则契约 ──
 
 def get_rules() -> dict[str, object]:
@@ -339,6 +386,8 @@ def get_rules() -> dict[str, object]:
         "point_labels": contracts.POINT_LABELS,
         "point_levels": contracts.POINT_LEVELS,
         "point_desc": contracts.POINT_DESC,
+        "point_names": {s["no"]: s["name"] for s in contracts.SCHEMES},
+        "point_psycho": contracts.POINT_PSYCHO,
         "rules": contracts.RULES,
         "falsified_rules": contracts.FALSIFIED_RULES,
         "risk_notes": contracts.RISK_NOTES,

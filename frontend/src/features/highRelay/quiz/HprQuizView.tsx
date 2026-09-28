@@ -1,0 +1,219 @@
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+
+import { fetchHprQuizOverview, fetchHprQuizQuestions } from "@/api/highRelay";
+import { EmptyState } from "@/components/EmptyState";
+import { ErrorState } from "@/components/ErrorState";
+import { LoadingState } from "@/components/LoadingState";
+import { cn } from "@/lib/utils";
+
+import { QuizRunner } from "./QuizRunner";
+import type { QuizAnswerRec } from "./quizScore";
+import { loadProgress, resetAll } from "./quizProgress";
+
+/**
+ * 答题训练页签根:年份 chip → 月份格子(题数/进度/得分) → QuizRunner。
+ * 进度存 localStorage(key 含题库版本串);默认匿名,实名开关切题干显示。
+ */
+export function HprQuizView() {
+  const overviewQuery = useQuery({
+    queryKey: ["hprQuizOverview"],
+    queryFn: fetchHprQuizOverview,
+    staleTime: 300_000,
+  });
+  const overview = overviewQuery.data;
+  const rulesVersion = overview?.rules_version ?? "unknown";
+
+  const years = useMemo(
+    () => (overview?.status === "ok" ? overview.years ?? [] : []),
+    [overview],
+  );
+  const [year, setYear] = useState<string | null>(null);
+  const [month, setMonth] = useState<string | null>(null);
+  const [showName, setShowName] = useState(false);
+  const [answers, setAnswers] = useState<Record<string, QuizAnswerRec>>({});
+  const [progressLoaded, setProgressLoaded] = useState(false);
+
+  // 题库版本到位后加载本地进度(版本变→key 变→旧进度自然作废)
+  if (overview?.status === "ok" && !progressLoaded) {
+    setAnswers(loadProgress(rulesVersion));
+    setProgressLoaded(true);
+  }
+
+  const activeYear = year ?? years[years.length - 1]?.year ?? null;
+  const activeMonths = years.find((y) => y.year === activeYear)?.months ?? [];
+
+  const questionsQuery = useQuery({
+    queryKey: ["hprQuizQuestions", month],
+    queryFn: () => fetchHprQuizQuestions(month!),
+    enabled: month != null,
+    staleTime: 600_000,
+  });
+
+  if (overviewQuery.isLoading && !overview) return <LoadingState rows={6} />;
+  if (overviewQuery.isError || !overview) {
+    return <ErrorState message="答题题库暂时不可用" onRetry={() => void overviewQuery.refetch()} />;
+  }
+  if (overview.status !== "ok") {
+    return (
+      <EmptyState
+        message="答题题库尚未生成"
+        description="题库随回测一起重建——请到「回测」页签触发一次重算，完成后回来即可做题。"
+      />
+    );
+  }
+
+  if (month != null) {
+    const questions = questionsQuery.data?.questions ?? [];
+    return (
+      <div>
+        {questionsQuery.isLoading && !questionsQuery.data ? (
+          <LoadingState rows={6} />
+        ) : questionsQuery.isError || !questionsQuery.data ? (
+          <ErrorState message="题目加载失败" onRetry={() => void questionsQuery.refetch()} />
+        ) : (
+          <QuizRunner
+            month={month}
+            questions={questions}
+            rulesVersion={rulesVersion}
+            showName={showName}
+            answers={answers}
+            onAnswersChange={setAnswers}
+            onBack={() => setMonth(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-lg border px-4 py-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-sm font-semibold">高位接力 · 答题训练</span>
+          <span className="text-xs text-muted-foreground">
+            全历史 {overview.total} 题（命中口诀的该买，未命中的该拒）——看截断K线和今开，
+            判断买不买；答完看后续走势和口诀讲解。
+          </span>
+          <span className="ml-auto flex items-center gap-3">
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5"
+                checked={showName}
+                onChange={(e) => setShowName(e.target.checked)}
+              />
+              显示票名
+            </label>
+            <button
+              type="button"
+              className="text-xs text-muted-foreground hover:text-foreground"
+              onClick={() => setAnswers(resetAll(rulesVersion))}
+            >
+              重置全部进度
+            </button>
+          </span>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {years.map((y) => (
+            <button
+              key={y.year}
+              type="button"
+              className={cn(
+                "rounded-md border px-3 py-1 text-xs",
+                y.year === activeYear
+                  ? "border-primary bg-primary/10 font-semibold text-primary"
+                  : "text-muted-foreground hover:bg-muted/40",
+              )}
+              onClick={() => setYear(y.year)}
+            >
+              {y.year}年
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        {activeMonths.map((m) => (
+          <MonthCell
+            key={m.month}
+            month={m.month}
+            total={m.total}
+            buyCount={m.buy_count}
+            rejectCount={m.reject_count}
+            answers={answers}
+            onOpen={() => setMonth(m.month)}
+          />
+        ))}
+      </section>
+
+      <p className="text-[11px] leading-5 text-muted-foreground">
+        判分（主人四档）：口诀对×行情对 +10 ／ 口诀对×行情不配合 +3 ／ 违背口诀侥幸对 +2 ／
+        违背口诀实打实错 -5。月内分「打3板」「打4板」两段，题目每次进入乱序（防背答案）；
+        答错的题（违背口诀的）可在段末反复乱序重练直到答对。今开≥9.5顶格票开盘即涨停买不到，
+        不出题。收益=E3卖出纪律口径（炸板当日收盘走/封住拿到断板）；K线未复权；
+        主力心理为事后合理解释而非实证。题库版本 {rulesVersion}。
+      </p>
+    </div>
+  );
+}
+
+function MonthCell({
+  month,
+  total,
+  buyCount,
+  rejectCount,
+  answers,
+  onOpen,
+}: {
+  month: string;
+  total: number;
+  buyCount: number;
+  rejectCount: number;
+  answers: Record<string, QuizAnswerRec>;
+  onOpen: () => void;
+}) {
+  // 该月已答进度:题 id 前缀 = YYYY-MM(answers key 形如 "2024-11-13|000001.SZSE")
+  const prefix = `${month}-`;
+  let answered = 0;
+  let score = 0;
+  for (const [k, v] of Object.entries(answers)) {
+    if (k.startsWith(prefix)) {
+      answered += 1;
+      score += v.score;
+    }
+  }
+  const done = answered >= total && total > 0;
+  return (
+    <button
+      type="button"
+      className={cn(
+        "rounded-lg border px-3 py-2.5 text-left hover:bg-muted/30",
+        done && "border-primary/50 bg-primary/5",
+      )}
+      onClick={onOpen}
+    >
+      <div className="flex items-baseline justify-between">
+        <span className="text-sm font-semibold tabular-nums">
+          {Number(month.slice(5))}月
+        </span>
+        <span className="text-[11px] text-muted-foreground tabular-nums">{total}题</span>
+      </div>
+      <div className="mt-1 flex items-baseline justify-between text-[11px] tabular-nums">
+        <span className="text-muted-foreground">
+          买{buyCount} 拒{rejectCount}
+        </span>
+        {answered > 0 ? (
+          <span className={cn(done ? "text-primary" : "text-muted-foreground")}>
+            {done ? "✓ " : ""}{answered}/{total}
+            <span className={cn("ml-1 font-mono", score >= 0 ? "text-rise" : "text-fall")}>
+              {score >= 0 ? "+" : ""}{score}
+            </span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground/60">未开始</span>
+        )}
+      </div>
+    </button>
+  );
+}

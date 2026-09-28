@@ -35,7 +35,12 @@ MAX_K = 15                 # 前向列深度:n1=入场次日 … n15=兜底出�
 
 def run_backtest() -> dict[str, object]:
     """全量回放并返回物化 payload(不写库,由调用方持久化)。"""
-    E = _build_events()
+    E, _bars = build_events()
+    return assemble_report(E)
+
+
+def assemble_report(E: pd.DataFrame) -> dict[str, object]:
+    """由事件表组装物化报告(service  rebuild 时与题库构建共用同一次回放)。"""
     done = E[~E["未完"]].copy()
 
     keys = list(contracts.POINT_KEYS) + ["all", "miss"]
@@ -86,7 +91,11 @@ def run_backtest() -> dict[str, object]:
 
 # ── 事件池构建(买入日 D 行;静态字段由 pool.static_fields 按行算) ──
 
-def _build_events() -> pd.DataFrame:
+def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """全量事件回放;返回 (事件表E, 派生+前向列后的全量日线bars)。
+
+    bars 一并返回供答题题库构建切K线窗口(同一进程复用,避免二次全量加载)。
+    """
     engine = get_engine()
     universe = pool_mod.load_universe(engine)
     name_map = universe.set_index("vt_symbol")["name"].to_dict()
@@ -173,6 +182,7 @@ def _build_events() -> pd.DataFrame:
         if not unfinished and e3_date is not None:
             e3_exit_date = pd.Timestamp(bars["trade_date"].iat[e3_date]).date().isoformat()
         rows.append({
+            "_bar_i": i,  # 决策日在 bars 中的行号(答题题库切K线窗口用;报告不读)
             "代码": str(bars["vt_symbol"].iat[i]),
             "名称": str(name_map.get(bars["vt_symbol"].iat[i]) or ""),
             "买入日": pd.Timestamp(cols["trade_date"][i]),
@@ -204,9 +214,14 @@ def _build_events() -> pd.DataFrame:
             "链": rec["chain"],
             "b1板型": rec.get("b1_type"),
             "b2板型": rec.get("b2_type"),
+            "b3板型": rec.get("b3_type"),
+            "b1开盘%": rec.get("b1_open"),
             "b2开盘%": rec.get("b2_open"),
+            "b3开盘%": rec.get("b3_open"),
             "b1换手%": rec.get("b1_turn"),
             "b2换手%": rec.get("b2_turn"),
+            "b3换手%": rec.get("b3_turn"),
+            "前20日涨幅%": rec.get("pre20_pct"),
             "换手梯度": rec["turn_grad"],
             "昨日涨停家数": int(cols["mkt_prev"][i]) if cols["mkt_prev"][i] == cols["mkt_prev"][i] else None,
         })
@@ -214,7 +229,7 @@ def _build_events() -> pd.DataFrame:
     E["月"] = E["买入日"].dt.strftime("%Y-%m")
     E["年"] = E["买入日"].dt.strftime("%Y")
     E["胜"] = E["次日收%"] > 0
-    return E
+    return E, bars
 
 
 # ── 统计与物化 ──

@@ -2187,6 +2187,29 @@ Index(
     hpr_backtest_rebuild_runs.c.requested_at,
 )
 
+# 答题训练题库:回测事件逐题物化(K线窗口+答案+讲解;随回测重建整表替换)。
+hpr_quiz_questions = Table(
+    "hpr_quiz_questions",
+    metadata,
+    Column("decision_date", Date, primary_key=True),   # 买入日(决策日)
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("year", String(4), nullable=False),
+    Column("month", String(7), nullable=False),        # YYYY-MM 切片键
+    Column("seq", Integer, nullable=False),            # 月内题号(匿名题干用)
+    Column("name", String(80), nullable=False),
+    Column("group4", String(8), nullable=False),
+    Column("point", String(4), nullable=False),        # 方案点;—=不该买
+    Column("ret_pct", Float, nullable=True),           # E3收益(判分用,冗余出payload便于聚合)
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index(
+    "ix_hpr_quiz_questions_month",
+    hpr_quiz_questions.c.month,
+)
+
 
 # ── 断板反包打板(2/4/5+板断板1~3天后再涨停, fbb) ──
 # 策略口径 = 量化因子研究/反包/反包规则.md v2 定稿(2026-09-25)。

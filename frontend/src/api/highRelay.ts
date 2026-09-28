@@ -240,7 +240,7 @@ export interface HprRuleItem {
 }
 
 export interface HprRuleGroup {
-  group: "pool" | HprPoint | "avoid" | "time" | "buy" | "sell";
+  group: "pool" | "A" | "B" | "E" | HprPoint | "avoid" | "time" | "buy" | "sell";
   title: string;
   items: HprRuleItem[];
 }
@@ -251,6 +251,8 @@ export interface HprRulesPayload {
   point_labels: Record<string, string>;
   point_levels: Record<string, "A" | "B">;
   point_desc: Record<string, string>;
+  point_names: Record<string, string>;   // A1→双平贴零(纯口诀名,规则页卡片标题用)
+  point_psycho: Record<string, string>;  // A1→主力心理解读(规则页口诀卡用)
   rules: HprRuleGroup[];
   falsified_rules: string[];
   risk_notes: string[];
@@ -290,4 +292,107 @@ export function fetchHprLedger(month?: string) {
 
 export function fetchHprRules() {
   return apiClient.get<HprRulesPayload>("/high-relay/rules");
+}
+
+// ── 答题训练题库(hpr-quiz):回测事件逐题物化,按月下发,前端本地判分 ──
+// 题库随回测重建整表刷新,版本串 hpr-v4.0·qN 进 localStorage key(版本变→旧进度作废)。
+// 事件范围含顶格票(今开≥9.5,月内置后,练「顶格不打」);收益=E3卖出纪律口径;K线未复权。
+
+export interface HprQuizBar {
+  d: string;  // YYYY-MM-DD
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+export interface HprQuizMonthSummary {
+  month: string;
+  total: number;
+  buy_count: number;     // 命中口诀(该买)题数
+  reject_count: number;  // 未命中(该拒)题数
+}
+
+export interface HprQuizOverviewPayload {
+  status: "ok" | "unavailable";
+  rules_version?: string;
+  total?: number;
+  years?: { year: string; months: HprQuizMonthSummary[] }[];
+}
+
+export interface HprQuizDisplay {
+  board_label: string;          // 打3板/打4板
+  b1_open: number | null;       // 一板开盘%
+  b2_open: number | null;       // 二板开盘%
+  b3_open: number | null;       // 三板开盘%(三接四)
+  b2_turn: number | null;       // 二板换手率
+  b3_turn: number | null;       // 三板换手率(三接四)
+  pre20_pct: number | null;     // 首板前20日涨幅(半山腰判定)
+  auction_pct: number;          // 今开%(决策日竞价)
+  prev_close: number;
+  limit_price: number | null;   // 涨停价(打板买入价)
+  decision_open: number;        // 决策日开盘价(今开十字bar用)
+  chain: string | null;         // 板型链 实体→一字
+}
+
+export interface HprQuizAnswer {
+  point: HprPoint;              // —=不该买
+  should_buy: boolean;
+  ret_pct: number | null;       // E3收益%(判分用)
+  buy_price: number | null;
+  sealed: boolean;
+  hold_days: number | null;
+  exit_date: string | null;
+  exit_price: number | null;
+  exit_reason: string | null;
+}
+
+export interface HprQuizExplainHit {
+  kind: "hit";
+  scheme_no: string;
+  scheme_name: string;          // B1 强转弱
+  scheme_desc: string;          // 口诀原文
+  psycho: string;               // 主力心理
+  today_window: [number, number] | null;
+  matched_line: string;         // 本票数据对照行
+  case_note: string | null;     // 典型样例(19个具名案例之一时)
+  half_mountain: boolean;       // 阳组半山腰注记
+}
+
+export interface HprQuizExplainMiss {
+  kind: "miss";
+  reasons: string[];            // 为什么不该买(1~3条)
+}
+
+export interface HprQuizQuestion {
+  seq: number;                  // 月内题号(匿名题干用)
+  vt_symbol: string;
+  name: string;
+  decision_date: string;
+  n_board: number;
+  group4: HprGroup4;
+  display: HprQuizDisplay;
+  bars_before: HprQuizBar[];    // 截断K线(末根=末板收盘)
+  bars_after: HprQuizBar[];     // 揭示K线(首根=决策日全天)
+  answer: HprQuizAnswer;
+  explain: HprQuizExplainHit | HprQuizExplainMiss;
+}
+
+export interface HprQuizQuestionsPayload {
+  status: "ok" | "unavailable";
+  month?: string;
+  rules_version?: string;
+  count?: number;
+  questions?: HprQuizQuestion[];
+}
+
+export function fetchHprQuizOverview() {
+  return apiClient.get<HprQuizOverviewPayload>("/high-relay/quiz/overview");
+}
+
+export function fetchHprQuizQuestions(month: string) {
+  return apiClient.get<HprQuizQuestionsPayload>(
+    `/high-relay/quiz/questions?month=${encodeURIComponent(month)}`,
+  );
 }

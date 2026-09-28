@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from alphaagent.server.api.router import api_router
 from alphaagent.server.core.config import get_settings
@@ -45,6 +46,9 @@ def create_app() -> FastAPI:
         yield
 
     app = FastAPI(title="AlphaAgent API", version="0.1.0", lifespan=lifespan)
+
+    # 大响应体(答题题库按月下发~1MB)走 gzip;>50KB 才压缩
+    app.add_middleware(GZipMiddleware, minimum_size=50_000)
 
     app.add_middleware(
         CORSMiddleware,

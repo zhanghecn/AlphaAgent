@@ -129,11 +129,21 @@ def _start_hpr_report_reconcile() -> None:
 
     def _run() -> None:
         try:
-            from alphaagent.server.services.high_relay import contracts, repository, service
+            from alphaagent.server.services.high_relay import (
+                contracts, quiz as quiz_mod, repository, service,
+            )
 
-            if repository.load_backtest_report(contracts.HPR_RULES_VERSION) is None:
+            need = repository.load_backtest_report(contracts.HPR_RULES_VERSION) is None
+            if need:
                 LOGGER.info("hpr backtest report missing for %s, scheduling rebuild",
                             contracts.HPR_RULES_VERSION)
+            if not need:
+                bank = repository.quiz_bank_status()
+                if bank.get("rules_versions") != [quiz_mod.quiz_rules_version()] \
+                        or not bank.get("count"):
+                    need = True
+                    LOGGER.info("hpr quiz bank drift (%s), scheduling rebuild", bank)
+            if need:
                 service.start_backtest_rebuild(source="startup")
         except Exception:  # noqa: BLE001
             LOGGER.exception("hpr backtest report reconcile failed")

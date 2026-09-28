@@ -97,3 +97,25 @@ def ledger(trade_date: date | None = Query(default=None, alias="date"),
 def rules():
     """规则契约:打板口诀卡九条(A1~E3,hpr-v4.0)规则 + 回避清单 + 留档 + 风险声明 + 同花顺条件。"""
     return ok(service.get_rules())
+
+
+@router.get("/quiz/overview", response_model=None)
+def quiz_overview():
+    """答题训练题库:年→月题数分布(年份选择/月份格子用;题库未生成→unavailable)。"""
+    try:
+        return ok(service.get_quiz_overview())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "HPR_QUIZ_UNAVAILABLE", "高位接力答题题库暂时不可用",
+            {"reason": exc.__class__.__name__}))
+
+
+@router.get("/quiz/questions", response_model=None)
+def quiz_questions(month: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
+    """答题训练题目:该月全部题目一次下发(含截断K线/答案/讲解;前端本地判分)。"""
+    try:
+        return ok(service.get_quiz_questions(month))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "HPR_QUIZ_UNAVAILABLE", "高位接力答题题库暂时不可用",
+            {"reason": exc.__class__.__name__}))

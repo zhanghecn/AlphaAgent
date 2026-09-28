@@ -202,6 +202,9 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
         rec["pre3_pct"] = round((fc / c3 - 1) * 100, 1) if c3 > 0 else None
     else:
         rec["pre3_pct"] = None
+    # 首板前20日涨幅(阳组半山腰毒档5~15%判定/答题信息面板用;与 relay_research 同口径)
+    c20 = cols["c20"][f]
+    rec["pre20_pct"] = round((fc / c20 - 1) * 100, 1) if c20 == c20 and c20 > 0 else None
     return rec
 
 
@@ -367,6 +370,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "b2_turn": rec.get("b2_turn"),
             "turn_grad": rec["turn_grad"],
             "pre3_pct": rec.get("pre3_pct"),
+            "pre20_pct": rec.get("pre20_pct"),
             "mkt_lim_tm1": int(mkt_prev),
         })
     stats["actionable"] = n_actionable
