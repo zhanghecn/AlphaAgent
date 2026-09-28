@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 10  # v10:miss题物化trap_kind(综合挑战卷抽题用)+阴阳反串专门讲解
+QUIZ_CONTENT_VERSION = 11  # v11:阴组二板一字专门讲解(一字≠强开)+口诀文案去黑话
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -222,6 +222,14 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
             reasons.append(f"二板开{_pct(b2_open)}落在8.5~9.5剧强段:仅次一字的毒档,"
                            "今开6~9.5仅25%/-8.1")
     if n_board == 2 and not yang:
+        # 阴组二板一字开盘:主人易误判成冒泡转强(「>7%就是走强」)——一字开盘
+        # 是锁仓没换手的另一形态,不是B4的「强开」(主人点名:走强上限必须讲清楚)
+        if b2_open is not None and b2_open >= 9.5:
+            reasons.append(
+                f"二板开{_pct(b2_open)}是一字开盘,不是冒泡转强的「强开」:口诀的强开是7~8.5"
+                "(强而换手充分,11笔82%/+12.3);一字开盘=获利盘锁在里面没换手,"
+                "阴地基接三板只是抛硬币(58笔50%/+0.8,和不挑就买一样),"
+                "8.5~9.5剧强段更毒(6笔33%/-1.6)")
         # 阴组二板温吞段:一板低开×今开低开看着像弱开系捡尸(三低),但二板平开/微红
         # 不算低开——10笔30%/-1.7比不挑就买还烂(数据口径:一板<0×今开<0的阴地基)
         if (b1_open is not None and b1_open < 0
