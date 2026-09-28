@@ -10,7 +10,7 @@ import type { HprLivePayload, HprQuizQuestion } from "@/api/highRelay";
 import { HprLedgerView } from "@/features/highRelay/HprLedgerView";
 import { HprLiveView } from "@/features/highRelay/HprLiveView";
 import { QuizRunner } from "@/features/highRelay/quiz/QuizRunner";
-import { isWrongAnswer, judge, summarize, quizQuestionId } from "@/features/highRelay/quiz/quizScore";
+import { isWrongAnswer, judge, simulateMonth, summarize, quizQuestionId } from "@/features/highRelay/quiz/quizScore";
 import { overwriteAnswer, saveAnswer } from "@/features/highRelay/quiz/quizProgress";
 
 function withProviders(node: React.ReactElement, routerEntries: string[] = ["/"]) {
@@ -242,12 +242,12 @@ describe("quizScore.judge 四档矩阵", () => {
     // [shouldBuy, retPct, choice, 期望分, 期望文案]
     [true, 12.6, "buy", 10, "口诀对,行情也对"],         // 该买买对赚钱
     [true, -4.2, "buy", 3, "口诀对,这次行情不配合"],     // 该买买对但亏
-    [true, 12.6, "reject", -5, "没按口诀,这次判断错了"], // 该买不买踏空大涨
+    [true, 12.6, "reject", -10, "没按口诀,这次判断错了"], // 该买不买踏空大涨(v6对称-10)
     [true, -4.2, "reject", 5, "没按口诀,但你判断对了"],  // 该买不买却躲过(v5去侥幸化+5)
     [false, -7.5, "reject", 10, "口诀对,行情也对"],      // 该拒拒对躲过
     [false, 8.8, "reject", 3, "口诀对,这次行情不配合"],  // 该拒拒对但踏空
     [false, 8.8, "buy", 5, "没按口诀,但你判断对了"],     // 不该买但自己分析判断对(v5+5)
-    [false, -7.5, "buy", -5, "没按口诀,这次判断错了"],   // 不该买买了亏
+    [false, -7.5, "buy", -10, "没按口诀,这次判断错了"],  // 不该买买了亏(v6对称-10)
     [true, 0, "buy", 10, "口诀对,行情也对"],             // 恰平算配合买(好票口径)
     [false, 0, "reject", 3, "口诀对,这次行情不配合"],    // 恰平对拒=不配合
   ];
@@ -292,10 +292,53 @@ describe("quizScore.summarize 月度统计", () => {
     const s = summarize(questions, answers);
     expect(s.answered).toBe(2);
     expect(s.score).toBe(20);
+    expect(s.maxScore).toBe(20);     // 满分参照=已答2题×10
     expect(s.great).toBe(2);
     expect(s.ruleMatched).toBe(2);   // 双维:两题都与口诀一致
     expect(s.marketRight).toBe(2);   // 双维:两题方向都判断正确
     expect(s.byPoint).toEqual([{ point: "A1", n: 1, correct: 1 }]);
+  });
+
+  it("simulateMonth 本月收益测算:你的操作 vs 口诀标准操作", () => {
+    const questions = [
+      {  // 命中题 ret=+10,用户买了
+        seq: 1, vt_symbol: "000001.SZSE", name: "平安银行", decision_date: "2024-11-01",
+        n_board: 2, group4: "二接三阳" as const,
+        display: {} as never, bars_before: [], bars_after: [],
+        answer: { point: "A1" as const, should_buy: true, ret_pct: 10, buy_price: 10,
+                  sealed: true, hold_days: 2, exit_date: "2024-11-05", exit_price: 11,
+                  exit_reason: "break_close" },
+        explain: { kind: "hit" as const, scheme_no: "A1", scheme_name: "A1 双平贴零",
+                   scheme_desc: "", psycho: "", today_window: [6, 9.5] as [number, number],
+                   matched_line: "", case_note: null, half_mountain: false },
+      },
+      {  // 未命中题 ret=-5,用户也买了(口诀不会买)
+        seq: 2, vt_symbol: "000002.SZSE", name: "万科A", decision_date: "2024-11-04",
+        n_board: 2, group4: "二接三阳" as const,
+        display: {} as never, bars_before: [], bars_after: [],
+        answer: { point: "—" as const, should_buy: false, ret_pct: -5, buy_price: 10,
+                  sealed: false, hold_days: 1, exit_date: "2024-11-05", exit_price: 9.5,
+                  exit_reason: "break_day_close" },
+        explain: { kind: "miss" as const, reasons: ["顶格"] },
+      },
+      {  // 未命中题 ret=+8,用户拒了(踏空;口诀也不买)
+        seq: 3, vt_symbol: "000003.SZSE", name: "测试C", decision_date: "2024-11-05",
+        n_board: 2, group4: "二接三阳" as const,
+        display: {} as never, bars_before: [], bars_after: [],
+        answer: { point: "—" as const, should_buy: false, ret_pct: 8, buy_price: 10,
+                  sealed: true, hold_days: 3, exit_date: "2024-11-08", exit_price: 10.8,
+                  exit_reason: "break_close" },
+        explain: { kind: "miss" as const, reasons: ["x"] },
+      },
+    ];
+    const answers = {
+      [quizQuestionId(questions[0])]: { choice: "buy" as const, score: 10 },
+      [quizQuestionId(questions[1])]: { choice: "buy" as const, score: -10 },
+      [quizQuestionId(questions[2])]: { choice: "reject" as const, score: 3 },
+    };
+    const pnl = simulateMonth(questions, answers);
+    expect(pnl.mine).toEqual({ trades: 2, win: 50, ret: 5 });   // 10 + (-5)
+    expect(pnl.rule).toEqual({ trades: 1, win: 100, ret: 10 }); // 口诀只买命中题
   });
 });
 
@@ -442,14 +485,14 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("看本段总结");          // 最后一题揭示后的入口
   });
 
-  it("没按口诀买入:扣分横幅", () => {
+  it("没按口诀买入:扣分横幅(v6对称-10)", () => {
     const html = renderRunner({
       questions: [QUIZ_MISS_Q],
-      answers: { [quizQuestionId(QUIZ_MISS_Q)]: { choice: "buy", score: -5 } },
+      answers: { [quizQuestionId(QUIZ_MISS_Q)]: { choice: "buy", score: -10 } },
     });
-    // miss 票 ret=-5.64,没按口诀买入亏损 → -5
+    // miss 票 ret=-5.64,没按口诀买入亏损 → 横幅按当前矩阵现算 -10
     expect(html).toContain("没按口诀,这次判断错了");
-    expect(html).toContain("-5");
+    expect(html).toContain("-10");
     expect(html).toContain("标准答案");
   });
 });

@@ -5,7 +5,7 @@ import { cn, formatPct, formatPrice } from "@/lib/utils";
 
 import { QuizKlineChart } from "./QuizKlineChart";
 import type { QuizAnswerRec, QuizChoice, QuizMonthSummary } from "./quizScore";
-import { isWrongAnswer, judge, quizQuestionId, summarize } from "./quizScore";
+import { isWrongAnswer, judge, quizQuestionId, simulateMonth, summarize } from "./quizScore";
 import { overwriteAnswer, resetMonth, saveAnswer } from "./quizProgress";
 
 /**
@@ -178,6 +178,8 @@ export function QuizRunner({
           board3.length > 0 ? { label: "打3板", summary: summarize(board3, answers) } : null,
           board4.length > 0 ? { label: "打4板", summary: summarize(board4, answers) } : null,
         ].filter((s): s is { label: string; summary: QuizMonthSummary } => s != null)}
+        questions={questions}
+        answers={answers}
         onRestart={handleReset}
         onBack={onBack}
       />
@@ -423,6 +425,9 @@ function BoardSummaryCard({
   onMonthSummary: () => void;
   onBack: () => void;
 }) {
+  const pct = summary.maxScore > 0
+    ? Math.round((summary.score / summary.maxScore) * 100)
+    : 0;
   return (
     <section className="rounded-lg border px-4 py-4">
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -434,7 +439,7 @@ function BoardSummaryCard({
           {summary.score}
         </span>
         <span className="text-xs text-muted-foreground tabular-nums">
-          已答 {summary.answered}/{total}
+          已答 {summary.answered}/{total} · 满分 {summary.maxScore}（达成 {pct}%）
         </span>
         <span className="ml-auto flex gap-3">
           <button
@@ -652,15 +657,23 @@ function MonthSummary({
   month,
   summary,
   segments,
+  questions,
+  answers,
   onRestart,
   onBack,
 }: {
   month: string;
   summary: QuizMonthSummary;
   segments: { label: string; summary: QuizMonthSummary }[];
+  questions: HprQuizQuestion[];
+  answers: Record<string, QuizAnswerRec>;
   onRestart: () => void;
   onBack: () => void;
 }) {
+  const pnl = simulateMonth(questions, answers);
+  const pct = summary.maxScore > 0
+    ? Math.round((summary.score / summary.maxScore) * 100)
+    : 0;
   return (
     <section className="rounded-lg border px-4 py-4">
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -672,7 +685,7 @@ function MonthSummary({
           {summary.score}
         </span>
         <span className="text-xs text-muted-foreground tabular-nums">
-          已答 {summary.answered}/{summary.total}
+          已答 {summary.answered}/{summary.total} · 满分 {summary.maxScore}（达成 {pct}%）
         </span>
         <span className="ml-auto flex gap-3">
           <button
@@ -691,6 +704,28 @@ function MonthSummary({
           </button>
         </span>
       </div>
+      {summary.answered > 0 ? (
+        <div className="mb-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+          <div className="rounded-md border px-3 py-2">
+            <div className="mb-0.5 font-semibold">你的操作（答「买入」的票按E3收益计）</div>
+            <div className="tabular-nums text-muted-foreground">
+              出手 {pnl.mine.trades} 笔 · 胜率 {pnl.mine.win}% · 本月收益{" "}
+              <span className={cn("font-mono font-semibold", pnl.mine.ret >= 0 ? "text-rise" : "text-fall")}>
+                {pnl.mine.ret >= 0 ? "+" : ""}{pnl.mine.ret}%
+              </span>
+            </div>
+          </div>
+          <div className="rounded-md border px-3 py-2">
+            <div className="mb-0.5 font-semibold">口诀标准操作（命中全买·未命中全拒）</div>
+            <div className="tabular-nums text-muted-foreground">
+              出手 {pnl.rule.trades} 笔 · 胜率 {pnl.rule.win}% · 本月收益{" "}
+              <span className={cn("font-mono font-semibold", pnl.rule.ret >= 0 ? "text-rise" : "text-fall")}>
+                {pnl.rule.ret >= 0 ? "+" : ""}{pnl.rule.ret}%
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {segments.length > 1 ? (
         <div className="mb-3 flex flex-wrap gap-3 text-xs tabular-nums text-muted-foreground">
           {segments.map((seg) => (
