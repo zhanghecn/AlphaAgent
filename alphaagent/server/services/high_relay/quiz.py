@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 8  # v8:hpr-v4.4七条合体(弱开系/捡漏/便捷一字系档,B3/E3退休)
+QUIZ_CONTENT_VERSION = 9  # v9:阴组二板温吞段专门讲解(平开≠低开,弱开系三低缺一不可)
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -193,6 +193,17 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
         if b2_open is not None and 8.5 <= b2_open < 9.5:
             reasons.append(f"二板开{_pct(b2_open)}落在8.5~9.5剧强段:仅次一字的毒档,"
                            "今开6~9.5仅25%/-8.1")
+    if n_board == 2 and not yang:
+        # 阴组二板温吞段:一板低开×今开低开看着像弱开系捡尸(三低),但二板平开/微红
+        # 不算低开——10笔30%/-1.7比不挑就买还烂(数据口径:一板<0×今开<0的阴地基)
+        if (b1_open is not None and b1_open < 0
+                and b2_open is not None and 0 <= b2_open < 2
+                and buy_open < 0):
+            reasons.append(
+                f"二板开{_pct(b2_open)}是平开/微红,不是低开:弱开系捡尸要一板、二板、"
+                "今天三个开盘都严格低开(<0),缺一不可;数据上二板0~2温吞段"
+                "10笔仅30%/-1.7,比不挑就买还烂——平开的票没有恐慌割肉盘也没有"
+                "承接资金,不上不下最毒")
     if n_board == 3:
         # 6. 三板换手毒(v4.4 分档:一字系(二板/三板一字)窗=3~5×今开6~9.5,非一字=10~20)
         is_yizi = ((b2_open is not None and b2_open >= 9.5)
