@@ -30,8 +30,8 @@ const POINT_ORDER = ["A1", "A2", "B2", "B1", "C1", "E1", "E2"] as const;
 // 速查表(主人定 2026-09-28):只要「阴阳地基 → 二板开 → 今天开 → 附加」四列,
 // 数据注记不进表;文案与后端 contracts.RULES/SCHEMES desc 同步(改一边必须改另一边)
 const CHEAT_ROWS: { name: string; yang: string; board: string; today: string; extra?: string }[] = [
-  { name: "A1 双平贴零", yang: "阳", board: "<1", today: "6~9.5", extra: "一板<3·换手<12" },
-  { name: "A2 一字转强", yang: "阳", board: "≥9.5一字", today: "7~8.5", extra: "一板<3时换手<5" },
+  { name: "A1 双平贴零", yang: "阳", board: "<1", today: "6~9.5", extra: "一板<3·二板换手<12" },
+  { name: "A2 一字转强", yang: "阳", board: "≥9.5一字", today: "7~8.5", extra: "一板<3时二板换手<5" },
   { name: "B2 捡尸", yang: "阴", board: "<0或2~3", today: "<0", extra: "一板<0" },
   { name: "C1 冒泡转弱", yang: "阴阳", board: "3~7", today: "<3", extra: "一板≥7" },
   { name: "B1 强开系·转温", yang: "阴", board: "≥7", today: "3~5", extra: "一板≥7·换手≥5" },

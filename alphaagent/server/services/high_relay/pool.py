@@ -316,7 +316,8 @@ def action_hint(schemes: list[dict]) -> str | None:
     for s in schemes:
         lo, hi = s["today"]
         buy = "低开直接买" if lo < 0 and hi <= 3 else "触板打"
-        parts.append(f"开{_fmt_window(s['today'])}按{s['name']}{buy}")
+        label = f"{s['name']}·{s['tag']}" if s.get("tag") else str(s["name"])
+        parts.append(f"开{_fmt_window(s['today'])}按{label}{buy}")
     return ";".join(parts)
 
 

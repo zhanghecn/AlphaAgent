@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 16  # v16:讲解文案清残留(弱开系捡尸→捡尸)+速查树/门禁注记同步
+QUIZ_CONTENT_VERSION = 17  # v17:A2/A1换手表述写明"二板换手"(主人做题点名歧义;阈值不动,数据验证5~8档0/4全灭不放宽)
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -28,7 +28,10 @@ _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不�
 # 好票:七条口诀每条随机≥2道(无上限,固定2保证每套覆盖全部口诀);差票:好票=1:1~3:1,
 # 取 1.5:1 偏挑战侧;差票=相似口诀票(形态接近+毒段)与阴阳反串票三等分混搭。
 MIX_PER_POINT = 2
-MIX_TRAP_TOTAL = 21
+# 陷阱票数每卷随机(主人定 2026-09-29:陷阱:好票从固定1.5:1提到2:1~2.5:1随机,
+# 负样本加密度+猜不出节奏防"后面全是陷阱"的先验;上限2.5防无脑全拒混分)
+MIX_TRAP_MIN = 28
+MIX_TRAP_MAX = 35
 MIX_TRAP_KINDS = ("yin_yang", "near", "toxic")
 
 # 阴阳反串判定:对面地基组完整命中某条口诀(链+换手+今开全判)。
@@ -378,18 +381,21 @@ def _f(v) -> float | None:
 
 
 def mix_question_keys(rows, per_point: int = MIX_PER_POINT,
-                      trap_total: int = MIX_TRAP_TOTAL,
+                      trap_total: int | None = None,
                       rng=None) -> list[tuple[str, str]]:
     """综合挑战卷抽题(纯函数,可注入种子复现)。
 
     rows = 题库轻量投影 [{decision_date, vt_symbol, point, trap_kind}]
     (point=标量列,trap_kind 从 payload 抽取,命中题为 None)。
-    规则(主人定 2026-09-28):好票=七条口诀每条随机 per_point 道(无上限,
+    规则(主人定 2026-09-29):好票=七条口诀每条随机 per_point 道(无上限,
     固定2即保证每套覆盖全部口诀);差票=MIX_TRAP_KINDS 均分 trap_total,
-    某类不够由后面的类补,总量落在好票的 1~3 倍区间(14好×1.5=21差)。
+    某类不够由后面的类补。trap_total 缺省=每卷在 [MIX_TRAP_MIN, MIX_TRAP_MAX]
+    随机(14好×2~2.5=28~35差,总量42~49题)。
     返回 [(decision_date, vt_symbol)]——洗牌在 service 层拉全量后统一做。"""
     import random
     rnd = random.Random(rng)
+    if trap_total is None:
+        trap_total = rnd.randint(MIX_TRAP_MIN, MIX_TRAP_MAX)
     by_point: dict[str, list[tuple[str, str]]] = {}
     by_trap: dict[str, list[tuple[str, str]]] = {k: [] for k in MIX_TRAP_KINDS}
     for r in rows:
@@ -402,10 +408,10 @@ def mix_question_keys(rows, per_point: int = MIX_PER_POINT,
     picked: list[tuple[str, str]] = []
     for pool_keys in by_point.values():
         picked.extend(rnd.sample(pool_keys, min(per_point, len(pool_keys))))
-    quota = max(1, trap_total // len(MIX_TRAP_KINDS))
+    quota, extra = divmod(trap_total, len(MIX_TRAP_KINDS))
     deficit = 0
-    for kind in MIX_TRAP_KINDS:
-        want = quota + deficit
+    for i, kind in enumerate(MIX_TRAP_KINDS):
+        want = quota + (1 if i < extra else 0) + deficit
         got = rnd.sample(by_trap[kind], min(want, len(by_trap[kind])))
         picked.extend(got)
         deficit = want - len(got)
