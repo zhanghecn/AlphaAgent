@@ -92,14 +92,15 @@ def _first_jump_status(entry: dict[str, object], auction_pct: float) -> str | No
 
 
 def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dict[str, object]:
-    from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+    from alphaagent.data_sources.akshare_adapter import (AkShareAdapter,
+    count_fresh_spot_items)
 
     spot = AkShareAdapter().all_stock_ohlcv_spot(force_refresh=True)
     items = {
         str(it.get("vt_symbol") or "").upper(): it
         for it in (spot.get("items") or []) if isinstance(it, dict)
     }
-    fresh = _count_fresh_items(items, today)
+    fresh = count_fresh_spot_items(items, today, now)
     if fresh < MIN_SPOT_FRESH_SYMBOLS:
         _save_run(today, now, status="stale_spot", pool_count=len(pool),
                   spot_active_symbols=fresh,
@@ -180,18 +181,6 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
                       f"竞价回避 {auction_skipped} / 写 {len(writes)}")
     return {"status": "ok", "pool": len(pool), "touched": touched,
             "entered": entered, "writes": len(writes)}
-
-
-def _count_fresh_items(items: dict[str, dict[str, object]], today: date) -> int:
-    """统计 trade_time 属于今日的现货行数(节假日快照整体陈旧,新鲜数为 0 整体跳过)。"""
-    fresh = 0
-    prefix = today.isoformat()
-    for it in items.values():
-        trade_time = str(it.get("trade_time") or "")
-        volume = _num(it.get("volume")) or 0.0
-        if volume > 0 and trade_time.startswith(prefix):
-            fresh += 1
-    return fresh
 
 
 def _save_run(trade_date: date, started: datetime, *, status: str,

@@ -6050,6 +6050,14 @@ def _finish_run(
 
 # ─── Upsert helpers ──────────────────────────────────────────────────────
 
+def _exdiv_dirty_name(name: str) -> bool:
+    """除权除息日名称快照:带 XD/XR/DR/N /C 前缀且被源截断(如"XD东百集")。
+
+    A股名称全中文不以这些拉丁前缀开头,零误伤;当天列表返回脏名,
+    次日恢复正常名后照常更新——所以已入库的票保留干净名不覆盖。"""
+    return bool(re.match(r"^(?:XD|XR|DR|N\s|C\s)", name))
+
+
 def _upsert_stocks(items: list[dict[str, Any]]) -> int:
     """Upsert stock rows into the stocks table."""
     if not items:
@@ -6086,10 +6094,18 @@ def _upsert_stocks(items: list[dict[str, Any]]) -> int:
                 select(schema.stocks).where(schema.stocks.c.vt_symbol == vts)
             ).first()
             if existing:
+                # 除权除息日快照不覆盖干净名(名称还被源截断,盖了要等次日才恢复)
+                if _exdiv_dirty_name(str(values["name"])):
+                    values.pop("name", None)
                 session.execute(
                     schema.stocks.update().where(schema.stocks.c.vt_symbol == vts).values(**values)
                 )
             else:
+                # 新票没有干净名可保:剥前缀兜底(截断损失无可避免,仅首日)
+                if _exdiv_dirty_name(str(values["name"])):
+                    values["name"] = re.sub(
+                        r"^(?:XD|XR|DR|N\s|C\s)\s*", "", str(values["name"])
+                    ) or symbol
                 session.execute(schema.stocks.insert().values(**values))
             written += 1
     return written

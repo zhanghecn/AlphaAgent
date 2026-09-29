@@ -73,6 +73,45 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 _EASTMONEY_SESSION_LOCAL = threading.local()
 
 
+_TIME_ONLY_SPOT_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
+
+
+def count_fresh_spot_items(
+    items: Mapping[str, Mapping[str, object]],
+    today: "datetime.date",
+    now: "datetime.datetime",
+) -> int:
+    """统计属于今日的现货快照行数(各产品 live_scan 共用;新鲜数 0=整体跳过防假信号)。
+
+    trade_time 两种格式(2026-09-29 东财 spot 从带日期漂移为纯时刻,曾致
+    hpr/N型/潜龙/断板反包四产品盘中扫描全天 stale_spot):
+    - 带日期(旧):startswith(今日) 判定;
+    - 纯时刻 HH:MM[:SS](新):时刻 ≤ now(北京时刻) 判当日——扫描窗口封 15:00,
+      昨日/节假日收盘快照时刻恒为 15:0x+ 不可能 ≤ 窗口内当前时刻,不会误判。"""
+    from datetime import time as _dtime
+
+    fresh = 0
+    prefix = today.isoformat()
+    now_t = now.timetz().replace(tzinfo=None)
+    for it in items.values():
+        trade_time = str(it.get("trade_time") or "")
+        try:
+            volume = float(it.get("volume") or 0)
+        except (TypeError, ValueError):
+            volume = 0.0
+        if volume <= 0:
+            continue
+        if trade_time.startswith(prefix):
+            fresh += 1
+        elif _TIME_ONLY_SPOT_RE.match(trade_time):
+            parts = trade_time.split(":")
+            t = _dtime(int(parts[0]), int(parts[1]),
+                      int(parts[2]) if len(parts) > 2 else 0)
+            if t <= now_t:
+                fresh += 1
+    return fresh
+
+
 def _copy_full_market_quote_payload(value: object) -> object:
     """Isolate mutable containers while sharing only scalar quote values."""
 

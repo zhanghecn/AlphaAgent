@@ -70,14 +70,15 @@ def run_live_scan_tick(now: datetime | None = None) -> dict[str, object]:
 
 
 def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dict[str, object]:
-    from alphaagent.data_sources.akshare_adapter import AkShareAdapter
+    from alphaagent.data_sources.akshare_adapter import (AkShareAdapter,
+    count_fresh_spot_items)
 
     spot = AkShareAdapter().all_stock_ohlcv_spot(force_refresh=True)
     items = {
         str(it.get("vt_symbol") or "").upper(): it
         for it in (spot.get("items") or []) if isinstance(it, dict)
     }
-    fresh = _count_fresh_items(items, today)
+    fresh = count_fresh_spot_items(items, today, now)
     if fresh < MIN_SPOT_FRESH_SYMBOLS:
         _save_run(today, now, status="stale_spot", pool_count=len(pool),
                   spot_active_symbols=fresh,
@@ -151,23 +152,6 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
               message=f"池 {len(pool)} / 新触及 {touched} / 新买入 {entered} / 写 {len(writes)}")
     return {"status": "ok", "pool": len(pool), "touched": touched,
             "entered": entered, "writes": len(writes)}
-
-
-def _count_fresh_items(items: dict[str, dict[str, object]], today: date) -> int:
-    """统计 trade_time 属于今日的现货行数。
-
-    Sina ticktime 为完整日期时间;严格要求日期前缀等于今日——
-    节假日快照整体为上一交易日数据,此时新鲜数为 0,扫描整体跳过,
-    不会产生假信号。
-    """
-    fresh = 0
-    prefix = today.isoformat()
-    for it in items.values():
-        trade_time = str(it.get("trade_time") or "")
-        volume = _num(it.get("volume")) or 0.0
-        if volume > 0 and trade_time.startswith(prefix):
-            fresh += 1
-    return fresh
 
 
 def _save_run(trade_date: date, started: datetime, *, status: str,
