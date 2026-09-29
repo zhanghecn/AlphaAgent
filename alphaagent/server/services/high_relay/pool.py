@@ -1,9 +1,9 @@
 """高位接力打板池计算:T-1 收盘后给次日 2/3 连板票打链式方案候选标。
 
-口径 = 打板口诀卡七条(hpr-v4.4,2026-09-28 定稿,量化因子研究/高位接力/打板口诀卡.md):
+口径 = 打板口诀卡七条(hpr-v5.1,量化因子研究/高位接力/打板口诀卡.md):
 - 池 = 昨日恰好 2/3 连板的主板非ST票(全量,雷达);地基日=首板前一天,阴阳分组
 - 候选 = 链档条件(一板×二板[×三板]的开盘档)+换手窗;今天开窗由竞价定型后复核,
-  ≥9.5顶格不命中;多分支口诀(弱开系/捡漏/便捷一字系档)共享编号,顺序判定
+  ≥9.5顶格不命中;多分支口诀(捡尸/捡漏/便捷一字系档)共享编号,顺序判定
 - 回避 = v3.0 旧两条(半温不火/追高透支)已废止为观察注记,见 contracts.AVOID_OBSERVE
 - 字段与 relay_research.py/relay_summary2.py 同口径(事件静态字段含 b1/b2/b3 开盘档)
 """
@@ -212,7 +212,7 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
     """打板口诀卡九条打标(hpr-v4.0,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
     chain = 数值区间半开[lo,hi);vol2/vol3 = 二板/三板换手率窗(缺数据不命中带窗点);
     vol2_when_b1_low = A2 条件换手(一板<3 板弱时二板一字须换手<5,假锁排除);
-    group4 支持 tuple:弱开系冒泡洗盘分支阴阳都打,E1 四板便捷不分阴阳(v4.4 七条);
+    group4 支持 tuple:C1 冒泡转弱阴阳都打,E1 四板便捷不分阴阳(v5.1 七条);
     auction_pct = 今天开盘 %(池计算时未知传 None → 只按链条件打候选标,
     今天开窗由盘中扫描/回测复核;≥9.5 顶格一律不命中)。"""
     c = contracts
@@ -256,7 +256,7 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
                   b2_turn=None, b3_turn=None) -> list[dict]:
     """按链条件(不含今开)定位全部链全过分支,按 SCHEMES 优先级序返回。
 
-    多分支口诀(弱开系/捡漏/便捷一字系档)共享编号,且存在跨方案链重叠
+    多分支口诀(捡尸/捡漏/便捷一字系档)共享编号,且存在跨方案链重叠
     (E1 链全不限含 E2;B1 链含 B4 二板段):该票今天按哪条出手由今开决定,
     盘前出手条件=全部候选分支窗的条件表(今开落在哪窗就按哪条);
     今开定型后归属=tag_point(首窗命中者,与本列表顺序一致)。
@@ -304,7 +304,7 @@ def action_hint(schemes: list[dict]) -> str | None:
     """出手条件人话(主人定:实时推荐必须提示今天开多少+怎么买)。
     单分支=「今天开6~9.5,盘中触涨停价打」;多分支链重叠(E1×E2/B1×B4)=
     条件表「开X按甲打;开Y按乙买」(顺序=归属优先级,与 tag_point 一致)。
-    弱开/低开系(窗 lo<0 且 hi≤3:捡尸/冒泡洗盘/高开低吸)=开盘直接买(低吸)。"""
+    弱开/低开类(窗 lo<0 且 hi≤3:捡尸/冒泡转弱/高开低吸)=开盘直接买(低吸)。"""
     if not schemes:
         return None
     if len(schemes) == 1:
@@ -322,7 +322,7 @@ def action_hint(schemes: list[dict]) -> str | None:
 
 def scheme_today_window(point: str, auction_pct=None):
     """方案「今天开」窗 (lo, hi);非方案返回 None(供盘中扫描/前端展示)。
-    v4.4 多分支方案(弱开系/捡漏/便捷一字系档)共享编号:有今开时返回包含今开的
+    多分支方案(捡尸/捡漏/便捷一字系档)共享编号:有今开时返回包含今开的
     分支窗,否则返回首条分支窗。"""
     wins = [s["today"] for s in contracts.SCHEMES if s["no"] == point]
     if not wins:
@@ -406,7 +406,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         actionable = point != "—" and not avoid
         n_actionable += int(actionable)
         # 候选=链条件已命中,今天开窗(竞价定型后对照;顶格≥9.5不命中)。
-        # 多分支按链定位全部候选分支(v4.4 修复:曾按编号取首分支窗——冒泡洗盘/
+        # 多分支按链定位全部候选分支(曾按编号取首分支窗——冒泡转弱/
         # E1一字系/E2温开竞价门全错;且 E1×E2、B1×B4 链重叠票今开落次方案窗时
         # 被误判 skipped_auction)→ 竞价门=全部候选窗,出手条件=条件表
         branches = match_schemes(group4, rec.get("b1_open"), rec.get("b2_open"),
