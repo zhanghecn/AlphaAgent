@@ -7,8 +7,8 @@
   买价 = 涨停价(=昨收×1.10 四舍五入到分);样本自 2023-01 起
 - 打标 = 五方案点 S1/S2/S3/O1/O2(全部 T-1 静态,与研究打标完全一致);
   3板与断4~5天保留在 E(参考行)但主格=False,不进 ledger_days
-- 收益(单一口径,研究主算法,无 E0/E3 双轨) = 反包日炸板→当天收盘卖;
-  封住→持有到首次不再涨停日收盘,15 个交易日兜底
+- 收益(单一口径,无 E0/E3 双轨;v2.2 T+1合规对齐 hpr) = 反包日炸板→次日收盘卖
+  (次日一字跌停锁死顺延首个开板日);封住→持有到首次不再涨停日收盘,15 个交易日兜底
 - 胜率 = 好票率(次日收盘≥买价;坏票=次日收盘<买价,炸板但涨回来的算好票)
 - 再连板率 = 封住的票里次日继续涨停占比;后续板分布 = 反包日起连板数 0/1/2/3+
 统计口径: avg_pct=次日收%均值;win=次日收%≥0占比(=研究胜率);bw_pct=持有到断板均值;
@@ -35,7 +35,12 @@ MAX_K = 15                 # 前向列深度:n1=入场次日 … n15=兜底出�
 
 def run_backtest() -> dict[str, object]:
     """全量回放并返回物化 payload(不写库,由调用方持久化)。"""
-    E = _build_events()
+    E, _ = build_events()
+    return assemble_report(E)
+
+
+def assemble_report(E: pd.DataFrame) -> dict[str, object]:
+    """E(build_events 产物)→ 报告 payload;与题库构建共用同一次回放。"""
     done = E[~E["未完"]].copy()
     main = done[done["主格"]].copy()
 
@@ -64,7 +69,7 @@ def run_backtest() -> dict[str, object]:
         "coverage": coverage,
         "caliber": ("日线口径:前波恰好2/4/5+连板(5+无上限)→断板1~3天→当日最高价触涨停价"
                     "(=昨收×1.10)按涨停价买,一字全天不开排除(T字可买);"
-                    "收益=反包日炸板当天收盘走/封住→持有到断板日收盘(15日兜底);"
+                    "收益=反包日炸板次日收盘走(T+1,一字跌停顺延)/封住→持有到断板日收盘(15日兜底);"
                     "胜率=好票率(次日收盘≥买价);无滑点,日线未复权。"
                     "池=断板中全量(雷达),出手=五方案点命中,死格命中也不买。"),
         "group6_labels": contracts.GROUP6_LABELS,
@@ -97,7 +102,9 @@ def run_backtest() -> dict[str, object]:
 
 # ── 事件池构建(反包日 D 行;断板期字段由 pool.break_fields 按昨日行算) ──
 
-def _build_events() -> pd.DataFrame:
+def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """返回 (E, bars):bars=同进程全量日线(带 pos/n*_ 前向列),答题题库
+    切K线窗口用;报告统计只读 E。E 带 _bar_i(反包日行号)/_exit_i(退出行号)。"""
     engine = get_engine()
     universe = pool_mod.load_universe(engine)
     name_map = universe.set_index("vt_symbol")["name"].to_dict()
@@ -118,6 +125,8 @@ def _build_events() -> pd.DataFrame:
     for k in range(1, MAX_K + 1):
         bars[f"n{k}_close"] = g["close_price"].shift(-k)
         bars[f"n{k}_open"] = g["open_price"].shift(-k)
+        bars[f"n{k}_high"] = g["high_price"].shift(-k)
+        bars[f"n{k}_low"] = g["low_price"].shift(-k)
         bars[f"n{k}_is_lim"] = g["is_lim"].shift(-k)
 
     # 事件 = 昨日已断板 × 当日触板 × 非一字全天(研究 cand 口径)
@@ -154,12 +163,27 @@ def _build_events() -> pd.DataFrame:
         n1c = bars["n1_close"].iat[i]
         n1o = bars["n1_open"].iat[i]
         n1lim = bars["n1_is_lim"].iat[i]
-        # 收益(单一口径): 炸板→当天收盘;封住→次日起首个不再涨停日收盘,15 日兜底
+        # 收益(单一口径, v2.2 T+1合规对齐 hpr): 炸板→次日收盘走(当天买当天卖不了),
+        # 次日一字跌停锁死(开=收=高=低且较前收跌≥9.5%)顺延首个开板日;
+        # 封住→次日起首个不再涨停日收盘,15 日兜底
         exit_px, hold_days = np.nan, None
         exit_idx: int | None = None
         capped = False
         if not sealed:
-            exit_px, hold_days, exit_idx = float(cols["close_price"][i]), 0, i
+            prev_c = float(cols["close_price"][i])
+            for k in range(1, MAX_K + 1):
+                ko = float(bars[f"n{k}_open"].iat[i])
+                kc = float(bars[f"n{k}_close"].iat[i])
+                if kc != kc:
+                    break
+                kh = float(bars[f"n{k}_high"].iat[i])
+                kl = float(bars[f"n{k}_low"].iat[i])
+                locked = ko == kc == kh == kl and (kc / prev_c - 1) <= -0.095
+                prev_c = kc
+                if locked:
+                    continue  # 一字跌停锁死:排队也卖不掉,顺延
+                exit_px, hold_days, exit_idx = kc, k, i + k
+                break
         else:
             for k in range(1, MAX_K + 1):
                 v = bars[f"n{k}_is_lim"].iat[i]
@@ -198,6 +222,8 @@ def _build_events() -> pd.DataFrame:
                     break
                 follow += 1
         rows.append({
+            "_bar_i": i,           # 反包日行号(答题题库切K线窗口用;报告不读)
+            "_exit_i": exit_idx,   # 退出行号(未完=None;题库揭示窗用)
             "代码": str(bars["vt_symbol"].iat[i]),
             "名称": str(name_map.get(bars["vt_symbol"].iat[i]) or ""),
             "买入日": pd.Timestamp(cols["trade_date"][i]),
@@ -243,7 +269,7 @@ def _build_events() -> pd.DataFrame:
     E["年"] = E["买入日"].dt.strftime("%Y")
     # 研究胜率口径 = 好票率(次日收盘≥买价;炸板但涨回来的算好票)
     E["胜"] = E["次日收%"] >= 0
-    return E
+    return E, bars
 
 
 # ── 统计与物化 ──

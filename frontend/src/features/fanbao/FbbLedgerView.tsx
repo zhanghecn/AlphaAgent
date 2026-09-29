@@ -6,7 +6,7 @@ import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { cn, formatPct, formatPrice } from "@/lib/utils";
 
 const EXIT_REASON_LABELS: Record<string, string> = {
-  break_day_close: "炸板当日·收盘卖",
+  break_day_close: "炸板次日·收盘卖",
   next_close_fail: "次日未涨停·收盘卖",
   break_close: "断板日收盘卖",
   max_hold_close: "15日兜底·收盘卖",
@@ -70,7 +70,7 @@ export function FbbLedgerView({
     <section aria-label="断板反包历史交割单" className="space-y-4">
       <div className="rounded-lg border">
         <div className="border-b px-4 py-2 text-xs text-muted-foreground">
-          回测模拟口径(非实盘):触板买涨停价(一字排除,T字可买),反包日炸板当日收盘走/封住→断板收盘卖(15日兜底)
+          回测模拟口径(非实盘):触板买涨停价(一字排除,T字可买),反包日炸板次日收盘走(T+1,一字跌停顺延)/封住→断板收盘卖(15日兜底)
           ;坏票=次日收盘低于买价(炸板但第二天涨回来的算好票);全部方案点命中信号逐笔,不限仓位。实时前推成交随产品上线逐日沉淀。
         </div>
 

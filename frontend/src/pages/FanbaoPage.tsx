@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, BarChart3, BookOpenText, ReceiptText } from "lucide-react";
+import { Activity, BarChart3, BookOpenText, GraduationCap, ReceiptText } from "lucide-react";
 
 import {
   fetchFbbBacktest,
@@ -17,14 +17,16 @@ import { FbbBacktestView } from "@/features/fanbao/FbbBacktestView";
 import { FbbGuideView } from "@/features/fanbao/FbbGuideView";
 import { FbbLedgerView } from "@/features/fanbao/FbbLedgerView";
 import { FbbLiveView } from "@/features/fanbao/FbbLiveView";
+import { FbbQuizView } from "@/features/fanbao/quiz/FbbQuizView";
 import { cn } from "@/lib/utils";
 
-type FbbView = "live" | "backtest" | "ledger" | "guide";
+type FbbView = "live" | "quiz" | "backtest" | "ledger" | "guide";
 
 export const FBB_LIVE_REFRESH_INTERVAL_MS = 30 * 1000;
 
 const FBB_VIEWS: { value: FbbView; label: string; icon: typeof Activity }[] = [
   { value: "live", label: "实时推荐", icon: Activity },
+  { value: "quiz", label: "答题训练", icon: GraduationCap },
   { value: "backtest", label: "回测", icon: BarChart3 },
   { value: "ledger", label: "历史交割单", icon: ReceiptText },
   { value: "guide", label: "规则说明", icon: BookOpenText },
@@ -68,6 +70,8 @@ export function FanbaoPage() {
       </nav>
       {view === "live" ? (
         <LiveTab />
+      ) : view === "quiz" ? (
+        <FbbQuizView />
       ) : view === "backtest" ? (
         <BacktestTab />
       ) : view === "ledger" ? (

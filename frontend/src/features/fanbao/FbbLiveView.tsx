@@ -34,7 +34,7 @@ const STATUS_META: Record<string, { label: string; className: string }> = {
 };
 
 const EXIT_REASON_LABELS: Record<string, string> = {
-  break_day_close: "炸板当日·收盘卖",
+  break_day_close: "炸板次日·收盘卖",
   next_close_fail: "次日未涨停·收盘卖",
   break_close: "断板日收盘卖",
   max_hold_close: "15日兜底·收盘卖",

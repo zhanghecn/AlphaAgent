@@ -349,3 +349,112 @@ export function fetchFbbLedger(month?: string) {
 export function fetchFbbRules() {
   return apiClient.get<FbbRulesPayload>("/fanbao/rules");
 }
+
+// ── 答题训练题库(fbb-quiz):回测事件逐题物化,按月下发,前端本地判分 ──
+// 题库随回测重建整表刷新,版本串 fbb-v2.1·qN 进 localStorage key(版本变→旧进度作废)。
+// 事件范围=主格×done,O1/O2 观察级整格剔除(永远不看);收益=持有到断板%口径;K线未复权。
+
+export interface FbbQuizBar {
+  d: string;  // YYYY-MM-DD
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+export interface FbbQuizMonthSummary {
+  month: string;
+  total: number;
+  buy_count: number;     // 命中口诀(该买)题数
+  reject_count: number;  // 未命中(该拒)题数
+}
+
+export interface FbbQuizOverviewPayload {
+  status: "ok" | "unavailable";
+  rules_version?: string;
+  total?: number;
+  years?: { year: string; months: FbbQuizMonthSummary[] }[];
+}
+
+export interface FbbQuizDisplay {
+  board_label: string;            // 2板→断1天
+  group6_label: string;           // 2板反包·阴
+  break_drop_pct: number | null;  // 断板期累计跌幅%(昨收/末板收-1)
+  break_yin_count: number;        // 断板期实体阴线数(收盘<开盘)
+  last_open_pct: number | null;   // 末日(=昨日)开盘%
+  last_entity: string | null;     // 末日实体 阴/阳(收盘<开盘=阴)
+  today_open_pct: number;         // 今开%(决策日竞价,触板前可见)
+  day_high_pct: number;           // 盘中最高%(触板事件恒≈+10:决策时刻=触板瞬间)
+  prev_close: number;
+  limit_price: number | null;     // 涨停价(=触板买入价)
+  decision_open: number;          // 决策日开盘价(今开十字bar用)
+}
+
+export interface FbbQuizAnswer {
+  point: FbbPoint;              // —=不该买(题库内只会是 S1/S2/S3/—)
+  should_buy: boolean;
+  ret_pct: number | null;       // 持有到断板%(判分用)
+  buy_price: number | null;
+  sealed: boolean;
+  hold_days: number | null;
+  exit_date: string | null;
+  exit_price: number | null;
+  exit_reason: string | null;
+}
+
+export interface FbbQuizExplainHit {
+  kind: "hit";
+  scheme_no: string;
+  scheme_name: string;          // S1 低开急杀
+  scheme_desc: string;          // 口诀原文
+  matched_line: string;         // 本票数据对照行
+  case_note: string | null;     // 典型样例(案例门禁之一时)
+  high_var: boolean;            // S2 顶格开警示(开>7% 赢面五五开减半仓)
+}
+
+export interface FbbQuizExplainMiss {
+  kind: "miss";
+  trap_kind?: "dead" | "near" | "plain";  // 死格/形态接近/不沾边(综合挑战卷抽题用)
+  reasons: string[];            // 为什么不该买(1~2条)
+}
+
+export interface FbbQuizQuestion {
+  seq: number;                  // 月内题号(匿名题干用)
+  vt_symbol: string;
+  name: string;
+  decision_date: string;
+  n_board: number;
+  group6: FbbGroup6 | string;
+  display: FbbQuizDisplay;
+  bars_before: FbbQuizBar[];    // 截断K线(末根=断板期最后一天)
+  bars_after: FbbQuizBar[];     // 揭示K线(首根=反包日全天)
+  answer: FbbQuizAnswer;
+  explain: FbbQuizExplainHit | FbbQuizExplainMiss;
+}
+
+export interface FbbQuizQuestionsPayload {
+  status: "ok" | "unavailable";
+  month?: string;
+  rules_version?: string;
+  count?: number;
+  questions?: FbbQuizQuestion[];
+}
+
+export function fetchFbbQuizOverview() {
+  return apiClient.get<FbbQuizOverviewPayload>("/fanbao/quiz/overview");
+}
+
+export function fetchFbbQuizQuestions(month: string) {
+  return apiClient.get<FbbQuizQuestionsPayload>(
+    `/fanbao/quiz/questions?month=${encodeURIComponent(month)}`,
+  );
+}
+
+// 综合挑战卷(对齐 hpr):S1/S2/S3 每条随机2道好票+21道陷阱差票
+// (死格/形态接近/不沾边三等分),每次调用重抽、全卷乱序;year 指定=只在该年抽;
+// 进度与月题共享(同一题 key)。
+export function fetchFbbQuizMixed(year?: string) {
+  const query = year ? `?year=${encodeURIComponent(year)}` : "";
+  return apiClient.get<FbbQuizQuestionsPayload>(`/fanbao/quiz/mixed${query}`);
+}

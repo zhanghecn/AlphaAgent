@@ -97,3 +97,36 @@ def ledger(trade_date: date | None = Query(default=None, alias="date"),
 def rules():
     """规则契约:五方案点规则 + 死格清单 + 留档未收编 + 风险声明 + 同花顺条件 ×5。"""
     return ok(service.get_rules())
+
+
+@router.get("/quiz/overview", response_model=None)
+def quiz_overview():
+    """答题题库年→月分布(题数/买拒构成);版本不符或空表 → unavailable。"""
+    try:
+        return ok(service.get_quiz_overview())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "FBB_QUIZ_OVERVIEW_UNAVAILABLE", "答题题库概览暂时不可用",
+            {"reason": exc.__class__.__name__}))
+
+
+@router.get("/quiz/questions", response_model=None)
+def quiz_questions(month: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
+    """单月全部题目(K线窗口+答案+讲解一次下发;前端本地判分)。"""
+    try:
+        return ok(service.get_quiz_questions(month))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "FBB_QUIZ_QUESTIONS_UNAVAILABLE", "答题题目暂时不可用",
+            {"reason": exc.__class__.__name__}))
+
+
+@router.get("/quiz/mixed", response_model=None)
+def quiz_mixed(year: str | None = Query(default=None, pattern=r"^\d{4}$")):
+    """综合挑战卷:三条口诀各2道好票+陷阱差票三等分,每次调用重抽乱序;?year= 选年抽。"""
+    try:
+        return ok(service.get_quiz_mixed(year))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "FBB_QUIZ_MIXED_UNAVAILABLE", "综合挑战卷暂时不可用",
+            {"reason": exc.__class__.__name__}))

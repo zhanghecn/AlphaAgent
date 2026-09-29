@@ -79,7 +79,7 @@ export function FbbBacktestView({
 
       <section className="rounded-lg border p-4 text-xs text-muted-foreground">
         <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1">
-          <span className="text-sm font-semibold text-foreground">回测汇总(单一收益口径:炸板当日走/封住持有到断板)</span>
+          <span className="text-sm font-semibold text-foreground">回测汇总(单一收益口径:炸板次日走T+1/封住持有到断板)</span>
           <span>区间 {report.coverage.from} ~ {report.coverage.to}({report.coverage.months} 个月)</span>
           <span>规则版本 {report.rules_version}</span>
           <span>生成于 {formatGeneratedAt(report.generated_at)}</span>

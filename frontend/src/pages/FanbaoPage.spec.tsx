@@ -308,7 +308,7 @@ describe("FbbLedgerView", () => {
     );
     expect(html).toContain("坏票 — 1 笔");
     expect(html).toContain("好票 — 1 笔");
-    expect(html).toContain("炸板当日·收盘卖");
+    expect(html).toContain("炸板次日·收盘卖");
     expect(html).toContain("断板日收盘卖");
     expect(html).toContain("S1·出");
     expect(html).toContain("累计%");

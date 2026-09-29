@@ -1,8 +1,9 @@
 """断板反包打板盘后定版:信号状态推进 + 次日池计算。
 
 退出推进用"从数据重算"而非增量状态,天然幂等(重复跑/补跑结果一致)。
-口径(反包规则.md v2 卖出纪律,单一口径,无 E0/E3 双轨):
-- 反包日(买入日)没封住(炸板)→ 当天收盘价卖(break_day_close),不隔夜赌
+口径(反包规则.md v2.2 卖出纪律,单一口径,无 E0/E3 双轨;T+1合规对齐 hpr):
+- 反包日(买入日)没封住(炸板)→ 次日收盘价卖(break_day_close;当天买当天卖不了),
+  次日一字跌停锁死(开=收=高=低且较前收跌≥9.5%)顺延首个开板日
 - 封住了 → 买入次日起首个未涨停日收盘卖(next_close_fail=次日即断 /
   break_close=第2天起断;研究主算法=持有到断板日收盘)
 - 一路涨停到第 15 个交易日 → 当日收盘卖(max_hold_close,研究兜底口径)
@@ -215,15 +216,33 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
         bad_ticket: bool | None = None
         if not later.empty:
             bad_ticket = float(later.iloc[0]["close_price"]) < entry_price
-        # 买入日没封住 → 当天收盘卖;判定用池触发价(=当日涨停价)
+        # 买入日没封住 → 次日收盘卖(T+1:当天买当天卖不了);判定用池触发价(=当日涨停价)
+        # 次日一字跌停锁死(开=收=高=低且较前收跌≥9.5%)顺延首个开板日
         sealed = abs(float(first["close_price"]) - limit_price) <= 1e-6 and bool(first["is_lim"])
         if not sealed:
-            exit_price = float(first["close_price"])
+            exit_date2: date | None = None
+            exit_price2: float | None = None
+            prev_c = float(first["close_price"])
+            for r in later.itertuples():
+                ro, rc = float(r.open_price), float(r.close_price)
+                locked = (ro == rc == float(r.high_price) == float(r.low_price)
+                          and (rc / prev_c - 1) <= -0.095)
+                prev_c = rc
+                if locked:
+                    continue
+                exit_date2, exit_price2 = r.trade_date, rc
+                break
+            if exit_date2 is None:
+                # 次日数据未到 / 检查窗内全是一字跌停:炸板在持,等数据幂等补
+                repository.upsert_signal(entry_date, vt, status="holding", sealed=False,
+                                         streak_h=0)
+                holding += 1
+                continue
             repository.upsert_signal(
                 entry_date, vt, status="closed", sealed=False, streak_h=0,
-                exit_date=entry_date, exit_price=exit_price,
+                exit_date=exit_date2, exit_price=exit_price2,
                 exit_reason="break_day_close", bad_ticket=bad_ticket,
-                ret_pct=round((exit_price / entry_price - 1) * 100, 3))
+                ret_pct=round((exit_price2 / entry_price - 1) * 100, 3))
             closed += 1
             continue
         # 封住了 → 次日起首个未涨停日收盘卖,15 日兜底
