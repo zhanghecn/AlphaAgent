@@ -49,11 +49,12 @@ const LIVE_PAYLOAD: HprLivePayload = {
     A1: "A1 双平贴零",
     A2: "A2 一字转强",
     B1: "B1 强开系",
-    B2: "B2 弱开系",
+    B2: "B2 捡尸",
+    C1: "C1 冒泡转弱",
     E1: "E1 四板便捷",
     E2: "E2 四板捡漏",
   },
-  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", E1: "A", E2: "A" },
+  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", C1: "A", E1: "A", E2: "A" },
   last_scan: null,
   entries: [
     {

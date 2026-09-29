@@ -174,7 +174,7 @@ export function HprQuizView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold text-primary">综合挑战卷</span>
           <span className="text-xs text-muted-foreground">
-            六条口诀各抽 2 道好票 + 21 道陷阱票（阴阳反串／形态接近／毒段）——
+            七条口诀各抽 2 道好票 + 21 道陷阱票（阴阳反串／形态接近／毒段）——
             每卷练全所有口诀，认熟「看着像但不能打」的票；每次进入重新随机抽题。
           </span>
           <button

@@ -40,26 +40,27 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-/** 打板口诀卡七条硬编码映射(hpr-v4.4;A=二接三阳 B=二接三阴 E=三接四,弱开系冒泡分支阴阳都打/E1不分)。 */
+/** 打板口诀卡七条硬编码映射(hpr-v5.1;A=阳 B=阴 C=中性阴阳都打 E=三接四)。 */
 const POINT_BADGES: Record<string, { label: string; full: string; className: string }> = {
   A1: { label: "A1", full: "A1 双平贴零(二接三阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
   A2: { label: "A2", full: "A2 一字转强(二接三阳)", className: "bg-teal-500/15 text-teal-500" },
   B1: { label: "B1", full: "B1 强开系(转温/续强,二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
-  B2: { label: "B2", full: "B2 弱开系(捡尸/冒泡洗盘,今开<3)", className: "bg-yellow-500/15 text-yellow-500" },
+  B2: { label: "B2", full: "B2 捡尸(二接三阴,今开<0)", className: "bg-yellow-500/15 text-yellow-500" },
+  C1: { label: "C1", full: "C1 冒泡转弱(阴阳都打,今开<3)", className: "bg-emerald-500/15 text-emerald-500" },
   E1: { label: "E1", full: "E1 四板便捷(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
   E2: { label: "E2", full: "E2 四板捡漏(低开吸/贴零温开)", className: "bg-sky-500/15 text-sky-500" },
 };
 
-const POINT_KEYS = ["A1", "A2", "B1", "B2", "E1", "E2"] as const;
+const POINT_KEYS = ["A1", "A2", "B1", "B2", "C1", "E1", "E2"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
   A2: "text-teal-500",
   B1: "text-amber-500",
   B2: "text-yellow-500",
+  C1: "text-emerald-500",
   E1: "text-primary",
   E2: "text-sky-500",
-  E3: "text-fuchsia-500",
 };
 
 export function HprLiveView({

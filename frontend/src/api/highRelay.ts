@@ -4,12 +4,12 @@ import { apiClient } from "./client";
 // 策略口径 = hpr-v4.4 打板口诀卡七条(量化因子研究/高位接力/打板口诀卡.md,2026-09-28合体定稿)。
 // 买点 = 昨日恰好2/3连板,链区间(前几板开盘%+换手窗)命中且今天开盘在口诀窗内,
 // 触涨停价即打(低吸类低开直接买);开盘≥9.5%顶格不命中(正常开盘口径)。
-// 池 = 昨日2/3连板全量(雷达),七条 A1/A2(二接三阳) B1/B2弱开系/B4(二接三阴)
+// 池 = 昨日2/3连板全量(雷达),七条 A1/A2(阳) B1强开系/B2捡尸(阴) C1冒泡转弱(阴阳都打)
 // E1四板便捷(三接四不分阴阳,含一字系3~5档)/E2四板捡漏(低吸+温开两分支)。
 
 export type HprPoint =
-  | "A1" | "A2" | "B1" | "B2"
-  | "E1" | "E2" | "—";   // v5.0 六条:B3/E3/B4 退休(并入弱开系/四板捡漏/强开系)
+  | "A1" | "A2" | "B1" | "B2" | "C1"
+  | "E1" | "E2" | "—";   // v5.1 七条:A=阳/B=阴/C=中性(阴阳都打)/E=四板
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
 
 export type HprStatus =
@@ -244,7 +244,7 @@ export interface HprRuleItem {
 }
 
 export interface HprRuleGroup {
-  group: "pool" | "A" | "B" | "E" | HprPoint | "avoid" | "time" | "buy" | "sell";
+  group: "pool" | "A" | "B" | "C" | "E" | HprPoint | "avoid" | "time" | "buy" | "sell";
   title: string;
   items: HprRuleItem[];
 }

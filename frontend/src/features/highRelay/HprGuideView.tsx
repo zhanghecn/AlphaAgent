@@ -13,6 +13,8 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   B: { badge: "bg-amber-500/15 text-amber-500", label: "二接三阴" },
   B1: { badge: "bg-amber-500/15 text-amber-500", label: "B1" },
   B2: { badge: "bg-yellow-500/15 text-yellow-500", label: "B2" },
+  C: { badge: "bg-emerald-500/15 text-emerald-500", label: "中性·阴阳都打" },
+  C1: { badge: "bg-emerald-500/15 text-emerald-500", label: "C1" },
   E: { badge: "bg-primary/15 text-primary", label: "三接四" },
   E1: { badge: "bg-primary/15 text-primary", label: "E1" },
   E2: { badge: "bg-sky-500/15 text-sky-500", label: "E2" },
@@ -23,15 +25,15 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
 };
 
 // 口诀卡顺序(主人定):阴阳分组,组内按二板开盘从低到高;与后端 RULES A/B/E 组序一致
-const POINT_ORDER = ["A1", "A2", "B2", "B1", "E1", "E2"] as const;
+const POINT_ORDER = ["A1", "A2", "B2", "B1", "C1", "E1", "E2"] as const;
 
 // 速查表(主人定 2026-09-28):只要「阴阳地基 → 二板开 → 今天开 → 附加」四列,
 // 数据注记不进表;文案与后端 contracts.RULES/SCHEMES desc 同步(改一边必须改另一边)
 const CHEAT_ROWS: { name: string; yang: string; board: string; today: string; extra?: string }[] = [
   { name: "A1 双平贴零", yang: "阳", board: "<1", today: "6~9.5", extra: "一板<3·换手<12" },
   { name: "A2 一字转强", yang: "阳", board: "≥9.5一字", today: "7~8.5", extra: "一板<3时换手<5" },
-  { name: "B2 弱开系·捡尸", yang: "阴", board: "<0或2~3", today: "<0", extra: "一板<0" },
-  { name: "B2 弱开系·冒泡洗盘", yang: "阴阳", board: "3~7", today: "<3", extra: "一板≥7" },
+  { name: "B2 捡尸", yang: "阴", board: "<0或2~3", today: "<0", extra: "一板<0" },
+  { name: "C1 冒泡转弱", yang: "阴阳", board: "3~7", today: "<3", extra: "一板≥7" },
   { name: "B1 强开系·转温", yang: "阴", board: "≥7", today: "3~5", extra: "一板≥7·换手≥5" },
   { name: "B1 强开系·续强", yang: "阴", board: "7~8.5(一字不算)", today: "6~9.5", extra: "一板不限" },
   { name: "E1 四板便捷", yang: "不分", board: "三板换手10~20", today: "5~9.5", extra: "一字系:换手3~5·今开6~9.5" },
@@ -51,12 +53,12 @@ export function HprGuideView() {
     return <ErrorState message="规则契约暂时不可用" onRetry={() => void query.refetch()} />;
   }
   const rules = query.data;
-  // 七条口诀卡数据:A/B/E 组 items 按序 flatten,与 POINT_ORDER 一一对应
+  // 七条口诀卡数据:A/B/C/E 组 items 按序 flatten,与 POINT_ORDER 一一对应
   const schemeCards = rules.rules
-    .filter((g) => g.group === "A" || g.group === "B" || g.group === "E")
+    .filter((g) => g.group === "A" || g.group === "B" || g.group === "C" || g.group === "E")
     .flatMap((g) => g.items.map((it) => ({ ...it, group: g.group })));
   const mechanicGroups = rules.rules.filter(
-    (g) => g.group !== "A" && g.group !== "B" && g.group !== "E",
+    (g) => g.group !== "A" && g.group !== "B" && g.group !== "C" && g.group !== "E",
   );
   return (
     <div className="space-y-4">
@@ -64,7 +66,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            打板口诀卡七条(hpr-v4.4 合体定稿)全市场验证(2023-03 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
+            打板口诀卡七条(hpr-v5.1:A=阳B=阴C=中性E=四板)全市场验证(2023-03 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
           </span>
         </div>
       </section>
@@ -104,7 +106,7 @@ export function HprGuideView() {
           换手心法：二接三看二板换手（阳锁阴活），三接四看三板换手，一板换手永远不用看；
           盘中首次触涨停价打（低吸类低开直接买），开盘≥9.5%顶格不命中；
           炸板次日走（T+1，一字跌停顺延），封住拿到断板（15日兜底）。
-          合计184笔 月均4.2笔（v4.4）；不挑就买是亏的，其余一概不碰。
+          合计185笔 月均4.3笔（v5.1）；不挑就买是亏的，其余一概不碰。
         </p>
       </section>
 
