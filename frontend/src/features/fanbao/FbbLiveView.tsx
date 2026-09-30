@@ -40,23 +40,19 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-/** 五方案点硬编码映射:S级金边出手、O级普通观察。 */
+/** 三方案点硬编码映射(v2.3 起 O1/O2 删除,只剩 S 级出手)。 */
 const POINT_BADGES: Record<string, { label: string; full: string; className: string }> = {
   S1: { label: "S1", full: "S1 低开急杀(2板·跌8~15%只洗一次,末日低开或平开)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
   S2: { label: "S2", full: "S2 高开洗透(4板断1天·末日高开2%以上走低收阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
   S3: { label: "S3", full: "S3 高位扛住(5板以上断1天·昨天没跌=筹码锁死)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
-  O1: { label: "O1", full: "O1 高位阴断1(5板以上断1天但昨天跌了,观察级)", className: "bg-violet-500/15 text-violet-500" },
-  O2: { label: "O2", full: "O2 四板阴断3(观察级)", className: "bg-orange-500/15 text-orange-500" },
 };
 
-const POINT_KEYS = ["S1", "S2", "S3", "O1", "O2"] as const;
+const POINT_KEYS = ["S1", "S2", "S3"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   S1: "text-rise",
   S2: "text-amber-500",
   S3: "text-primary",
-  O1: "text-violet-500",
-  O2: "text-orange-500",
 };
 
 export function FbbLiveView({

@@ -12,15 +12,13 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-const POINT_KEYS = ["S1", "S2", "S3", "O1", "O2"] as const;
+const POINT_KEYS = ["S1", "S2", "S3"] as const;
 const GROUP6_KEYS: FbbGroup6[] = ["2板阴", "2板阳", "4板阴", "4板阳", "5+板阴", "5+板阳"];
 
 const POINT_BADGES: Record<string, { label: string; className: string }> = {
   S1: { label: "S1", className: "bg-rise/15 text-rise" },
   S2: { label: "S2", className: "bg-amber-500/15 text-amber-500" },
   S3: { label: "S3", className: "bg-primary/15 text-primary" },
-  O1: { label: "O1", className: "bg-violet-500/15 text-violet-500" },
-  O2: { label: "O2", className: "bg-orange-500/15 text-orange-500" },
 };
 
 /** 断板反包历史交割单:好票/坏票两分组平铺(=好差票验证月度文件的产品化等价)。 */

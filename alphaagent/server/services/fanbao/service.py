@@ -39,6 +39,11 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
             target = latest
             stale = True
     signals = repository.load_signal_map(target)
+    # v2.3:历史池/信号行里的 O1/O2 观察票整体不显示(主人拍板「永远不会看的」);
+    # 在源头过滤,显示/计数/信号总数同一口径
+    pool = [e for e in pool if str(e.get("point")) not in ("O1", "O2")]
+    signals = {vt: sig for vt, sig in signals.items()
+               if str(sig.get("point")) not in ("O1", "O2")}
     entries = []
     pool_vts = {str(e["vt_symbol"]) for e in pool}
     for entry in pool:
@@ -339,8 +344,9 @@ def _month_summaries(days: list[dict[str, object]]) -> list[dict[str, object]]:
 
 
 def get_forward_ledger(trade_date: date) -> dict[str, object]:
-    """前推交割单(产品上线后的实时模拟成交)。"""
-    entered = repository.load_entered_signals(trade_date)
+    """前推交割单(产品上线后的实时模拟成交;v2.3 起不含 O1/O2 历史信号)。"""
+    entered = [r for r in repository.load_entered_signals(trade_date)
+               if str(r.get("point")) not in ("O1", "O2")]
     for row in entered:
         row["point_label"] = contracts.POINT_LABELS.get(str(row.get("point")), "")
     return {"status": "ok", "is_backtest": False,

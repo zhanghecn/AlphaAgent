@@ -2217,7 +2217,7 @@ Index(
 # ── 断板反包打板(2/4/5+板断板1~3天后再涨停, fbb) ──
 # 策略口径 = 量化因子研究/反包/反包规则.md v2 定稿(2026-09-25)。
 # 池 = 昨日处于断板第 1~3 天且前波高度 2/4/5+(3板删除)的全量(雷达);
-# 方案点 S1/S2/S3(出手级) O1/O2(观察级),命中且非死格 = actionable;
+# 方案点 S1/S2/S3(v2.3 起观察级 O1/O2 删除),命中且非死格 = actionable;
 # 买 = 盘中触涨停价按涨停价(无首刻窗,T字回封可买,一字剔除);
 # 卖 = 反包日炸板当日收盘走 / 封住→断板日收盘(15 个交易日兜底)。
 # ⚠️ yin_yang=跌幅口径(分组);break_yin_count=实体口径(S1条件),两把尺子严禁互换。
@@ -2233,7 +2233,7 @@ fbb_pool_entries = Table(
     Column("seg", String(4), nullable=False),        # 高度段 2板/4板/5+板
     Column("gap", Integer, nullable=False),          # 断板天数 1/2/3(主格)
     Column("yin_yang", String(2), nullable=False),   # 跌幅口径: 昨收<前日收=阴,涨或平=阳
-    Column("point", String(4), nullable=False, server_default="—"),  # S1/S2/S3/O1/O2/—
+    Column("point", String(4), nullable=False, server_default="—"),  # S1/S2/S3/—(O1/O2 已删)
     Column("level", String(2), nullable=False, server_default="—"),  # S/O/—
     Column("actionable", Boolean, nullable=False, server_default="false"),  # 命中且非死格
     Column("avoid_static", String(160), nullable=True),   # 死格原因(命中也不买)

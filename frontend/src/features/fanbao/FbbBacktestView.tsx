@@ -12,13 +12,11 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const POINTS = ["S1", "S2", "S3", "O1", "O2"] as const;
+const POINTS = ["S1", "S2", "S3"] as const;
 const POINT_SHORT: Record<string, string> = {
   S1: "S1 一根急杀",
   S2: "S2 四板阴断1",
   S3: "S3 五板+阳断1",
-  O1: "O1 五板+阴断1",
-  O2: "O2 四板阴断3",
   S级: "仅S级出手",
   all: "方案合计",
   miss: "未命中对照",
@@ -27,8 +25,6 @@ const POINT_TONE: Record<string, string> = {
   S1: "stroke-rise",
   S2: "stroke-amber-500",
   S3: "stroke-primary",
-  O1: "stroke-violet-500",
-  O2: "stroke-orange-500",
 };
 const SUMMARY_KEYS = [...POINTS, "S级", "all", "miss"] as const;
 
@@ -37,10 +33,10 @@ const GROUP6_SHORT: Record<string, string> = {
   "5+板阴": "5+板阴", "5+板阳": "5+板阳",
 };
 
-/** 18格中的死格(灰显;4板阴断3=O2观察格不灰) */
+/** 18格中的死格(灰显;v2.3 起 4板阴断3(O2 已删)也归死格) */
 const DEAD_CELLS = new Set([
   "4板阳|1", "4板阳|2", "4板阳|3",
-  "4板阴|2",
+  "4板阴|2", "4板阴|3",
   "5+板阴|2", "5+板阴|3", "5+板阳|2", "5+板阳|3",
 ]);
 

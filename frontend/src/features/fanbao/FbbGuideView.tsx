@@ -10,14 +10,12 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   S1: { badge: "bg-rise/15 text-rise", label: "S1" },
   S2: { badge: "bg-amber-500/15 text-amber-500", label: "S2" },
   S3: { badge: "bg-primary/15 text-primary", label: "S3" },
-  O1: { badge: "bg-violet-500/15 text-violet-500", label: "O1" },
-  O2: { badge: "bg-orange-500/15 text-orange-500", label: "O2" },
   dead: { badge: "bg-fall/15 text-fall", label: "死格" },
   buy: { badge: "bg-rise/15 text-rise", label: "买" },
   sell: { badge: "bg-amber-500/15 text-amber-500", label: "卖" },
 };
 
-const POINT_ORDER = ["S1", "S2", "S3", "O1", "O2"] as const;
+const POINT_ORDER = ["S1", "S2", "S3"] as const;
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
 export function FbbGuideView() {

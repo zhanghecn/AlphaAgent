@@ -43,10 +43,8 @@ const LIVE_PAYLOAD: FbbLivePayload = {
     S1: "S1 一根急杀",
     S2: "S2 四板阴断1",
     S3: "S3 五板+阳断1",
-    O1: "O1 五板+阴断1",
-    O2: "O2 四板阴断3",
   },
-  point_levels: { S1: "S", S2: "S", S3: "S", O1: "O", O2: "O" },
+  point_levels: { S1: "S", S2: "S", S3: "S" },
   last_scan: null,
   entries: [
     {

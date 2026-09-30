@@ -3,8 +3,8 @@
 题库口径说明:
 - 事件范围 = done(未完剔除:没有退出结果无法判分) × 主格(2/4/5+板断1~3天,与回测
   ledger 同口径;3板与断4~5天是参考行不出题)。
-- 观察级 O1/O2(5+阴断1、4板阴断3)主人拍板删除(2026-09-28:「这些是永远不会看的」):
-  整格不进题库——不出题、不当陷阱、不进综合卷。
+- 观察级 O1/O2(5+阴断1、4板阴断3)主人拍板删除(2026-09-28:「这些是永远不会看的」;
+  v2.3 起产品全线不打标):整格不进题库——不出题、不当陷阱、不进综合卷。
 - 收益 = 持有到断板%(产品卖出纪律单一口径,T+1合规对齐 hpr):反包日炸板→次日
   收盘走(一字跌停顺延首个开板日);封住→持有到首次断板日收盘,15日兜底;
   与交割单同口径。
@@ -21,7 +21,8 @@ import pandas as pd
 
 from alphaagent.server.services.fanbao import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 2   # q2:display 加 day_high_pct(盘中最高=触板时刻锚点,主人:「>8%就该准备打板了」)
+QUIZ_CONTENT_VERSION = 3   # q3:O1/O2 删除连带题库口径改格子剔除(v2.3 方案点收窄为三条)
+                             # q2:display 加 day_high_pct(盘中最高=触板时刻锚点,主人:「>8%就该准备打板了」)
                              # q1:首发(出手级S1/S2/S3+死格/形态接近/不沾边三分类)
 BARS_BEFORE = 60           # 反包日前窗口上限(覆盖前波连板+断板期;前端默认只显末~30根)
 
@@ -49,8 +50,11 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                      point, ret_pct, payload}];月内 seq 按(买入日,代码)编定。
     构建期自检:全部事件 tag_point 重算必须等于 E 行 point,不等即 raise。
     """
-    # O1/O2 观察级整格剔除(主人拍板:永远不看);未完剔除(无法判分)
-    done = E[~E["未完"] & E["主格"] & ~E["方案点"].isin(("O1", "O2"))].copy()
+    # O1/O2 观察级整格剔除(主人拍板:永远不看;v2.3 起不再打标,按格子剔):
+    # 5+阴断1(O1 格)与 4板阴断3(O2 格)的票不出题、不当陷阱;未完剔除(无法判分)
+    o_zone = (((E["N"] >= 5) & (E["阴阳"] == "阴") & (E["断板天数"] == 1))
+              | ((E["N"] == 4) & (E["阴阳"] == "阴") & (E["断板天数"] == 3)))
+    done = E[~E["未完"] & E["主格"] & ~o_zone].copy()
     done.sort_values(["月", "买入日", "代码"], inplace=True)
     done["seq"] = done.groupby("月").cumcount() + 1
 

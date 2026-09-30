@@ -3,11 +3,11 @@ import { apiClient } from "./client";
 // ── 断板反包打板(2/4/5+板断板1~3天后再涨停)产品线 API 契约 ──
 // 策略口径 = fbb-v2.0(量化因子研究/反包/反包规则.md 定稿)。
 // 事件 = 前波恰好2/4/5+连板(5+无上限)→断板1~3天→今日盘中触涨停价打板;
-// 池 = 断板中全量(雷达),五方案点 S1/S2/S3(出手级) O1/O2(观察级) 命中才出手,
+// 池 = 断板中全量(雷达),三方案点 S1/S2/S3 命中才出手(v2.3 起观察级 O1/O2 删除),
 // 死格命中也不买;无首刻窗(与高位接力最大差异:触板即买)。
 // ⚠️ 双口径:yin_yang=跌幅口径(分组,昨收<前日收=阴);break_yin_count=实体口径(S1条件)。
 
-export type FbbPoint = "S1" | "S2" | "S3" | "O1" | "O2" | "—";
+export type FbbPoint = "S1" | "S2" | "S3" | "—";
 export type FbbGroup6 =
   | "2板阴" | "2板阳" | "4板阴" | "4板阳" | "5+板阴" | "5+板阳";
 
@@ -24,7 +24,7 @@ export interface FbbLiveEntry {
   gap: number | null;
   yin_yang: string | null;
   point: FbbPoint;
-  level: "S" | "O" | "—";
+  level: "S" | "—";  // v2.3: O 级已删
   actionable: boolean;
   avoid_static: string | null;
   prev_close: number | null;
@@ -93,7 +93,7 @@ export interface FbbLivePayload {
   mkt_lim_tm1: number | null;
   group6_labels: Record<FbbGroup6, string>;
   point_labels: Record<string, string>;
-  point_levels: Record<string, "S" | "O">;
+  point_levels: Record<string, "S">;
   last_scan: { finished_at: string | null; status: string; message: string | null } | null;
   entries: FbbLiveEntry[];
 }
@@ -181,7 +181,7 @@ export interface FbbBacktestReport {
   caliber: string;
   group6_labels: Record<FbbGroup6, string>;
   point_labels: Record<string, string>;
-  point_levels: Record<string, "S" | "O">;
+  point_levels: Record<string, "S">;
   /** key = 五点 + "S级" + "all" + "miss" */
   summary: Record<string, FbbStats>;
   group6_summary: Record<string, FbbStats>;
@@ -306,7 +306,7 @@ export interface FbbRulesPayload {
   rules_version: string;
   group6_labels: Record<FbbGroup6, string>;
   point_labels: Record<string, string>;
-  point_levels: Record<string, "S" | "O">;
+  point_levels: Record<string, "S">;
   point_desc: Record<string, string>;
   rules: FbbRuleGroup[];
   falsified_rules: string[];
