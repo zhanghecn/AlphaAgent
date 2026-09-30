@@ -4,12 +4,13 @@ import { apiClient } from "./client";
 // 策略口径 = hpr-v4.4 打板口诀卡七条(量化因子研究/高位接力/打板口诀卡.md,2026-09-28合体定稿)。
 // 买点 = 昨日恰好2/3连板,链区间(前几板开盘%+换手窗)命中且今天开盘在口诀窗内,
 // 触涨停价即打(低吸类低开直接买);开盘≥9.5%顶格不命中(正常开盘口径)。
-// 池 = 昨日2/3连板全量(雷达),七条 A1/A2(阳) B1强开系/B2捡尸(阴) C1冒泡转弱(阴阳都打)
-// E1四板便捷(三接四不分阴阳,含一字系3~5档)/E2四板捡漏(低吸+温开两分支)。
+// 池 = 昨日2/3连板全量(雷达),七条 v6.0(A=阳B=阴C=中性,字母语义跨板位统一):
+// A1双平贴零/A2一字转强/A3高开低吸(三接四阳) B1强开系/B2捡尸/B3贴零温开(三接四阴)
+// C1冒泡转弱(二接三,阴阳都打)/C2四板便捷(三接四不分阴阳,含一字系3~5档)。
 
 export type HprPoint =
   | "A1" | "A2" | "B1" | "B2" | "C1"
-  | "E1" | "E2" | "—";   // v5.1 七条:A=阳/B=阴/C=中性(阴阳都打)/E=四板
+  | "A3" | "B3" | "C2" | "—";   // v6.0:A=阳/B=阴/C=中性(字母跨板位统一,E退休)
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
 
 export type HprStatus =
@@ -257,6 +258,8 @@ export interface HprRulesPayload {
   point_desc: Record<string, string>;
   point_names: Record<string, string>;   // A1→双平贴零(纯口诀名,规则页卡片标题用)
   point_psycho: Record<string, string>;  // A1→主力心理解读(规则页口诀卡用)
+  point_stats: Record<string, string>;   // A1→"16笔·胜69%·均+12.0"成绩速览(E3口径)
+  point_boards: Record<string, string>;  // A1→"打3板"板位归属
   rules: HprRuleGroup[];
   falsified_rules: string[];
   risk_notes: string[];
@@ -359,6 +362,7 @@ export interface HprQuizExplainHit {
   scheme_name: string;          // B1 强转弱
   scheme_desc: string;          // 口诀原文
   psycho: string;               // 主力心理
+  hold_note: string;            // 持有纪律(四板今开分水岭,q18起)
   today_window: [number, number] | null;
   matched_line: string;         // 本票数据对照行
   case_note: string | null;     // 典型样例(19个具名案例之一时)

@@ -51,10 +51,11 @@ const LIVE_PAYLOAD: HprLivePayload = {
     B1: "B1 强开系",
     B2: "B2 捡尸",
     C1: "C1 冒泡转弱",
-    E1: "E1 四板便捷",
-    E2: "E2 四板捡漏",
+    A3: "A3 高开低吸",
+    B3: "B3 贴零温开",
+    C2: "C2 四板便捷",
   },
-  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", C1: "A", E1: "A", E2: "A" },
+  point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", C1: "A", A3: "A", B3: "A", C2: "A" },
   last_scan: null,
   entries: [
     {
@@ -278,7 +279,7 @@ describe("quizScore.summarize 月度统计", () => {
                   sealed: true, hold_days: 2, exit_date: "2024-11-05", exit_price: 11,
                   exit_reason: "break_close" },
         explain: { kind: "hit" as const, scheme_no: "A1", scheme_name: "A1 双平贴零",
-                   scheme_desc: "", psycho: "", today_window: [6, 9.5] as [number, number],
+                   scheme_desc: "", psycho: "", hold_note: "买入后怎么拿：第二天早上9:25竞价就定去留……", today_window: [6, 9.5] as [number, number],
                    matched_line: "", case_note: null, half_mountain: false },
       },
       {
@@ -315,7 +316,7 @@ describe("quizScore.summarize 月度统计", () => {
                   sealed: true, hold_days: 2, exit_date: "2024-11-05", exit_price: 11,
                   exit_reason: "break_close" },
         explain: { kind: "hit" as const, scheme_no: "A1", scheme_name: "A1 双平贴零",
-                   scheme_desc: "", psycho: "", today_window: [6, 9.5] as [number, number],
+                   scheme_desc: "", psycho: "", hold_note: "买入后怎么拿：第二天早上9:25竞价就定去留……", today_window: [6, 9.5] as [number, number],
                    matched_line: "", case_note: null, half_mountain: false },
       },
       {  // 未命中题 ret=-5,用户也买了(口诀不会买)
@@ -373,7 +374,7 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
   explain: {
     kind: "hit", scheme_no: "B1", scheme_name: "B1 强开系",
     scheme_desc: "一板二板都强开(各≥7),二板换手要活(≥5),今天温开3~5",
-    psycho: "弱势票连开两天强开,人气已经聚起来了……",
+    psycho: "弱势票连开两天强开,人气已经聚起来了……", hold_note: "",
     today_window: [3, 5],
     matched_line: "一板开+8.4 × 二板开+10.0(换手28.8) → 今开+4.2 落在窗3~5",
     case_note: "B1最大赢家锚点:强强链换手28.8≥5,今天开4.16,+93.1(收益之王)",

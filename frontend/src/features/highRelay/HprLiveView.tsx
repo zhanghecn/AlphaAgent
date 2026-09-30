@@ -47,11 +47,12 @@ const POINT_BADGES: Record<string, { label: string; full: string; className: str
   B1: { label: "B1", full: "B1 强开系(转温/续强,二接三阴)", className: "bg-amber-500/15 text-amber-500 ring-1 ring-amber-500/40" },
   B2: { label: "B2", full: "B2 捡尸(二接三阴,今开<0)", className: "bg-yellow-500/15 text-yellow-500" },
   C1: { label: "C1", full: "C1 冒泡转弱(阴阳都打,今开<3)", className: "bg-emerald-500/15 text-emerald-500" },
-  E1: { label: "E1", full: "E1 四板便捷(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
-  E2: { label: "E2", full: "E2 四板捡漏(低开吸/贴零温开)", className: "bg-sky-500/15 text-sky-500" },
+  A3: { label: "A3", full: "A3 高开低吸(三接四阳,低开直接买)", className: "bg-rose-500/15 text-rose-500 ring-1 ring-rose-500/40" },
+  B3: { label: "B3", full: "B3 贴零温开(三接四阴)", className: "bg-orange-500/15 text-orange-500" },
+  C2: { label: "C2", full: "C2 四板便捷(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
 };
 
-const POINT_KEYS = ["A1", "A2", "B1", "B2", "C1", "E1", "E2"] as const;
+const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
@@ -59,8 +60,9 @@ const POINT_COUNT_TONE: Record<string, string> = {
   B1: "text-amber-500",
   B2: "text-yellow-500",
   C1: "text-emerald-500",
-  E1: "text-primary",
-  E2: "text-sky-500",
+  A3: "text-rose-500",
+  B3: "text-orange-500",
+  C2: "text-primary",
 };
 
 export function HprLiveView({
@@ -256,7 +258,7 @@ function LiveRow({ entry }: { entry: HprLiveEntry }) {
         {entry.auction_pct == null ? "--" : formatPct(entry.auction_pct)}
         {entry.today_window && entry.today_window.length > 0 ? (
           // 出手条件(主人定):盘前显示「需多少」待竞价对照;竞价后对照今开 ✓/✗;
-          // 多分支链重叠票(E1×E2/B1×B4)多窗并列,悬浮见完整条件表(action_hint)
+          // 多分支链重叠票(C2×A3·B3/B1×转温)多窗并列,悬浮见完整条件表(action_hint)
           <div
             className={cn(
               "text-[10px]",

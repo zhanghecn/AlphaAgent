@@ -10,15 +10,16 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const POINTS = ["A1", "A2", "B1", "B2", "C1", "E1", "E2"] as const;  // v5.1 七条(A阳/B阴/C中性/E四板)
+const POINTS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2"] as const;  // v6.0 八键(A阳/B阴/C中性,跨板位)
 const POINT_SHORT: Record<string, string> = {
   A1: "A1 双平贴零",
   A2: "A2 一字转强",
   B1: "B1 强开系",
   B2: "B2 捡尸",
   C1: "C1 冒泡转弱",
-  E1: "E1 四板便捷",
-  E2: "E2 四板捡漏",
+  A3: "A3 高开低吸",
+  B3: "B3 贴零温开",
+  C2: "C2 四板便捷",
   A级: "仅A级",
   all: "方案合计",
   miss: "未命中对照",
@@ -29,8 +30,9 @@ const POINT_TONE: Record<string, string> = {
   B1: "stroke-amber-500",
   B2: "stroke-yellow-500",
   C1: "stroke-emerald-500",
-  E1: "stroke-primary",
-  E2: "stroke-sky-500",
+  A3: "stroke-rose-500",
+  B3: "stroke-orange-500",
+  C2: "stroke-primary",
 };
 const SUMMARY_KEYS = [...POINTS, "A级", "all", "miss"] as const;
 

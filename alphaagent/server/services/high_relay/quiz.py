@@ -7,7 +7,7 @@
   不了么」);「开盘≥9.5一律不打」作为硬规则留在规则页,不占用题目。
 - 收益 = E3%(产品卖出纪律,T+1合规:炸板→次日走(一字跌停顺延),封住→断板日,15日兜底;
   退出价=max(退出日收盘,(高+低)/2)(v4.3,主人拍板:中间价保底,收盘更高按实际算),
-  与交割单同口径;E2/B2 低吸类回测统一按触板价买入计(实盘低开买成本更低)。
+  与交割单同口径;A3/B2 低吸类回测统一按触板价买入计(实盘低开买成本更低)。
 - K线 = 未复权日线(与回测同口径,除权日可见跳空,题卡页脚注明)。
 
 版本纪律:讲解文案/题库结构变更必升 QUIZ_CONTENT_VERSION;版本串进表/进API/进前端
@@ -19,7 +19,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 17  # v17:A2/A1换手表述写明"二板换手"(主人做题点名歧义;阈值不动,数据验证5~8档0/4全灭不放宽)
+QUIZ_CONTENT_VERSION = 19  # v19:编号手术v6.0(E1→C2/E2拆A3+B3)题库scheme_no重物化;持有纪律同v18
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -114,6 +114,7 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                 "scheme_name": contracts.POINT_LABELS.get(point, point),
                 "scheme_desc": contracts.POINT_DESC.get(point, ""),
                 "psycho": contracts.POINT_PSYCHO.get(point, ""),
+                "hold_note": contracts.HOLD_DISCIPLINE,
                 "today_window": [win[0], win[1]] if win else None,
                 "matched_line": _matched_line(n_board, b1_open, b2_open, b3_open,
                                               b2_turn, b3_turn, buy_open, win),

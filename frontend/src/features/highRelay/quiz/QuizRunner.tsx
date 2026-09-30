@@ -27,8 +27,9 @@ const POINT_BADGES: Record<string, string> = {
   B1: "bg-amber-500/15 text-amber-500",
   B2: "bg-yellow-500/15 text-yellow-500",
   C1: "bg-emerald-500/15 text-emerald-500",
-  E1: "bg-primary/15 text-primary",
-  E2: "bg-sky-500/15 text-sky-500",
+  A3: "bg-rose-500/15 text-rose-500",
+  B3: "bg-orange-500/15 text-orange-500",
+  C2: "bg-primary/15 text-primary",
 };
 
 const TIER_STYLES: Record<string, string> = {
@@ -632,6 +633,11 @@ function RevealSection({
           <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
             主力怎么想：{ex.psycho}
           </p>
+          {ex.hold_note ? (
+            <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
+              买入后怎么拿：{ex.hold_note}
+            </p>
+          ) : null}
           {ex.case_note ? (
             <p className="mt-1 text-xs leading-5 text-primary">典型样例：{ex.case_note}</p>
           ) : null}

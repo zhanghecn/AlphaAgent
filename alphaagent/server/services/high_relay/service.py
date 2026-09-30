@@ -424,6 +424,8 @@ def get_rules() -> dict[str, object]:
         "point_desc": contracts.POINT_DESC,
         "point_names": {s["no"]: s["name"] for s in contracts.SCHEMES},
         "point_psycho": contracts.POINT_PSYCHO,
+        "point_stats": contracts.POINT_STATS,     # 成绩速览(16笔·胜69%·均+12.0)
+        "point_boards": contracts.POINT_BOARDS,   # 板位归属(打3板/打4板)
         "rules": contracts.RULES,
         "falsified_rules": contracts.FALSIFIED_RULES,
         "risk_notes": contracts.RISK_NOTES,
