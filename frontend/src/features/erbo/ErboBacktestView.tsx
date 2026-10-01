@@ -68,9 +68,9 @@ export function ErboBacktestView({
       </section>
 
       <section className="rounded-lg border px-4 py-3">
-        <div className="mb-2 text-xs font-semibold">分年(持有到断板均值)</div>
+        <div className="mb-2 text-xs font-semibold">分年成绩（均值/中位/好票率/笔数）</div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[560px] text-sm">
+          <table className="w-full min-w-[680px] text-sm">
             <thead className="border-b text-xs text-muted-foreground">
               <tr>
                 <th className="px-3 py-1.5 text-left font-medium">档</th>
@@ -80,41 +80,100 @@ export function ErboBacktestView({
               </tr>
             </thead>
             <tbody className="divide-y">
-              {["A", "B", "all"].map((k) => (
-                <tr key={k}>
-                  <td className="px-3 py-1.5 text-xs">{KEY_LABELS[k]}</td>
-                  {(report.yearly?.[k] ?? []).map((row) => (
-                    <td key={row.year} className={cn("px-3 py-1.5 text-right font-mono text-xs tabular-nums",
-                      (row.bw_pct ?? 0) >= 0 ? "text-rise" : "text-fall")}>
-                      {row.bw_pct != null ? `${row.bw_pct >= 0 ? "+" : ""}${row.bw_pct}` : "--"}
-                      <span className="ml-1 text-[10px] text-muted-foreground">n{row.n}</span>
-                    </td>
-                  ))}
-                </tr>
-              ))}
+              {(["A", "B", "all"] as const).map((k) => {
+                const byYear = new Map(
+                  (report.yearly?.[k] ?? []).map((row) => [row.year, row]),
+                );
+                return (
+                  <tr key={k}>
+                    <td className="px-3 py-1.5 text-xs">{KEY_LABELS[k]}</td>
+                    {["2023", "2024", "2025", "2026"].map((y) => {
+                      const row = byYear.get(y);
+                      if (!row || !row.n) {
+                        return <td key={y} className="px-3 py-1.5 text-right font-mono text-xs text-muted-foreground/40">—</td>;
+                      }
+                      const v = row.bw_pct ?? 0;
+                      return (
+                        <td key={y} className="px-3 py-1.5 text-right">
+                          <span className={cn("font-mono text-xs font-semibold tabular-nums", v >= 0 ? "text-rise" : "text-fall")}>
+                            {v >= 0 ? "+" : ""}{v}
+                          </span>
+                          <span className="ml-1.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+                            中{row.bw_median != null ? signed(row.bw_median) : "--"} · 胜{row.win != null ? Math.round(row.win * 100) : "--"}% · n{row.n}
+                          </span>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </section>
 
       <section className="rounded-lg border px-4 py-3">
-        <div className="mb-2 text-xs font-semibold">月度信号日历</div>
-        <div className="flex flex-wrap gap-1">
-          {(report.monthly?.all ?? []).map((m) => (
-            <span
-              key={m.month}
-              title={`${m.month}: ${m.n}笔 均${m.bw_pct}`}
-              className={cn(
-                "rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums",
-                m.bw_pct >= 0 ? "bg-rise/10 text-rise" : "bg-fall/10 text-fall",
-              )}
-            >
-              {m.month.slice(2)}·{m.n}笔
-            </span>
-          ))}
+        <div className="mb-2 text-xs font-semibold">
+          月度明细（合计口径；格内=笔数·均值，空月=无信号，负月红）
+        </div>
+        <div className="space-y-1.5">
+          {(report.monthly?.all ?? []).length === 0 ? (
+            <div className="py-3 text-center text-xs text-muted-foreground">无月度数据</div>
+          ) : (
+            <YearCalendars monthly={report.monthly?.all ?? []} />
+          )}
         </div>
       </section>
     </div>
+  );
+}
+
+/** 按年分块的 12 格月历:每格 月/n笔/均值,负月红 正月绿 空月灰 */
+function YearCalendars({ monthly }: { monthly: { month: string; n: number; bw_pct: number }[] }) {
+  const byMonth = new Map(monthly.map((m) => [m.month, m]));
+  const years = [...new Set(monthly.map((m) => m.month.slice(0, 4)))].sort();
+  return (
+    <>
+      {years.map((year) => (
+        <div key={year} className="flex items-stretch gap-2">
+          <div className="flex w-10 shrink-0 items-center font-mono text-xs font-semibold text-muted-foreground">
+            {year}
+          </div>
+          <div className="grid flex-1 grid-cols-6 gap-1 sm:grid-cols-12">
+            {Array.from({ length: 12 }, (_, i) => {
+              const key = `${year}-${String(i + 1).padStart(2, "0")}`;
+              const m = byMonth.get(key);
+              if (!m) {
+                return (
+                  <div key={key} className="rounded bg-muted/30 px-1 py-1 text-center">
+                    <div className="text-[10px] text-muted-foreground/50">{i + 1}月</div>
+                    <div className="font-mono text-[10px] text-muted-foreground/30">—</div>
+                  </div>
+                );
+              }
+              const v = m.bw_pct;
+              return (
+                <div
+                  key={key}
+                  title={`${key}：${m.n}笔 均值${signed(v)}`}
+                  className={cn(
+                    "rounded px-1 py-1 text-center",
+                    v >= 0 ? "bg-rise/10" : "bg-fall/10",
+                  )}
+                >
+                  <div className="text-[10px] text-muted-foreground">{i + 1}月</div>
+                  <div className="font-mono text-[10px] leading-tight text-muted-foreground">{m.n}笔</div>
+                  <div className={cn("font-mono text-[11px] font-semibold leading-tight tabular-nums",
+                    v >= 0 ? "text-rise" : "text-fall")}>
+                    {signed(v)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -128,13 +187,18 @@ function StatCard({ label, stats, highlight }: { label: string; stats?: ErboStat
       ) : (
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-xs tabular-nums">
           <span className={cn("text-base font-bold", (stats.bw_pct ?? 0) >= 0 ? "text-rise" : "text-fall")}>
-            {stats.bw_pct != null ? `${stats.bw_pct >= 0 ? "+" : ""}${stats.bw_pct}` : "--"}%
+            {signed(stats.bw_pct ?? 0)}%
           </span>
           <span className="text-muted-foreground">{stats.n}笔</span>
+          <span className="text-muted-foreground">中位{signed(stats.bw_median ?? 0)}</span>
           <span className="text-muted-foreground">胜{stats.win != null ? Math.round(stats.win * 100) : "--"}%</span>
           <span className="text-muted-foreground">炸{stats.seal_fail != null ? Math.round(stats.seal_fail * 100) : "--"}%</span>
         </div>
       )}
     </div>
   );
+}
+
+function signed(v: number): string {
+  return `${v >= 0 ? "+" : ""}${v}`;
 }
