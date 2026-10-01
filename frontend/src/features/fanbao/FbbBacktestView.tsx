@@ -56,6 +56,7 @@ export function FbbBacktestView({
   rebuildError: string | null;
 }) {
   const [monthlyPoint, setMonthlyPoint] = useState<string>("all");
+
   if (!report) {
     return (
       <div className="space-y-3">
@@ -65,6 +66,15 @@ export function FbbBacktestView({
       </div>
     );
   }
+  const yearCols = [...new Set(
+    Object.values(report.yearly ?? {}).flatMap((rows) => (rows ?? []).map((r) => r.year)),
+  )].sort();
+  const yearlyRows: { key: string; label: string }[] = [
+    ...POINTS.map((pk) => ({ key: pk as string, label: POINT_SHORT[pk] })),
+    { key: "all", label: "方案合计(S级出手)" },
+    { key: "miss", label: "未命中对照" },
+  ];
+
   const anchors = report.anchors ?? {};
   const checks = report.anchor_check ?? {};
   const matrixChecks = report.matrix_anchor_check ?? {};
@@ -174,36 +184,59 @@ export function FbbBacktestView({
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">分年</div>
+        <div className="mb-2 text-sm font-semibold">
+          分年（大字=持有到断板均值，小字=笔数·胜率·再连板；悬停看全部指标）
+        </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-sm">
+          <table className="w-full min-w-[720px] text-sm">
             <thead className="border-b text-xs text-muted-foreground">
               <tr>
-                <th className="py-2 text-left font-medium">点 / 年</th>
-                <th className="py-2 text-right font-medium">笔数</th>
-                <th className="py-2 text-right font-medium">封板率</th>
-                <th className="py-2 text-right font-medium">次日平均每笔</th>
-                <th className="py-2 text-right font-medium">胜率</th>
-                <th className="py-2 text-right font-medium">持有到断板</th>
-                <th className="py-2 text-right font-medium">再连板率</th>
+                <th className="py-2 text-left font-medium">点</th>
+                {yearCols.map((y) => (
+                  <th key={y} className="py-2 text-right font-medium">{y}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {SUMMARY_KEYS.flatMap((pk) =>
-                (report.yearly[pk] ?? []).map((y, i) => (
-                  <tr key={`${pk}-${y.year}`} className="border-b last:border-b-0">
-                    <td className="py-1.5 text-xs">
-                      {i === 0 ? POINT_SHORT[pk] : ""} <span className="font-mono tabular-nums">{y.year}</span>
-                    </td>
-                    <StatCells stats={y} />
+              {yearlyRows.map(({ key, label }) => {
+                const byYear = new Map(
+                  (report.yearly[key] ?? []).map((row) => [row.year, row]),
+                );
+                return (
+                  <tr key={key} className="border-b last:border-b-0">
+                    <td className="whitespace-nowrap py-2 pr-3 text-xs">{label}</td>
+                    {yearCols.map((y) => {
+                      const row = byYear.get(y);
+                      if (!row || !row.n) {
+                        return (
+                          <td key={y} className="px-2 py-2 text-right font-mono text-xs text-muted-foreground/40">—</td>
+                        );
+                      }
+                      const v = row.bw_pct ?? 0;
+                      return (
+                        <td
+                          key={y}
+                          className="px-2 py-2 text-right align-top"
+                          title={`${y} ${label}：${row.n}笔 封板${pctText(row.seal)} 次日均${signed(row.avg_pct)}% 胜率${pctText(row.win)} 持有到断板${signed(row.bw_pct)}% 再连板${pctText(row.re_limit)}`}
+                        >
+                          <div className={cn("font-mono text-sm font-semibold tabular-nums", v >= 0 ? "text-rise" : "text-fall")}>
+                            {signed(v)}%
+                          </div>
+                          <div className="font-mono text-[10px] leading-tight tabular-nums text-muted-foreground">
+                            {row.n}笔·胜{pctText(row.win, 0)}·连{pctText(row.re_limit, 0)}
+                          </div>
+                        </td>
+                      );
+                    })}
                   </tr>
-                )),
-              )}
+                );
+              })}
             </tbody>
           </table>
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          提示:S1 四年全正(+5.93/+3.94/+1.96/+5.19);S2 三年正(2023仅5笔);S3 的 2023 只有 2 笔不计,2024~2026 = +13.19/+7.78/+1.41。
+          口径提示:S1/S2 四年全正;S3 的 2023 只有 2 笔不计,2024~2025 出大肉、2026 打平(-0.02);
+          「方案合计」=S级出手(v2.3 起只保留三条出手口诀,不再与「仅S级」重复列)。
         </p>
       </section>
 
@@ -521,28 +554,6 @@ function GroupStatCard({
   );
 }
 
-function StatCells({ stats }: { stats: FbbStats }) {
-  return (
-    <>
-      <td className="py-1.5 text-right font-mono tabular-nums">{stats.n}</td>
-      <td className="py-1.5 text-right font-mono tabular-nums">
-        {stats.seal == null ? "--" : formatPct(stats.seal * 100)}
-      </td>
-      <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(stats.avg_pct))}>
-        {stats.avg_pct == null ? "--" : formatPct(stats.avg_pct)}
-      </td>
-      <td className="py-1.5 text-right font-mono tabular-nums">
-        {stats.win == null ? "--" : formatPct(stats.win * 100)}
-      </td>
-      <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(stats.bw_pct))}>
-        {stats.bw_pct == null ? "--" : formatPct(stats.bw_pct)}
-      </td>
-      <td className="py-1.5 text-right font-mono tabular-nums text-muted-foreground">
-        {stats.re_limit == null ? "--" : formatPct(stats.re_limit * 100)}
-      </td>
-    </>
-  );
-}
 
 function PointCurves({ report }: { report: FbbBacktestReport }) {
   const width = 720;
@@ -592,4 +603,15 @@ function formatGeneratedAt(value: string) {
     minute: "2-digit",
     hourCycle: "h23",
   }).format(d);
+}
+
+function signed(v: number | null | undefined): string {
+  if (v == null) return "--";
+  const t = v.toFixed(2);
+  return `${v >= 0 ? "+" : ""}${t.endsWith(".00") ? t.slice(0, -3) : t}`;
+}
+
+function pctText(v: number | null | undefined, digits = 1): string {
+  if (v == null) return "--";
+  return `${Math.round(v * 100 * 10 ** digits) / 10 ** digits}%`;
 }
