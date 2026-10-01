@@ -288,12 +288,6 @@ export function QuizRunner({
       <section className="rounded-lg border">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-3">
           <span className="text-sm font-semibold">{title}</span>
-          <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary">
-            {d.board_label}
-          </span>
-          <span className="text-xs text-muted-foreground">
-            {question.group4.replace(/(阴|阳)$/, "·$1地基")}
-          </span>
           {!showName ? (
             <span className="ml-auto text-[11px] text-muted-foreground">
               匿名模式（答完揭示票名）
@@ -314,6 +308,34 @@ export function QuizRunner({
             exitPrice={a.exit_price}
             retPct={a.ret_pct}
           />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 border-t px-4 py-2">
+          <span className="rounded-md bg-primary/15 px-3 py-1 text-sm font-bold text-primary">
+            {d.board_label.split(/(\d+)/).map((part, i) =>
+              /\d/.test(part) ? (
+                <span key={i} className="text-lg leading-none">{part}</span>
+              ) : (
+                part
+              ),
+            )}
+          </span>
+          <span
+            className={
+              "rounded-md px-3 py-1 text-sm font-bold " +
+              (question.group4.endsWith("阳")
+                ? "bg-rise/15 text-rise"
+                : "bg-fall/15 text-fall")
+            }
+          >
+            {question.group4.replace(/(阴|阳)$/, " · $1地基").split(/(阴|阳)/).map((part, i) =>
+              part === "阴" || part === "阳" ? (
+                <span key={i} className="text-lg leading-none">{part}</span>
+              ) : (
+                part
+              ),
+            )}
+          </span>
         </div>
 
         <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 lg:grid-cols-8">

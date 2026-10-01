@@ -189,11 +189,14 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
         entry_date = sig["trade_date"]
         entry_price = float(sig["entry_price"])
         limit_price = float(sig["limit_price"])
+        # 已有行基础字段随行带回(裸 upsert 缺 prev_close 列撞非空;与 settle 同修,2026-10-01)
+        sig_base = {k: sig.get(k) for k in
+                    ("name", "group4", "point", "prev_close", "limit_price")}
         sub = bars[(bars["vt_symbol"] == vt)
                    & (bars["trade_date"] >= entry_date)
                    & (bars["trade_date"] <= data_date)] if not bars.empty else pd.DataFrame()
         if sub.empty:
-            repository.upsert_signal(entry_date, vt, status="pending_exit")
+            repository.upsert_signal(entry_date, vt, status="pending_exit", **sig_base)
             holding += 1
             continue
         first = sub.iloc[0]
@@ -205,7 +208,7 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
                 entry_date, vt, status="closed", sealed=False, streak_h=0,
                 exit_date=entry_date, exit_price=exit_price,
                 exit_reason="break_day_close",
-                ret_pct=round((exit_price / entry_price - 1) * 100, 3))
+                ret_pct=round((exit_price / entry_price - 1) * 100, 3), **sig_base)
             closed += 1
             continue
         # 封住了 → 次日起首个未涨停日收盘卖,15 日兜底
@@ -232,11 +235,11 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
             repository.upsert_signal(
                 entry_date, vt, status="closed", sealed=True, streak_h=streak_h,
                 exit_date=exit_day, exit_price=exit_price, exit_reason=reason,
-                ret_pct=round((exit_price / entry_price - 1) * 100, 3))
+                ret_pct=round((exit_price / entry_price - 1) * 100, 3), **sig_base)
             closed += 1
         else:
             streak_h = 1 + int(sum(1 for r in later.itertuples() if bool(r.is_lim)))
             repository.upsert_signal(entry_date, vt, status="holding",
-                                     sealed=True, streak_h=streak_h)
+                                     sealed=True, streak_h=streak_h, **sig_base)
             holding += 1
     return {"closed": closed, "holding": holding, "processed": len(open_signals)}

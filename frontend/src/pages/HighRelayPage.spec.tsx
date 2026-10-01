@@ -40,7 +40,7 @@ const LIVE_PAYLOAD: HprLivePayload = {
   },
   mkt_lim_tm1: 38,
   group4_labels: {
-    二接三阴: "二接三·阴地基",
+    二接三阴: "二接三 · 阴地基",
     二接三阳: "二接三·阳地基",
     三接四阴: "三接四·阴地基",
     三接四阳: "三接四·阳地基",
@@ -443,7 +443,8 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("买入");
     expect(html).toContain("不买");
     // 阴阳组判定依据亮出:地基日格 + 徽标写全「·阴地基」(主人点名:阴阳不像正常逻辑)
-    expect(html).toContain("二接三·阴地基");
+    expect(html).toContain("二接三 ·");
+    expect(html).toContain("地基");
     expect(html).toContain("地基日 11-08");
     expect(html).toContain("阴地基");
     // 板位勾选:默认只勾打3板(本轮1题),打4板 chip 未选中可勾
