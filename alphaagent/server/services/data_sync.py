@@ -657,11 +657,12 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # used to live on DEFAULT_JOBS. See
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
 CURRENT_EOD_SCHEDULE_ID = "eod_1900"
-# 盘后主链包含全市场日线、公告和研究重建，线上一次完整执行可超过两小时。
-# 给它更长的窗口，避免补偿任务启动时把仍在正常推进的主链误杀。
+# 盘后主链(2026-09-30 重排):快段=日线+四池定版约15分钟出次日池,慢段后置;
+# 线上实测全链约40分钟。窗口阈值保留,防恢复逻辑误杀正常推进的主链。
 PRIMARY_EOD_BATCH_THRESHOLD_SECONDS = 5 * 60 * 60
 PRIMARY_EOD_RECOVERY_CUTOFF_HOUR = 21
 LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {
+    "eod_finalize_2130",  # 2026-09-30 删:无条件全跑20job的补偿批(主链失败由数据健康页+手动重跑兜底)
     "eod_18h",
     "tail_quant_1430",
     "limit_up_live_scan",
@@ -737,7 +738,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_sector_fund_flows",
             "sync_stock_hot_ranks",
             "sync_limit_up_pool_snapshots",
-            "refresh_market_timing_panel",
         ],
     },
     {
@@ -747,8 +747,8 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "action": "sync",
         "enabled": True,
         "concurrency": 2,
+        # 板块资金流由看板快照档(每5分钟)负责,这里只留个股资金流+人气榜(2026-09-30 去重)
         "job_ids": [
-            "sync_sector_fund_flows",
             "sync_stock_fund_flows",
             "sync_stock_hot_ranks",
         ],
@@ -760,64 +760,35 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "action": "sync",
         "enabled": True,
         "concurrency": 1,
+        # 2026-09-30 手术(主人:收盘后要快速得到次日结果):
+        # 快段前置 = 列表→全市场日线→涨停日表→四个池定版(只吃这三样,约15分钟出全部次日池),
+        # 慢段后置 = 资金流/复权/板块/分钟/快照/择时等研究增强数据,不挡池;
+        # 财务六件套(公告/龙虎榜/季报/指标/分部/两融)整体删除——仅个股详情画像消费(主人 2026-09-30 拍板),
+        # eod_finalize_2130 无条件全跑的补偿批已删(主链失败由数据健康页+手动重跑兜底)。
         "job_ids": [
+            # ── 快段:次日池(潜龙/N型/打板/反包) ──
             "sync_stock_list",
-            "sync_sector_fund_flows",
-            "sync_stock_fund_flows",
             "sync_stock_daily_bars",
             "rebuild_stock_limit_up_daily",
-            "sync_limit_up_pool_snapshots",
-            LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
+            "qianlong_eod_finalize",
+            "w2s_eod_finalize",
+            "hpr_eod_finalize",
+            "fbb_eod_finalize",
+            # ── 慢段:研究增强数据(不挡池) ──
+            "sync_stock_fund_flows",
+            "sync_sector_fund_flows",
             ADJUSTED_DAILY_SYNC_JOB_ID,
             "sync_index_daily_bars",
+            "sync_mainline_sentiment_history",
+            "sync_sector_list",
+            "sync_sector_daily_bars",
+            "sync_sector_period_scores",
+            "sync_sector_members",
+            "sync_stock_sector_memberships",
+            "sync_limit_up_pool_snapshots",
+            LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
+            "sync_low_suction_security_snapshot",
             "refresh_market_timing_panel",
-            "sync_mainline_sentiment_history",
-            "sync_sector_list",
-            "sync_sector_daily_bars",
-            "sync_sector_period_scores",
-            "sync_sector_members",
-            "sync_stock_sector_memberships",
-            "sync_low_suction_security_snapshot",
-            "sync_stock_lhb_records",
-            "sync_stock_notices",
-            "sync_stock_financial_quarterly",
-            "sync_stock_financial_indicators",
-            "sync_stock_business_segments_history",
-            "sync_margin_balance",
-            "qianlong_eod_finalize",
-            "w2s_eod_finalize",
-            "hpr_eod_finalize",
-            "fbb_eod_finalize",
-        ],
-    },
-    {
-        "id": "eod_finalize_2130",
-        "name": "晚间补偿重试（21:30）",
-        "cron": "30 21 * * 1-5",
-        "action": "sync",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": [
-            "sync_stock_daily_bars",
-            "rebuild_stock_limit_up_daily",
-            "sync_limit_up_pool_snapshots",
-            LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
-            ADJUSTED_DAILY_SYNC_JOB_ID,
-            "sync_index_daily_bars",
-            "sync_mainline_sentiment_history",
-            "sync_sector_fund_flows",
-            "sync_stock_fund_flows",
-            "sync_sector_list",
-            "sync_sector_daily_bars",
-            "sync_sector_period_scores",
-            "sync_sector_members",
-            "sync_stock_sector_memberships",
-            "sync_low_suction_security_snapshot",
-            "sync_margin_balance",
-            "qianlong_eod_finalize",
-            "w2s_eod_finalize",
-            "hpr_eod_finalize",
-            "fbb_eod_finalize",
         ],
     },
     {
@@ -3427,8 +3398,7 @@ def _schedule_batch_params(row: dict[str, Any], action: str, job_ids: list[str])
 
     is_eod_schedule = (
         action == "sync"
-        and str(row.get("id") or "")
-        in {CURRENT_EOD_SCHEDULE_ID, "eod_finalize_2130"}
+        and str(row.get("id") or "") == CURRENT_EOD_SCHEDULE_ID
     )
     if not is_eod_schedule:
         return {}
@@ -5077,7 +5047,7 @@ def _interrupted_schedule_recovery_due(
     """Keep heavy EOD recovery out of the live trading session."""
 
     schedule_id = str(row.get("id") or "")
-    if schedule_id not in {CURRENT_EOD_SCHEDULE_ID, "eod_finalize_2130"}:
+    if schedule_id != CURRENT_EOD_SCHEDULE_ID:
         return True
     if (
         schedule_id == CURRENT_EOD_SCHEDULE_ID

@@ -39,14 +39,10 @@ import {
   Flame,
   Radio,
   ShieldCheck,
-  TrendingUp,
 } from "lucide-react";
 
 const StockKlineChart = lazy(() =>
   import("@/features/stocks/StockKlineChart").then((module) => ({ default: module.StockKlineChart })),
-);
-const StockFinanceChart = lazy(() =>
-  import("@/features/stocks/StockFinanceChart").then((module) => ({ default: module.StockFinanceChart })),
 );
 
 export function StockDetailPage() {
@@ -200,16 +196,6 @@ export function StockDetailPage() {
           <ShenwanHierarchy shenwan={conceptQuery.data?.shenwan} />
         </section>
       </div>
-
-      <section className="rounded-lg border p-3 sm:p-4">
-        <h3 className="mb-3 flex items-center gap-2 text-sm font-medium">
-          <TrendingUp size={14} />
-          历史财报
-        </h3>
-        <Suspense fallback={<ChartLoading heightClassName="h-[420px]" />}>
-          <StockFinanceChart vtSymbol={vtSymbol} />
-        </Suspense>
-      </section>
     </div>
   );
 }

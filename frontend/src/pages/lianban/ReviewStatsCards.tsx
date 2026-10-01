@@ -232,12 +232,6 @@ export function buildStatCards(stats: LianbanStats): StatCardModel[] {
   if (stats.margin_date != null) {
     marginSub.push({ text: formatShortDate(stats.margin_date) });
   }
-  cards.push({
-    key: "margin_balance",
-    title: "融资余额",
-    big: formatWanYiAmount(stats.margin_balance),
-    sub: marginSub,
-  });
 
   return cards;
 }

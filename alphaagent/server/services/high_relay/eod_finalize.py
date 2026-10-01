@@ -150,21 +150,26 @@ def _settle_residual_signals(data_date: date) -> int:
         limit_price = float(sig["limit_price"])
         bar = bmap.get((vt, day))
         status = str(sig["status"])
+        # 已有行的基础字段随行带回(裸 upsert 缺 prev_close/limit_price 列,
+        # INSERT 阶段就撞非空约束——停牌票无当日日线走 bar is None 分支时踩过,2026-09-30)
+        sig_base = {k: sig.get(k) for k in
+                    ("name", "group4", "point", "prev_close", "limit_price")}
         if bar is None:
-            repository.upsert_signal(day, vt, status="no_trigger")
+            repository.upsert_signal(day, vt, status="no_trigger", **sig_base)
             settled += 1
             continue
         # 补录兜底(链式口径): 开盘≥9.5%顶格不命中;触板即买;没触板=no_trigger
         prev_close = float(sig["prev_close"]) if sig.get("prev_close") else None
         open_pct = (float(bar.open_price) / prev_close - 1) * 100 if prev_close else None
         if open_pct is not None and open_pct >= contracts.TODAY_CAP:
-            repository.upsert_signal(day, vt, status="skipped_gap")
+            repository.upsert_signal(day, vt, status="skipped_gap", **sig_base)
         elif float(bar.high_price) < limit_price - 1e-6:
-            repository.upsert_signal(day, vt, status="no_trigger")
+            repository.upsert_signal(day, vt, status="no_trigger", **sig_base)
         else:
             repository.upsert_signal(day, vt, status="entered",
                                      entry_price=limit_price,
-                                     auction_pct=round(open_pct, 2) if open_pct is not None else None)
+                                     auction_pct=round(open_pct, 2) if open_pct is not None else None,
+                                     **sig_base)
         settled += 1
     return settled
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, RefreshCw } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 import {
   fetchHprRules,
@@ -11,6 +11,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
 import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
 import { cn, formatPct, formatPrice } from "@/lib/utils";
+
+import { SyncStatusBar } from "@/components/SyncStatusBar";
 
 const SESSION_LABELS: Record<string, string> = {
   preopen: "盘前",
@@ -110,14 +112,6 @@ export function HprLiveView({
           <span className="text-rise">已买入 {byStatus.entered ?? 0}</span>
           <span className="text-rise">持有 {byStatus.holding ?? 0}</span>
           <span>已了结 {byStatus.closed ?? 0}</span>
-          {payload.last_scan ? (
-            <span className="flex items-center gap-1 tabular-nums">
-              <RefreshCw size={12} />
-              {formatScanTime(payload.last_scan.finished_at)}
-            </span>
-          ) : (
-            <span>等待盘中扫描(09:30 起每分钟)</span>
-          )}
           <span className="ml-auto flex items-center gap-2">
             <select
               className="h-8 rounded-md border bg-background px-2 text-xs"
@@ -141,6 +135,14 @@ export function HprLiveView({
               : null}
           </span>
         </div>
+
+        <SyncStatusBar
+          scan={payload.last_scan}
+          tradeDate={payload.trade_date}
+          stale={payload.stale}
+          eodJobId="hpr_eod_finalize"
+          rebuildAt="23:05"
+        />
 
         <div className="border-b px-4 py-2">
           <button
@@ -334,18 +336,4 @@ function formatTimeHM(value: string | null) {
     minute: "2-digit",
     hourCycle: "h23",
   }).format(d);
-}
-
-function formatScanTime(value: string | null) {
-  if (!value) return "未扫描";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "未扫描";
-  const time = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Shanghai",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).format(d);
-  return `${time} 扫描`;
 }

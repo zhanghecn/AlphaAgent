@@ -52,12 +52,16 @@ def _finalize_signals(data_date: date) -> dict[str, int]:
     with session_scope() as session:
         rows = session.execute(
             select(schema.qianlong_signals.c.trade_date, schema.qianlong_signals.c.vt_symbol,
-                   schema.qianlong_signals.c.status)
+                   schema.qianlong_signals.c.status, schema.qianlong_signals.c.name,
+                   schema.qianlong_signals.c.prev_close, schema.qianlong_signals.c.trigger_price)
             .where(schema.qianlong_signals.c.trade_date <= data_date)
             .where(schema.qianlong_signals.c.status.in_(["watching", "touched"]))
         ).mappings().all()
     for row in rows:
-        repository.upsert_signal(row["trade_date"], row["vt_symbol"], status="no_trigger")
+        # 基础字段随行带回:裸 upsert 的 INSERT 行缺 prev_close 列会撞非空(2026-09-30 踩过)
+        repository.upsert_signal(row["trade_date"], row["vt_symbol"], status="no_trigger",
+                                 name=row["name"], prev_close=row["prev_close"],
+                                 trigger_price=row["trigger_price"])
         no_trigger += 1
 
     # 2) 未了结信号逐日重放

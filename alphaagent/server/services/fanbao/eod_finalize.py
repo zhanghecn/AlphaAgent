@@ -120,6 +120,9 @@ def _load_bars(vts: list[str], start: date, end: date) -> pd.DataFrame:
         engine, parse_dates=["trade_date"])
     if bars.empty:
         return bars
+    # 归一成 date 对象:pandas 2.x 的 datetime64[s] 与 date 直接比较会抛
+    # Invalid comparison(2026-09-30 踩过),统一 .dt.date 后与 date 入参可比
+    bars["trade_date"] = pd.to_datetime(bars["trade_date"]).dt.date
     bars.sort_values(["vt_symbol", "trade_date"], inplace=True, ignore_index=True)
     g = bars.groupby("vt_symbol", sort=False)
     bars["prev_close"] = g["close_price"].shift(1)
@@ -154,8 +157,11 @@ def _settle_residual_signals(data_date: date) -> int:
         limit_price = float(sig["limit_price"])
         bar = bmap.get((vt, day))
         status = str(sig["status"])
+        # 已有行的基础字段随行带回(裸 upsert 缺 prev_close/limit_price 列撞非空,停牌票踩过;2026-09-30 hpr 同款已修)
+        sig_base = {k: sig.get(k) for k in
+                    ("name", "group6", "point", "prev_close", "limit_price")}
         if bar is None:
-            repository.upsert_signal(day, vt, status="no_trigger")
+            repository.upsert_signal(day, vt, status="no_trigger", **sig_base)
             settled += 1
             continue
         if status == "sealed_watch":
@@ -164,26 +170,26 @@ def _settle_residual_signals(data_date: date) -> int:
                         and abs(float(bar.open_price) - float(bar.high_price)) <= 1e-6
                         and abs(float(bar.open_price) - float(bar.low_price)) <= 1e-6)
             if one_word and bool(bar.is_lim):
-                repository.upsert_signal(day, vt, status="skipped_gap")
+                repository.upsert_signal(day, vt, status="skipped_gap", **sig_base)
             elif float(bar.low_price) < limit_price - 1e-6:
                 repository.upsert_signal(day, vt, status="entered",
-                                         entry_price=limit_price, opened=True)
+                                         entry_price=limit_price, opened=True, **sig_base)
             else:
-                repository.upsert_signal(day, vt, status="skipped_gap")
+                repository.upsert_signal(day, vt, status="skipped_gap", **sig_base)
             settled += 1
             continue
         # watching(无首刻窗:日线 high≥涨停价即触板充分证据)
         if float(bar.high_price) < limit_price - 1e-6:
-            repository.upsert_signal(day, vt, status="no_trigger")
+            repository.upsert_signal(day, vt, status="no_trigger", **sig_base)
         else:
             one_word = (abs(float(bar.open_price) - float(bar.close_price)) <= 1e-6
                         and abs(float(bar.open_price) - float(bar.high_price)) <= 1e-6
                         and abs(float(bar.open_price) - float(bar.low_price)) <= 1e-6)
             if one_word and bool(bar.is_lim):
-                repository.upsert_signal(day, vt, status="skipped_gap")
+                repository.upsert_signal(day, vt, status="skipped_gap", **sig_base)
             else:
                 repository.upsert_signal(day, vt, status="entered",
-                                         entry_price=limit_price)
+                                         entry_price=limit_price, **sig_base)
         settled += 1
     return settled
 
@@ -203,11 +209,14 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
         entry_date = sig["trade_date"]
         entry_price = float(sig["entry_price"])
         limit_price = float(sig["limit_price"])
+        # 已有行基础字段随行带回(裸 upsert 缺 prev_close 列撞非空;2026-09-30 踩过)
+        sig_base = {k: sig.get(k) for k in
+                    ("name", "group6", "point", "level", "prev_close", "limit_price")}
         sub = bars[(bars["vt_symbol"] == vt)
                    & (bars["trade_date"] >= entry_date)
                    & (bars["trade_date"] <= data_date)] if not bars.empty else pd.DataFrame()
         if sub.empty:
-            repository.upsert_signal(entry_date, vt, status="pending_exit")
+            repository.upsert_signal(entry_date, vt, status="pending_exit", **sig_base)
             holding += 1
             continue
         first = sub.iloc[0]
@@ -269,11 +278,11 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
                 entry_date, vt, status="closed", sealed=True, streak_h=streak_h,
                 exit_date=exit_day, exit_price=exit_price, exit_reason=reason,
                 bad_ticket=bad_ticket,
-                ret_pct=round((exit_price / entry_price - 1) * 100, 3))
+                ret_pct=round((exit_price / entry_price - 1) * 100, 3), **sig_base)
             closed += 1
         else:
             streak_h = 1 + int(sum(1 for r in later.itertuples() if bool(r.is_lim)))
             repository.upsert_signal(entry_date, vt, status="holding",
-                                     sealed=True, streak_h=streak_h)
+                                     sealed=True, streak_h=streak_h, **sig_base)
             holding += 1
     return {"closed": closed, "holding": holding, "processed": len(open_signals)}

@@ -27,14 +27,21 @@ class BacktestAlreadyRunningError(RuntimeError):
 # ── 实时推荐 ──
 
 def get_live(trade_date: date | None = None) -> dict[str, object]:
-    """今日池 × 触发状态;指定日期可回看。盘前/盘后均可读(盘后为定版)。"""
+    """今日池 × 触发状态;指定日期可回看。盘前/盘后均可读(盘后为定版)。
+
+    收盘后(stage=closed)若盘后主链已算出更新的池(次日盘前池),自动切备战视图
+    (主人 2026-09-30 拍板:收盘就能看到下一天的结果);盘中不切,操作今日池。"""
     now = datetime.now(SHANGHAI)
     target = trade_date or now.date()
     pool = repository.load_pool(target)
     stale = False
-    if not pool and trade_date is None:
+    stage = _session_stage(now)
+    if trade_date is None:
         latest = repository.latest_pool_date()
-        if latest is not None:
+        if latest is not None and latest > target and stage == "closed":
+            pool = repository.load_pool(latest)
+            target = latest
+        elif not pool and latest is not None:
             pool = repository.load_pool(latest)
             target = latest
             stale = True
@@ -76,7 +83,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
         "status": "ok",
         "trade_date": target.isoformat(),
         "stale": stale,
-        "session_stage": _session_stage(now),
+        "session_stage": stage,
         "rules_version": contracts.FANBAO_RULES_VERSION,
         "counts": {
             "pool": len(pool),

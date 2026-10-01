@@ -180,7 +180,7 @@ describe("highLowLabel", () => {
 });
 
 describe("buildStatCards", () => {
-  it("builds 12 cards from a full payload with correct formats and tones", () => {
+  it("builds 11 cards from a full payload with correct formats and tones", () => {
     const cards = buildStatCards(makeStats({
       limit_up: 59,
       limit_up_prev: 92,
@@ -209,7 +209,7 @@ describe("buildStatCards", () => {
       margin_date: "2026-08-12",
     }));
 
-    expect(cards).toHaveLength(12);
+    expect(cards).toHaveLength(11);
     const byKey = Object.fromEntries(cards.map((card) => [card.key, card]));
 
     expect(byKey.limit_up).toMatchObject({
@@ -260,15 +260,11 @@ describe("buildStatCards", () => {
       sub: [{ text: "新高占优" }],
     });
     expect(byKey.total_amount).toMatchObject({ big: "2.55万亿", sub: [] });
-    expect(byKey.margin_balance).toMatchObject({
-      big: "2.65万亿",
-      sub: [{ text: "较前日 +95亿", tone: "rise" }, { text: "08-12" }],
-    });
   });
 
   it("degrades to placeholders and drops 昨对比 when stats are null", () => {
     const cards = buildStatCards(makeStats());
-    expect(cards).toHaveLength(12);
+    expect(cards).toHaveLength(11);
     for (const card of cards) {
       expect(card.big).toBe("--");
       expect(card.sub).toEqual([]);
@@ -282,17 +278,6 @@ describe("buildStatCards", () => {
     expect(limitUp?.sub).toEqual([]);
   });
 
-  it("keeps the margin date when the change is missing, and vice versa", () => {
-    const withDateOnly = buildStatCards(
-      makeStats({ margin_balance: 2.65e12, margin_date: "2026-08-12" }),
-    ).find((card) => card.key === "margin_balance");
-    expect(withDateOnly?.sub).toEqual([{ text: "08-12" }]);
-
-    const withChangeOnly = buildStatCards(
-      makeStats({ margin_balance: 2.65e12, margin_change: -2.3e9 }),
-    ).find((card) => card.key === "margin_balance");
-    expect(withChangeOnly?.sub).toEqual([{ text: "较前日 -23亿", tone: "fall" }]);
-  });
 
   it("shows partial prev-limit-up lines when only some fields exist", () => {
     const card = buildStatCards(makeStats({ prev_lu_rise_ratio: 0.44 })).find(
