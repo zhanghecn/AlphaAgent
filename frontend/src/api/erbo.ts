@@ -1,7 +1,7 @@
 import { apiClient } from "./client";
 
 // ── 二波反包打板(erbo)产品线 API 契约 ──
-// 口径 = erbo-v1.0(妖股波段二波反包研究定稿 2026-10-01)。
+// 口径 = erbo-v1.2(口诀化:无行情过滤——庄家敢拉已考虑行情,规则越简单越好)。
 // 事件 = 30日波段50~80%×深洗8~15%×MA20上方5%×30日涨停≥2×昨阴×断板3~7天
 // → 今日盘中触涨停价按涨停价买;出手档=末日开盘 A平开-2~2/B深低开≤-4;
 // 死格(末开-4~-2浅低开/末开>+2高开)只留雷达;卖出=T+1(同断板反包)。
@@ -26,7 +26,6 @@ export interface ErboLiveEntry {
   level: string;
   actionable: boolean;
   avoid_static: string | null;
-  cold_market: boolean | null;
   prev_close: number | null;
   limit_price: number | null;
   status: ErboStatus;

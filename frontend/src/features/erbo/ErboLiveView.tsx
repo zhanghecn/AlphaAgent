@@ -84,7 +84,7 @@ export function ErboLiveView({
 
       <section className="rounded-lg border">
         <div className="border-b px-4 py-2 text-xs text-muted-foreground">
-          出手名单（✅ 触板即买,按涨停价;⚠情绪冰点=昨日全市场涨停&lt;40家,纯信息:冰点炸板亏更狠、封住照样赚）
+          出手名单（✅ 触板即买,按涨停价——不看大盘不看情绪,庄家敢拉已考虑行情）
         </div>
         <EntryTable entries={actionable} emptyText="今日无出手票(妖股二波结构空窗)" highlight />
       </section>
@@ -97,10 +97,8 @@ export function ErboLiveView({
       </section>
 
       <p className="text-[11px] leading-5 text-muted-foreground">
-        二波反包=妖股波段(30日+50~80%)深洗后(-8~-15%,不破MA20)再触板。昨天必须收阴;
-        末日开盘 A 平开(-2~+2)/B 深低开(≤-4)才出手,浅低开(-4~-2)和高开(&gt;+2)是死格。
-        买入当天炸板→第二天收盘卖(T+1);封住→断板日收盘卖,最多15天。
-        鱼尾二波赚的是一两天延续,不是大肉——见好就收。
+        口诀:妖股洗透二波——涨过五成 · 洗一到一成半 · 站在20日线上 · 断板三五七天昨天阴 · 今天再板就打。
+        昨天平开(A)或深低开(B)才打,浅低开和高开不打;炸板第二天收盘走,封住拿到不再涨停那天。
       </p>
     </div>
   );
@@ -158,7 +156,6 @@ function EntryTable({
                   {badge ? (
                     <span title={badge.full} className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", badge.className)}>
                       {badge.label}
-                      {e.cold_market ? " ⚠冰点" : ""}
                     </span>
                   ) : (
                     <span className="text-[10px] text-muted-foreground" title={e.avoid_static ?? undefined}>

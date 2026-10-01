@@ -98,7 +98,6 @@ def _live_row(entry: dict[str, object] | None,
             "point": entry.get("point"), "level": entry.get("level"),
             "actionable": bool(entry.get("actionable")),
             "avoid_static": entry.get("avoid_static"),
-            "cold_market": bool(entry.get("cold_market")),
             "prev_close": entry.get("prev_close"),
             "limit_price": entry.get("limit_price"),
         })

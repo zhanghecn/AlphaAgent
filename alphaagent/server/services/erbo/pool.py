@@ -121,8 +121,6 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "level": contracts.POINT_LEVELS.get(point, "—"),
             "actionable": actionable,
             "avoid_static": dead,
-            "cold_market": contracts.is_cold_market(
-                float(mkt_lim_tm1) if mkt_lim_tm1 is not None else None),
             "prev_close": round(float(r["pc"]), 2),
             "limit_price": round(float(r["limit_price"]), 2),
         })
