@@ -84,7 +84,7 @@ export function ErboLiveView({
 
       <section className="rounded-lg border">
         <div className="border-b px-4 py-2 text-xs text-muted-foreground">
-          出手名单（✅ 触板即买,按涨停价;⚠情绪冰点=昨日全市场涨停&lt;40家减半仓）
+          出手名单（✅ 触板即买,按涨停价;⚠情绪冰点=昨日全市场涨停&lt;40家,纯信息:冰点炸板亏更狠、封住照样赚）
         </div>
         <EntryTable entries={actionable} emptyText="今日无出手票(妖股二波结构空窗)" highlight />
       </section>
