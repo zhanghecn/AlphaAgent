@@ -2392,6 +2392,113 @@ Index(
 )
 
 
+# ── 二波反包打板(erbo: 妖股波段深洗后再触板) ──
+# 口径 = services/erbo/contracts.py (erbo-v1.0)。
+# 池 = 30日波段50~80%×深洗8~15%×MA20上方5%×30日涨停≥2×昨阴×断板3~7天 的潜伏名单;
+# 出手档 = 末日开盘 A平开-2~2 / B深低开≤-4;死格(浅低开-4~-2/高开>+2)只留雷达;
+# 买 = 盘中触涨停价(T字可买,一字剔除);卖 = T+1(同 fbb-v2.2)。
+
+erbo_pool_entries = Table(
+    "erbo_pool_entries",
+    metadata,
+    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=False, server_default=""),
+    Column("gap", Integer, nullable=False),
+    Column("gain30_pct", Float, nullable=True),
+    Column("dd_pct", Float, nullable=True),
+    Column("ma20gap_pct", Float, nullable=True),
+    Column("lim30", Integer, nullable=True),
+    Column("yin_yang", String(2), nullable=True),
+    Column("last_open_pct", Float, nullable=True),
+    Column("point", String(4), nullable=False, server_default="—"),  # A/B/—
+    Column("level", String(2), nullable=False, server_default="—"),
+    Column("actionable", Boolean, nullable=False, server_default="false"),
+    Column("avoid_static", Text, nullable=True),
+    Column("cold_market", Boolean, nullable=False, server_default="false"),
+    Column("prev_close", Float, nullable=True),
+    Column("limit_price", Float, nullable=False),
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_erbo_pool_entries_date", erbo_pool_entries.c.trade_date)
+
+erbo_signals = Table(
+    "erbo_signals",
+    metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("name", String(80), nullable=True),
+    Column("gap", Integer, nullable=True),
+    Column("point", String(4), nullable=True),
+    Column("level", String(2), nullable=True),
+    Column("prev_close", Float, nullable=True),
+    Column("limit_price", Float, nullable=False),
+    Column("status", String(24), nullable=False, server_default="watching"),
+    Column("auction_pct", Float, nullable=True),
+    Column("opened", Boolean, nullable=True),
+    Column("touched_at", DateTime(timezone=True), nullable=True),
+    Column("entry_price", Float, nullable=True),
+    Column("entry_time", DateTime(timezone=True), nullable=True),
+    Column("last_price", Float, nullable=True),
+    Column("change_pct", Float, nullable=True),
+    Column("sealed", Boolean, nullable=True),
+    Column("streak_h", Integer, nullable=True),
+    Column("exit_date", Date, nullable=True),
+    Column("exit_price", Float, nullable=True),
+    Column("exit_reason", String(24), nullable=True),
+    Column("ret_pct", Float, nullable=True),
+    Column("bad_ticket", Boolean, nullable=True),
+    Column("rules_version", String(80), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_erbo_signals_status", erbo_signals.c.status)
+Index("ix_erbo_signals_date", erbo_signals.c.trade_date)
+
+erbo_live_scan_runs = Table(
+    "erbo_live_scan_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_date", Date, nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("status", String(24), nullable=False),
+    Column("stats", JSONB, nullable=False, server_default="{}"),
+    Column("message", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_erbo_live_scan_runs_date", erbo_live_scan_runs.c.trade_date)
+
+erbo_backtest_runs = Table(
+    "erbo_backtest_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("rules_version", String(80), nullable=False),
+    Column("payload", JSONB, nullable=False),
+    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+
+erbo_backtest_rebuild_runs = Table(
+    "erbo_backtest_rebuild_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source", String(24), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("stage", String(48), nullable=False),
+    Column("rules_version", String(80), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("message", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_erbo_backtest_rebuild_requested", erbo_backtest_rebuild_runs.c.requested_at)
+
+
 market_timing_panel = Table(
     "market_timing_panel",
     metadata,

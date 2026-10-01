@@ -17,6 +17,7 @@ from alphaagent.server.api.qianlong import router as qianlong_router
 from alphaagent.server.api.weak_to_strong import router as weak_to_strong_router
 from alphaagent.server.api.high_relay import router as high_relay_router
 from alphaagent.server.api.fanbao import router as fanbao_router
+from alphaagent.server.api.erbo import router as erbo_router
 from alphaagent.server.api.market import router as market_router
 from alphaagent.server.api.market_timing import router as market_timing_router
 from alphaagent.server.api.research_graphs import router as research_graphs_router
@@ -46,6 +47,7 @@ api_router.include_router(qianlong_router)
 api_router.include_router(weak_to_strong_router)
 api_router.include_router(high_relay_router)
 api_router.include_router(fanbao_router)
+api_router.include_router(erbo_router)
 api_router.include_router(stocks_router)
 api_router.include_router(indices_router)
 api_router.include_router(sectors_router)

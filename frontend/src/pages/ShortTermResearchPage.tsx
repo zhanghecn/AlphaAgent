@@ -1,20 +1,22 @@
-import { FlaskConical, Rocket, Swords, Undo2, Zap } from "lucide-react";
+import { FlaskConical, Rocket, Swords, TrendingUp, Undo2, Zap } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
+import { ErboPage } from "@/pages/ErboPage";
 import { FanbaoPage } from "@/pages/FanbaoPage";
 import { HighRelayPage } from "@/pages/HighRelayPage";
 import { LowSuctionPage } from "@/pages/LowSuctionPage";
 import { QianlongPage } from "@/pages/QianlongPage";
 import { WeakToStrongPage } from "@/pages/WeakToStrongPage";
 
-type ResearchTab = "first-board" | "low-suction" | "weak-to-strong" | "high-relay" | "fanbao";
+type ResearchTab = "first-board" | "low-suction" | "weak-to-strong" | "high-relay" | "fanbao" | "erbo";
 
 const RESEARCH_TABS = [
   { value: "first-board", label: "潜龙首板", icon: Rocket },
   { value: "weak-to-strong", label: "N型补涨打板", icon: Zap },
   { value: "high-relay", label: "高位接力", icon: Swords },
   { value: "fanbao", label: "断板反包", icon: Undo2 },
+  { value: "erbo", label: "二波反包", icon: TrendingUp },
   { value: "low-suction", label: "低吸", icon: FlaskConical },
 ] as const;
 
@@ -31,7 +33,9 @@ export function ShortTermResearchPage() {
           ? "high-relay"
           : raw === "fanbao"
             ? "fanbao"
-            : "first-board";
+            : raw === "erbo"
+              ? "erbo"
+              : "first-board";
 
   const selectTab = (tab: ResearchTab) => {
     const next = new URLSearchParams(searchParams);
@@ -49,6 +53,8 @@ export function ShortTermResearchPage() {
       <HighRelayPage />
     ) : activeTab === "fanbao" ? (
       <FanbaoPage />
+    ) : activeTab === "erbo" ? (
+      <ErboPage />
     ) : (
       <LowSuctionPage />
     );

@@ -63,6 +63,7 @@ def run_forever(*, stop_event: Event | None = None) -> None:
     _start_w2s_report_reconcile()
     _start_hpr_report_reconcile()
     _start_fbb_report_reconcile()
+    _start_erbo_report_reconcile()
     health_server: ThreadingHTTPServer | None = None
     try:
         health_server = start_worker_health_server()
@@ -149,6 +150,25 @@ def _start_hpr_report_reconcile() -> None:
             LOGGER.exception("hpr backtest report reconcile failed")
 
     Thread(target=_run, name="hpr-report-reconcile", daemon=True).start()
+
+
+def _start_erbo_report_reconcile() -> None:
+    """erbo 回测报告缺失/版本漂移时自动调度重建(启动自检,同 fbb)。"""
+
+    def _run() -> None:
+        try:
+            from alphaagent.server.services.erbo import contracts, repository, service
+
+            latest = repository.latest_rebuild_run()
+            report = repository.load_backtest_report(contracts.ERBO_RULES_VERSION)
+            if report is None and not (latest or {}).get("status") in ("queued", "running"):
+                LOGGER.info("erbo backtest report missing for %s, scheduling rebuild",
+                            contracts.ERBO_RULES_VERSION)
+                service.run_backtest_sync(source="startup")
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("erbo backtest report reconcile failed")
+
+    Thread(target=_run, name="erbo-report-reconcile", daemon=True).start()
 
 
 def _start_fbb_report_reconcile() -> None:
