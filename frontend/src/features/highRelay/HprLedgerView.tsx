@@ -68,7 +68,7 @@ export function HprLedgerView({
     <section aria-label="高位接力历史交割单" className="rounded-lg border">
       <div className="border-b px-4 py-2 text-xs text-muted-foreground">
         回测模拟口径(非实盘):链式方案命中(正常开盘,顶格≥9.5不计)触板买涨停价,炸板次日走(T+1)/封住→断板日卖(15日兜底,E3口径)
-        ;收益列=E3,对照列E0=持有到断板;全部命中信号逐笔,不限仓位。实时前推成交随产品上线逐日沉淀。
+        ;收益列=E3,对照列E0=持有到断板;全部命中信号逐笔,不限仓位。同票持仓未退时的新信号标「持仓中」——真实买不进(T+1+一票一份),显示但不进收益汇总。实时前推成交随产品上线逐日沉淀。
       </div>
 
       <PointSummaryBar summaries={pointSummaries} />
@@ -154,7 +154,7 @@ export function HprLedgerView({
 function LedgerRow({ day, trade }: { day: string; trade: HprLedgerTrade }) {
   const badge = POINT_BADGES[trade.point] ?? null;
   return (
-    <tr>
+    <tr className={trade.overlap ? "opacity-50" : undefined}>
       <td className="px-3 py-2 font-mono tabular-nums text-xs text-muted-foreground">{day}</td>
       <td className="px-3 py-2">
         <StockIdentityLink name={trade.name ?? trade.vt_symbol} vtSymbol={trade.vt_symbol} />
@@ -164,6 +164,11 @@ function LedgerRow({ day, trade }: { day: string; trade: HprLedgerTrade }) {
           <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", badge.className)}>
             {badge.label}
             {trade.level === "A" ? "·出" : "·轻"}
+          </span>
+        ) : null}
+        {trade.overlap ? (
+          <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground" title="前一笔尚未退出(T+1+一票一份),真实买不进">
+            持仓中
           </span>
         ) : null}
       </td>
@@ -219,6 +224,7 @@ function summarizeByPoint(days: HprLedgerDay[]) {
   for (const day of days) {
     for (const t of day.trades) {
       if (t.ret_pct == null) continue;
+      if (t.overlap) continue; // 同票持仓中未成交,不进收益汇总
       const key = t.point || "—";
       const v = acc.get(key) ?? { count: 0, win: 0, sum: 0 };
       v.count += 1;

@@ -330,25 +330,29 @@ def get_ledger(month: str | None = None) -> dict[str, object]:
 
 
 def _month_summaries(days: list[dict[str, object]]) -> list[dict[str, object]]:
-    """按月汇总交割单(笔数/胜率/平均每笔/累计等权),最新在前。"""
+    """按月汇总交割单(笔数/胜率/平均每笔/累计等权),最新在前。
+    收益汇总=可执行口径(v6.1):同票持仓重叠笔(未加仓)不计入,笔数含全部展示行。"""
     acc: dict[str, dict[str, float]] = {}
     for day in days:
         key = str(day.get("trade_date") or "")[:7]
         if not key:
             continue
-        bucket = acc.setdefault(key, {"count": 0, "win": 0, "sum_ret": 0.0})
+        bucket = acc.setdefault(key, {"count": 0, "win": 0, "sum_ret": 0.0, "exe": 0})
         for t in day.get("trades") or []:
             ret = t.get("ret_pct")
             if ret is None:
                 continue
             bucket["count"] += 1
+            if t.get("overlap"):
+                continue  # 同票持仓中未成交,不进收益汇总
+            bucket["exe"] += 1
             bucket["sum_ret"] += float(ret)
             if float(ret) > 0:
                 bucket["win"] += 1
     return [
         {"month": m, "count": int(v["count"]),
-         "win_rate": round(v["win"] / v["count"] * 100, 1) if v["count"] else None,
-         "avg_ret_pct": round(v["sum_ret"] / v["count"], 2) if v["count"] else None,
+         "win_rate": round(v["win"] / v["exe"] * 100, 1) if v["exe"] else None,
+         "avg_ret_pct": round(v["sum_ret"] / v["exe"], 2) if v["exe"] else None,
          "total_ret_pct": round(v["sum_ret"], 2)}
         for m, v in sorted(acc.items(), reverse=True)
     ]

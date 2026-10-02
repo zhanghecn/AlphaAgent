@@ -13,6 +13,9 @@
   链式方案无首刻过滤(研究口径=触板即买),触板时刻表不再参与判定
 统计口径: avg_pct=次日收%均值;win=次日收%≥0占比(=研究好票率);bw_pct=持有到断板均值;
 bw_median=中位;e3_pct/e3_win=产品卖出纪律口径;锚点数字=研究定稿。
+双口径(v6.1):点成绩/锚点/分年=全信号研究口径(信号质量与资金占用无关);
+净值曲线/交割单收益汇总/execution=可执行口径——同票 E3 持仓未退时的新信号不成交
+(轻仓一票一份+T+1,真实买不进,标「同票持仓重叠」;前笔平仓后的新信号照常打)。
 """
 
 from __future__ import annotations
@@ -40,8 +43,11 @@ def run_backtest() -> dict[str, object]:
 
 
 def assemble_report(E: pd.DataFrame) -> dict[str, object]:
-    """由事件表组装物化报告(service  rebuild 时与题库构建共用同一次回放)。"""
+    """由事件表组装物化报告(service  rebuild 时与题库构建共用同一次回放)。
+
+    只在此处挂「同票持仓重叠」标记(题库构建用原始 E 表,不受影响)。"""
     done = E[~E["未完"]].copy()
+    _mark_overlap(done)
 
     keys = list(contracts.POINT_KEYS) + ["all", "miss"]
 
@@ -68,7 +74,9 @@ def assemble_report(E: pd.DataFrame) -> dict[str, object]:
         "caliber": ("日线口径:昨日恰好2/3连板,当日最高价触涨停价(=昨收×1.10)按涨停价买,"
                     "一字全天不开排除(T字可买);E0=持有到首次断板日收盘(15日兜底,锚点口径),"
                     "E3=炸板当日走/封住→E0,退出价=(退出日高+低)/2中间价;胜率=次日收盘收益≥0;"
-                    "无滑点,日线未复权。池=昨日2/3连板全量(雷达),出手=链式七方案命中(正常开盘口径)。"),
+                    "无滑点,日线未复权。池=昨日2/3连板全量(雷达),出手=链式七方案命中(正常开盘口径)。"
+                    "双口径(v6.1):点成绩/锚点=全信号研究口径;净值曲线/交割单收益汇总=可执行口径"
+                    "(同票持仓未退时的新信号不成交,交割单保留行并标注)。"),
         "group4_labels": contracts.GROUP4_LABELS,
         "point_labels": contracts.POINT_LABELS,
         "point_levels": contracts.POINT_LEVELS,
@@ -261,6 +269,25 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 # ── 统计与物化 ──
 
+def _mark_overlap(done: pd.DataFrame) -> None:
+    """同票持仓重叠标记(可执行口径,v6.1):命中票按买入日顺序模拟「轻仓一票一份」——
+    前一笔(同票,E3 口径)未退出时出现的新信号真实买不进(T+1 当天卖不了+仓位占用),
+    标记不成交;未成交笔不占用仓位(占用以最近一笔已成交的退出日为准)。
+    典型形态=二接三命中封住持有中,次日三接四延续信号(哈药 07-15 类)。
+    研究口径统计(点成绩/锚点/分年)不读此列,零漂移。"""
+    done["同票持仓重叠"] = False
+    last_exit: dict[str, pd.Timestamp] = {}
+    hit = done[done["方案点"] != "—"]
+    for idx, r in hit.sort_values(["代码", "买入日"]).iterrows():
+        code = str(r["代码"])
+        exit_day = r["E3退出日"]
+        le = last_exit.get(code)
+        if le is not None and le >= pd.Timestamp(r["买入日"]):
+            done.at[idx, "同票持仓重叠"] = True  # 持仓中,未加仓
+        elif exit_day is not None and exit_day == exit_day:
+            last_exit[code] = pd.Timestamp(str(exit_day))
+
+
 def _stats(e: pd.DataFrame) -> dict[str, object]:
     if not len(e):
         return {"n": 0}
@@ -293,7 +320,9 @@ def _monthly(e: pd.DataFrame) -> list[dict[str, object]]:
 
 
 def _curve(e: pd.DataFrame) -> list[dict[str, object]]:
-    """逐笔等权累计收益曲线(每笔固定 1 单位,按入场日汇总后累加,不复利)。"""
+    """逐笔等权累计收益曲线(每笔固定 1 单位,按入场日汇总后累加,不复利)。
+    可执行口径(v6.1):同票持仓重叠笔不成交,不进曲线。"""
+    e = e[~e["同票持仓重叠"].astype(bool)]
     if not len(e):
         return []
     daily = e.dropna(subset=["持有到断板%"]).groupby(
@@ -318,10 +347,12 @@ def _yearly_totals(e: pd.DataFrame) -> list[dict[str, object]]:
 
 
 def _execution_caliber(done: pd.DataFrame) -> dict[str, object]:
-    """执行口径:E0(持有到断板) vs E3(炸板当日走/封住→E0)对比(链式方案无首刻过滤)。"""
+    """执行口径:E0(持有到断板) vs E3(炸板当日走/封住→E0)对比(链式方案无首刻过滤);
+    v6.1 增可执行口径对照(同票持仓重叠笔不成交)。"""
     hit = done[done["方案点"] != "—"].copy()
     if not len(hit):
         return {"caliber": "无命中样本", "subsets": []}
+    exe = hit[~hit["同票持仓重叠"].astype(bool)]
 
     def row(name: str, s: pd.DataFrame) -> dict[str, object]:
         e0 = s["持有到断板%"].dropna()
@@ -338,10 +369,14 @@ def _execution_caliber(done: pd.DataFrame) -> dict[str, object]:
                 "yearly": yearly}
 
     return {
-        "caliber": "E0=持有到断板(研究锚点口径,收盘);E3=炸板当日走/封住→E0,退出价=退出日(高+低)/2中间价(v4.1)",
+        "caliber": ("E0=持有到断板(研究锚点口径,收盘);E3=炸板当日走/封住→E0,"
+                    "退出价=退出日(高+低)/2中间价(v4.1);可执行口径=同票 E3 持仓未退时"
+                    "的新信号不成交(轻仓一票一份,v6.1)"),
         "subsets": [
             row("方案命中全部·E0", hit),
             row("方案命中全部·E3", hit),
+            row("可执行口径·E0(去同票持仓重叠)", exe),
+            row("可执行口径·E3(去同票持仓重叠)", exe),
         ],
     }
 
@@ -418,6 +453,7 @@ def _ledger_days(trades: pd.DataFrame, touch_map: dict | None = None) -> list[di
     退出 = 产品卖出纪律(E3):炸板当日走/封住→断板日(15日兜底),退出价=(高+低)/2中间价;
     ret_e0 = 研究主算法(持有到断板)收益,对照列。
     touch: {(vt_symbol, 买入日): 'HH:MM'} 首触板15分钟末刻;无数据=None(2024-08前)。
+    overlap = 同票持仓重叠(前笔 E3 未退,真实买不进):行保留展示,收益汇总不计入(v6.1)。
     """
     touch_map = touch_map or {}
     e = trades.dropna(subset=["E3%", "持有到断板%"]).copy()
@@ -442,8 +478,10 @@ def _ledger_days(trades: pd.DataFrame, touch_map: dict | None = None) -> list[di
             "ret_pct": _sr(r["E3%"], 2),
             "ret_e0": _sr(r["持有到断板%"], 2),
             "touch": touch_map.get((str(r["代码"]), r["entry_day"])),
+            "overlap": bool(r["同票持仓重叠"]),
         } for _, r in g_.iterrows()]
-        rets = [float(t["ret_pct"]) for t in items if t["ret_pct"] is not None]
+        rets = [float(t["ret_pct"]) for t in items
+                if t["ret_pct"] is not None and not t["overlap"]]
         out.append({
             "trade_date": day.isoformat(),
             "trades": items,

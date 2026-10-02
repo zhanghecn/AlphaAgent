@@ -227,6 +227,68 @@ describe("HprLedgerView", () => {
     expect(html).toContain("对照E0");
     expect(html).toContain("炸板次日走");
   });
+
+  it("marks overlap trades 持仓中 and excludes them from point summary", () => {
+    const html = renderToStaticMarkup(
+      withProviders(
+        <HprLedgerView
+          caliber="测试口径"
+          months={[{ month: "2026-07", count: 2, win_rate: 100, avg_ret_pct: 5.0, total_ret_pct: 5.0 }]}
+          month="2026-07"
+          onMonthChange={() => undefined}
+          ledgerDays={[
+            {
+              trade_date: "2026-07-15",
+              count: 2,
+              win: 1,
+              avg_ret_pct: 5.0,
+              trades: [
+                {
+                  vt_symbol: "600664.SSE",
+                  name: "哈药股份",
+                  point: "C2",
+                  level: "B",
+                  group4: "三接四阴",
+                  entry_price: 7.67,
+                  auction_pct: 8.0,
+                  sealed: true,
+                  streak_h: 1,
+                  exit_date: "2026-07-16",
+                  exit_price: 8.05,
+                  exit_reason: "break_close",
+                  ret_pct: 5.0,
+                  ret_e0: 5.0,
+                  touch: "09:45",
+                  overlap: false,
+                },
+                {
+                  vt_symbol: "600664.SSE",
+                  name: "哈药股份",
+                  point: "C2",
+                  level: "B",
+                  group4: "三接四阴",
+                  entry_price: 7.67,
+                  auction_pct: 8.0,
+                  sealed: true,
+                  streak_h: 1,
+                  exit_date: "2026-07-16",
+                  exit_price: 9.1,
+                  exit_reason: "break_close",
+                  ret_pct: 18.7,
+                  ret_e0: 18.7,
+                  touch: "09:45",
+                  overlap: true,  // 同票持仓中,真实买不进
+                },
+              ],
+            },
+          ]}
+        />,
+      ),
+    );
+    expect(html).toContain("持仓中");
+    expect(html).toContain("opacity-50");
+    expect(html).toContain("</span> 1笔 · 胜100% · 均+5.00%");  // 点汇总跳过 overlap 笔
+  });
 });
 
 describe("ShortTermResearchPage", () => {

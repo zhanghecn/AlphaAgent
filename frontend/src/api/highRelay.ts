@@ -210,6 +210,8 @@ export interface HprLedgerTrade {
   ret_e0: number | null;
   /** 首触板15分钟K周期末刻(如"09:45"=首刻段); null=无分钟数据(2024-08前) */
   touch: string | null;
+  /** 同票持仓重叠(v6.1):前笔 E3 未退真实买不进,行保留展示但不进收益汇总 */
+  overlap?: boolean;
 }
 
 export interface HprLedgerDay {
