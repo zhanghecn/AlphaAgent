@@ -66,7 +66,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            打板口诀卡七条(hpr-v6.0:A=阳B=阴C=中性,字母语义跨板位统一)全市场验证(2023-03 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
+            打板口诀卡七条(hpr-v6.7:A=阳B=阴C=中性,字母语义跨板位统一)全市场验证(2023-01 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
           </span>
         </div>
         <div className="mt-2 border-t pt-2 text-xs leading-5 text-muted-foreground">
@@ -120,7 +120,7 @@ export function HprGuideView() {
           换手心法：二接三看二板换手（阳锁阴活），三接四看三板换手，一板换手永远不用看；
           盘中首次触涨停价打（低吸类低开直接买），开盘≥9.5%顶格不命中；
           炸板次日走（T+1，一字跌停顺延），封住拿到断板（15日兜底）。
-          合计185笔 月均4.3笔（hpr-v6.0）；不挑就买是亏的（对照 41%/-1.1），其余一概不碰。
+          合计154笔 月均3.4笔（hpr-v6.7）；不挑就买是亏的（对照 41%/-1.5），其余一概不碰。
         </p>
       </section>
 

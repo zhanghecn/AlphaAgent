@@ -217,7 +217,7 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
               auction_pct=None, b2_turn=None, b3_turn=None,
               foundation_chg=None, pre10_pct=None,
               foundation_ma20=None) -> str:
-    """打板口诀卡七条打标(hpr-v6.3,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
+    """打板口诀卡七条打标(hpr-v6.7,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
     chain = 数值区间半开[lo,hi);vol2/vol3 = 二板/三板换手率窗(缺数据不命中带窗点);
     vol2_when_b1_low = A2 条件换手(一板<3 板弱时二板一字须换手<5,假锁排除);
     block_foundation_chg = (lo,hi,cap) 条件回避(v6.2 C2):首板前一日涨跌∈[lo,hi)
