@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { Activity, BarChart3, BookOpenText, GraduationCap, ReceiptText } from "lucide-react";
 
 import {
@@ -36,8 +37,21 @@ function isBuilding(status: HprRebuildStatus | undefined) {
   return status?.status === "queued" || status?.status === "running";
 }
 
+// 子页签进 URL(?view=quiz 深链,手机刷新/回退/加书签不丢页签);非法/缺省=live 与历史行为一致
+function parseView(raw: string | null): HprView {
+  return HPR_VIEWS.some((v) => v.value === raw) ? (raw as HprView) : "live";
+}
+
 export function HighRelayPage() {
-  const [view, setView] = useState<HprView>("live");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = parseView(searchParams.get("view"));
+  const selectView = (v: HprView) => {
+    if (v === view) return;
+    const next = new URLSearchParams(searchParams);
+    if (v === "live") next.delete("view");
+    else next.set("view", v);
+    setSearchParams(next, { replace: true });
+  };
   return (
     <div className="min-w-0">
       <nav
@@ -51,10 +65,11 @@ export function HighRelayPage() {
           return (
             <button
               key={item.value}
+              id={`hpr-view-${item.value}`}
               type="button"
               role="tab"
               aria-selected={active}
-              onClick={() => setView(item.value)}
+              onClick={() => selectView(item.value)}
               className={cn(
                 "flex h-11 shrink-0 items-center gap-2 border-b-2 text-sm transition-colors",
                 active

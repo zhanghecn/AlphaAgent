@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchHprRules } from "@/api/highRelay";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
-import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
+import { CopyThsConditionsButton } from "@/components/shared/CopyThsConditionsButton";
 
 const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   pool: { badge: "bg-primary/15 text-primary", label: "池" },

@@ -34,6 +34,8 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_versio
                     actionable=bool(e.get("actionable")),
                     avoid_static=e.get("avoid_static"),
                     cold_market=bool(e.get("cold_market")),
+                    reb30=e.get("reb30"),
+                    s4=bool(e.get("s4")),
                     prev_close=e.get("prev_close"), limit_price=e.get("limit_price"),
                     rules_version=rules_version))
     return len(entries)

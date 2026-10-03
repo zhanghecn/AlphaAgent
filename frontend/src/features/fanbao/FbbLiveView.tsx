@@ -9,7 +9,7 @@ import {
 } from "@/api/fanbao";
 import { EmptyState } from "@/components/EmptyState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
-import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
+import { CopyThsConditionsButton } from "@/components/shared/CopyThsConditionsButton";
 import { cn, formatPct, formatPrice } from "@/lib/utils";
 
 const SESSION_LABELS: Record<string, string> = {

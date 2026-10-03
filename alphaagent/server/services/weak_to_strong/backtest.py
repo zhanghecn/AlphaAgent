@@ -88,7 +88,8 @@ def _build_events() -> pd.DataFrame:
                schema.stock_daily_bars.c.open_price,
                schema.stock_daily_bars.c.high_price,
                schema.stock_daily_bars.c.low_price,
-               schema.stock_daily_bars.c.close_price)
+               schema.stock_daily_bars.c.close_price,
+               schema.stock_daily_bars.c.volume)
         .where(schema.stock_daily_bars.c.trade_date >= date.fromisoformat(BARS_START)),
         engine, parse_dates=["trade_date"])
     bars = bars[bars["vt_symbol"].isin(set(main["vt_symbol"]))].copy()
@@ -97,14 +98,16 @@ def _build_events() -> pd.DataFrame:
     g = bars.groupby("vt_symbol", sort=False)
     bars["name"] = bars["vt_symbol"].map(name_map)
 
+    # 前瞻列只生成被引用的:close/is_lim/date 全深度(退出回放用),high/open/gap 仅 n1
+    # (touch/one_word/入场过滤);n2+ 的 high/low/open/gap 零引用——数据补全后 356 万行
+    # 全列生成 5GB+ 曾把 uvicorn worker 撑爆被宿主 OOM 干掉(2026-10-02),砍掉省一半峰值。
     for k in range(1, MAX_K + 1):
         bars[f"n{k}_close"] = g["close_price"].shift(-k)
-        bars[f"n{k}_high"] = g["high_price"].shift(-k)
-        bars[f"n{k}_low"] = g["low_price"].shift(-k)
-        bars[f"n{k}_open"] = g["open_price"].shift(-k)
         bars[f"n{k}_is_lim"] = g["is_lim"].shift(-k)
         bars[f"n{k}_date"] = g["trade_date"].shift(-k)
-        bars[f"n{k}_gap"] = g["gap_days"].shift(-k)
+    bars["n1_high"] = g["high_price"].shift(-1)
+    bars["n1_open"] = g["open_price"].shift(-1)
+    bars["n1_gap"] = g["gap_days"].shift(-1)
 
     masks = pool_mod.group_masks(bars)
     hit = masks["yin2"] | masks["yang2*"] | masks["yin4"] | masks["yang4"]
@@ -170,7 +173,19 @@ def _build_events() -> pd.DataFrame:
     T["seal"] = T["n1_is_lim"].fillna(False).astype(bool)
     T["open_g"] = T["n1_open"] / T["close_price"] - 1
     T["n2_lim"] = T["n2_is_lim"].fillna(False).astype(bool)
+    # 模块级快照:题库构建(service._execute_rebuild)复用同一次回放的 T/bars,
+    # 避免全量日线重读两遍;进程内单值,重入即覆盖(回放幂等)。
+    # bars 只留 quiz 切K线窗需要的 8 列——全列(含 n1~n20 前瞻 140 列)快照 5GB+,
+    # 数据补全后曾把 uvicorn worker 撑爆被宿主 OOM 干掉(2026-10-02 事故)。
+    global _LAST_T, _LAST_BARS
+    _LAST_T = T
+    _LAST_BARS = bars[["vt_symbol", "trade_date", "open_price", "high_price",
+                       "low_price", "close_price", "volume", "pos"]].copy()
     return T
+
+
+_LAST_T: pd.DataFrame | None = None
+_LAST_BARS: pd.DataFrame | None = None
 
 
 # ── 成交回放 ──

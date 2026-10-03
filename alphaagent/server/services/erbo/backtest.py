@@ -122,6 +122,8 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "涨停次数": int(bars["lim30"].iat[i]) if bars["lim30"].iat[i] == bars["lim30"].iat[i] else None,
             "阴阳": str(bars["yy"].iat[i]),
             "末开%": round(last_open, 1) if last_open is not None else None,
+            "反包次数": int(bars["rebreak30"].iat[i])
+                        if bars["rebreak30"].iat[i] == bars["rebreak30"].iat[i] else 0,
             "方案点": point,
             "死格": contracts.dead_open_reason(last_open),
             "买价": buy,
@@ -157,6 +159,9 @@ def assemble_report(E: pd.DataFrame) -> dict[str, object]:
             return done[done["方案点"] != "—"]
         if key == "miss":
             return done[done["方案点"] == "—"]
+        if key == "S4":
+            # 精选层 = A/B 档内「断过两回」(叠加标记,不改变 A/B/all 口径)
+            return done[(done["方案点"] != "—") & (done["反包次数"] >= contracts.REBREAK_MIN)]
         return done[done["方案点"] == key]
 
     frames = {k: subset(k) for k in keys}
@@ -173,7 +178,8 @@ def assemble_report(E: pd.DataFrame) -> dict[str, object]:
                     "→当日触涨停价按涨停价买(一字排除,T字可买);末日开盘A平开-2~2/B深低开≤-4;"
                     "收益=炸板次日收盘走(T+1,一字跌停顺延)/封住→断板日收盘(15日兜底);"
                     "胜率=好票率(次日收≥买价);无滑点,日线未复权。"
-                    "死格(末日浅低开-4~-2/高开>+2)与情绪冰点(昨日涨停<40家警示)为标注层。"),
+                    "死格(末日浅低开-4~-2/高开>+2)为标注层;"
+                    "断过两回=A/B档内30日内断≥2天再拉≥2次精选层(页面「断过两回」),不改变出手口径。"),
         "point_labels": contracts.POINT_LABELS,
         "point_levels": contracts.POINT_LEVELS,
         "summary": summary,
@@ -240,6 +246,8 @@ def _ledger_days(e: pd.DataFrame) -> list[dict[str, object]]:
                 "gap": int(r["断板天数"]), "gain30_pct": r["波段%"], "dd_pct": r["回调%"],
                 "ma20gap_pct": r["MA20距%"], "lim30": r["涨停次数"],
                 "last_open_pct": r["末开%"], "entry_price": r["买价"],
+                "reb30": int(r["反包次数"]),
+                "s4": bool(r["方案点"] != "—" and int(r["反包次数"]) >= contracts.REBREAK_MIN),
                 "sealed": bool(r["封住"]),
                 "exit_date": r["退出日"], "exit_price": r["退出价"],
                 "exit_reason": r["退出原因"], "ret_pct": r["持有到断板%"],

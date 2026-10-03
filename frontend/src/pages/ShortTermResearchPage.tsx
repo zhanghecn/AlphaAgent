@@ -1,62 +1,50 @@
-import { FlaskConical, Rocket, Swords, TrendingUp, Undo2, Zap } from "lucide-react";
+import { LayoutGrid, Swords, Undo2 } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
-import { ErboPage } from "@/pages/ErboPage";
 import { FanbaoPage } from "@/pages/FanbaoPage";
 import { HighRelayPage } from "@/pages/HighRelayPage";
-import { LowSuctionPage } from "@/pages/LowSuctionPage";
-import { QianlongPage } from "@/pages/QianlongPage";
-import { WeakToStrongPage } from "@/pages/WeakToStrongPage";
+import { ShortTermOverview } from "@/pages/ShortTermOverview";
 
-type ResearchTab = "first-board" | "low-suction" | "weak-to-strong" | "high-relay" | "fanbao" | "erbo";
+type ResearchTab = "overview" | "high-relay" | "fanbao";
 
 const RESEARCH_TABS = [
-  { value: "first-board", label: "潜龙首板", icon: Rocket },
-  { value: "weak-to-strong", label: "N型补涨打板", icon: Zap },
+  { value: "overview", label: "主线总览", icon: LayoutGrid },
   { value: "high-relay", label: "高位接力", icon: Swords },
   { value: "fanbao", label: "断板反包", icon: Undo2 },
-  { value: "erbo", label: "二波反包", icon: TrendingUp },
-  { value: "low-suction", label: "低吸", icon: FlaskConical },
 ] as const;
+
+// 主线三线的子页签深链值(?view=quiz 总览答题按钮直达)
+const LINE_VIEWS: Partial<Record<ResearchTab, string[]>> = {
+  "high-relay": ["live", "quiz", "backtest", "ledger", "guide"],
+  fanbao: ["live", "quiz", "backtest", "ledger", "guide"],
+};
 
 export function ShortTermResearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const raw = searchParams.get("research");
-  // 旧书签（reverse-wrap / pullback-study）统一归入低吸
+  // 精华化(2026-10-02 终版):只留 hpr+fbb 双主线;其余旧书签一律回落总览
+  // 一律回落主线总览,不 404。
   const activeTab: ResearchTab =
-    raw === "low-suction" || raw === "reverse-wrap" || raw === "pullback-study"
-      ? "low-suction"
-      : raw === "weak-to-strong"
-        ? "weak-to-strong"
-        : raw === "high-relay"
-          ? "high-relay"
-          : raw === "fanbao"
-            ? "fanbao"
-            : raw === "erbo"
-              ? "erbo"
-              : "first-board";
+    raw === "high-relay" || raw === "fanbao" ? (raw as ResearchTab) : "overview";
 
-  const selectTab = (tab: ResearchTab) => {
+  const applyParams = (tab: ResearchTab, nextView?: string) => {
     const next = new URLSearchParams(searchParams);
-    if (tab === "first-board") next.delete("research");
+    if (tab === "overview") next.delete("research");
     else next.set("research", tab);
+    const allowed = LINE_VIEWS[tab];
+    if (nextView && allowed?.includes(nextView)) next.set("view", nextView);
+    else next.delete("view");
     setSearchParams(next, { replace: true });
   };
 
   const panel =
-    activeTab === "first-board" ? (
-      <QianlongPage />
-    ) : activeTab === "weak-to-strong" ? (
-      <WeakToStrongPage />
+    activeTab === "overview" ? (
+      <ShortTermOverview onSelect={(research, view) => applyParams(research as ResearchTab, view)} />
     ) : activeTab === "high-relay" ? (
       <HighRelayPage />
-    ) : activeTab === "fanbao" ? (
-      <FanbaoPage />
-    ) : activeTab === "erbo" ? (
-      <ErboPage />
     ) : (
-      <LowSuctionPage />
+      <FanbaoPage />
     );
 
   return (
@@ -79,7 +67,7 @@ export function ShortTermResearchPage() {
                   ? "border-primary font-semibold text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground",
               )}
-              onClick={() => selectTab(tab.value)}
+              onClick={() => applyParams(tab.value)}
             >
               <Icon size={15} />
               {tab.label}

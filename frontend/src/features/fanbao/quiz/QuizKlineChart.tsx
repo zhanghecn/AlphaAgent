@@ -14,7 +14,7 @@ import {
 
 import type { FbbQuizBar } from "@/api/fanbao";
 import { useChartColors, RISE_COLOR, FALL_COLOR, BRAND_COLOR } from "@/lib/chart-theme";
-import { smaSeries } from "@/features/lowSuction/guide/guideKline";
+import { smaSeries } from "@/components/shared/guideKline";
 
 /**
  * 答题训练 K 线(受控组件,bars 由 props 给,不发请求):
@@ -27,6 +27,12 @@ const MAIN_HEIGHT = 280;
 const VOLUME_HEIGHT = 85;
 const BEFORE_VISIBLE = 30;   // 作答态展示的断板期末根数(覆盖前波连板+断板期)
 const VISIBLE_BARS = 48;     // 显示窗宽度(揭示后含持有期)
+
+/** 窄容器按 ~8px/根收紧显示窗(手机 375px → ~32 根);≥448px 绘图区维持 48 根 → 桌面零变化。
+ * 下限 24:决策日恒在序列右锚窗内(作答 31 根/揭示最长 47 根),必含。导出供单测。 */
+export function visibleBarsForWidth(plotWidth: number): number {
+  return Math.max(24, Math.min(VISIBLE_BARS, Math.floor(plotWidth / 8)));
+}
 const MA_SPECS = [
   { window: 5, color: "#f59e0b" },
   { window: 10, color: "#8b5cf6" },
@@ -46,7 +52,20 @@ interface QuizKlineChartProps {
   retPct?: number | null;
 }
 
-export function QuizKlineChart(props: QuizKlineChartProps) {
+// 签名直接解构:effect 依赖原始字段而非 props 对象(内联字面量每次渲染都是新引用,
+// 会让无关 setState 也整图销毁重建,低端手机卡顿;bars 来自 react-query 缓存引用稳定)
+export function QuizKlineChart({
+  barsBefore,
+  decisionDate,
+  decisionOpen,
+  auctionPct,
+  revealed,
+  barsAfter = [],
+  buyPrice,
+  exitDate,
+  exitPrice,
+  retPct,
+}: QuizKlineChartProps) {
   const palette = useChartColors();
   const priceRef = useRef<HTMLDivElement>(null);
   const volumeRef = useRef<HTMLDivElement>(null);
@@ -54,9 +73,7 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
 
   useEffect(() => {
     if (!priceRef.current || !volumeRef.current) return;
-    const { barsBefore, revealed } = props;
     if (barsBefore.length === 0) return;
-    const barsAfter = props.barsAfter ?? [];
 
     // MA 在全序列(暖机段+揭示段)上算,显示只切窗口
     const allBars: FbbQuizBar[] = revealed ? [...barsBefore, ...barsAfter] : barsBefore;
@@ -79,6 +96,8 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
       width: priceRef.current.clientWidth,
       height: MAIN_HEIGHT,
       crosshair: { mode: CrosshairMode.Normal },
+      // 手机:单指竖滑穿透回页面滚动(不 preventDefault);横滑平移/双指缩放/桌面鼠标全保留
+      handleScroll: { vertTouchDrag: false },
       rightPriceScale: { borderColor: palette.axis, minimumWidth: 64 },
       timeScale: { visible: false, borderColor: palette.axis },
       localization: { locale: "zh-CN" },
@@ -96,6 +115,7 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
       width: volumeRef.current.clientWidth,
       height: VOLUME_HEIGHT,
       crosshair: { mode: CrosshairMode.Normal },
+      handleScroll: { vertTouchDrag: false },
       rightPriceScale: { borderColor: palette.axis },
       timeScale: { borderColor: palette.axis },
       localization: { locale: "zh-CN" },
@@ -121,9 +141,9 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
       } else {
         // 今开十字:全天还没走,只有竞价开盘价(触板发生在盘中任意时刻)
         candles.push({
-          time: props.decisionDate as Time,
-          open: props.decisionOpen, high: props.decisionOpen,
-          low: props.decisionOpen, close: props.decisionOpen,
+          time: decisionDate as Time,
+          open: decisionOpen, high: decisionOpen,
+          low: decisionOpen, close: decisionOpen,
         });
       }
       candleSeries.setData(candles);
@@ -162,7 +182,7 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
         for (const b of barsAfter) volumes.push(toVol(b, false));
       } else {
         volumes.push({
-          time: props.decisionDate as Time, value: 0,
+          time: decisionDate as Time, value: 0,
           color: "rgba(148,163,184,0.25)",
         });
       }
@@ -172,44 +192,44 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
       const priceLines: IPriceLine[] = [];
       if (!revealed) {
         priceLines.push(candleSeries.createPriceLine({
-          price: props.decisionOpen,
+          price: decisionOpen,
           color: BRAND_COLOR,
           lineWidth: 1,
           lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: `今开 ${props.auctionPct >= 0 ? "+" : ""}${props.auctionPct.toFixed(1)}%`,
+          title: `今开 ${auctionPct >= 0 ? "+" : ""}${auctionPct.toFixed(1)}%`,
         }));
-      } else if (props.buyPrice != null) {
+      } else if (buyPrice != null) {
         priceLines.push(candleSeries.createPriceLine({
-          price: props.buyPrice,
+          price: buyPrice,
           color: BRAND_COLOR,
           lineWidth: 1,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `买入 ${props.buyPrice.toFixed(2)}`,
+          title: `买入 ${buyPrice.toFixed(2)}`,
         }));
       }
 
       // 买卖 marker(揭示态)
       if (revealed) {
         const markers: SeriesMarker<Time>[] = [];
-        if (props.buyPrice != null) {
+        if (buyPrice != null) {
           markers.push({
-            time: props.decisionDate as Time,
+            time: decisionDate as Time,
             position: "belowBar",
             shape: "arrowUp",
             color: RISE_COLOR,
-            text: `买 ${props.buyPrice.toFixed(2)}`,
+            text: `买 ${buyPrice.toFixed(2)}`,
           });
         }
-        if (props.exitDate && props.exitPrice != null) {
+        if (exitDate && exitPrice != null) {
           markers.push({
-            time: props.exitDate as Time,
+            time: exitDate as Time,
             position: "aboveBar",
             shape: "arrowDown",
             color: FALL_COLOR,
-            text: props.retPct != null
-              ? `卖 ${props.retPct >= 0 ? "+" : ""}${props.retPct.toFixed(1)}%`
+            text: retPct != null
+              ? `卖 ${retPct >= 0 ? "+" : ""}${retPct.toFixed(1)}%`
               : "卖",
           });
         }
@@ -232,9 +252,13 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
         syncing = false;
       });
 
-      // 显示窗:末 VISIBLE_BARS 根(揭示段全在窗内)
+      // 显示窗:末 visibleBars 根(揭示段全在窗内);窄容器按绘图宽收紧,桌面 ≥448px 维持 48 根
       const total = candles.length;
-      const from = Math.max(0, total - VISIBLE_BARS);
+      const containerWidth = priceRef.current.clientWidth;
+      const visibleBars = containerWidth > 0
+        ? visibleBarsForWidth(containerWidth - 64)  // 64=右侧价格轴预留
+        : VISIBLE_BARS;
+      const from = Math.max(0, total - visibleBars);
       priceChart.timeScale().setVisibleLogicalRange({ from, to: total + 1 });
       volumeChart.timeScale().setVisibleLogicalRange({ from, to: total + 1 });
 
@@ -242,7 +266,7 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
       const updateLine = () => {
         const line = lineRef.current;
         if (!line) return;
-        const x = priceChart.timeScale().timeToCoordinate(props.decisionDate as Time);
+        const x = priceChart.timeScale().timeToCoordinate(decisionDate as Time);
         if (x == null) {
           line.style.display = "none";
           return;
@@ -273,7 +297,8 @@ export function QuizKlineChart(props: QuizKlineChartProps) {
       priceChart.remove();
       volumeChart.remove();
     }
-  }, [props, palette]);
+  }, [barsBefore, decisionDate, decisionOpen, auctionPct, revealed,
+      barsAfter, buyPrice, exitDate, exitPrice, retPct, palette]);
 
   return (
     <div className="overflow-hidden rounded-md border">

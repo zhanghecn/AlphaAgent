@@ -49,6 +49,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
     status_counts: dict[str, int] = {}
     point_counts: dict[str, int] = {}
     actionable_count = 0
+    s4_count = 0
     for e in entries:
         sk = str(e["status"])
         status_counts[sk] = status_counts.get(sk, 0) + 1
@@ -57,6 +58,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
         if pk != "—":
             point_counts[pk] = point_counts.get(pk, 0) + 1
         actionable_count += int(bool(e.get("actionable")))
+        s4_count += int(bool(e.get("s4")))
     mkt_lim_tm1 = None  # erbo 池行不带该列(情绪冰点在 cold_market 字段)
     last_scan = repository.latest_scan_run(target)
     return {
@@ -66,7 +68,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
         "session_stage": _session_stage(now),
         "rules_version": contracts.ERBO_RULES_VERSION,
         "counts": {
-            "pool": len(pool), "actionable": actionable_count,
+            "pool": len(pool), "actionable": actionable_count, "s4": s4_count,
             "signals": len(signals), "by_point": point_counts,
             "by_status": status_counts,
         },
@@ -98,6 +100,8 @@ def _live_row(entry: dict[str, object] | None,
             "point": entry.get("point"), "level": entry.get("level"),
             "actionable": bool(entry.get("actionable")),
             "avoid_static": entry.get("avoid_static"),
+            "reb30": entry.get("reb30"),
+            "s4": bool(entry.get("s4")),
             "prev_close": entry.get("prev_close"),
             "limit_price": entry.get("limit_price"),
         })

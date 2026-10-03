@@ -230,7 +230,7 @@ export function QuizRunner({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
             type="button"
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="py-2.5 text-xs text-muted-foreground hover:text-foreground md:py-0"
             onClick={onBack}
           >
             ← 返回
@@ -264,7 +264,7 @@ export function QuizRunner({
           </span>
           <button
             type="button"
-            className="ml-auto text-xs text-muted-foreground hover:text-foreground"
+            className="ml-auto py-2.5 text-xs text-muted-foreground hover:text-foreground md:py-0"
             onClick={handleReset}
           >
             重置{mixed ? "本卷" : "本月"}
@@ -286,7 +286,7 @@ export function QuizRunner({
           ) : null}
         </div>
 
-        <div className="p-3">
+        <div className="p-2 md:p-3">
           <QuizKlineChart
             barsBefore={question.bars_before}
             decisionDate={question.decision_date}
@@ -301,7 +301,7 @@ export function QuizRunner({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 lg:grid-cols-8">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 sm:gap-x-6 lg:grid-cols-8">
           <InfoCell
             label="断板累计跌"
             value={fmtSigned(d.break_drop_pct)}
@@ -331,17 +331,17 @@ export function QuizRunner({
 
         {!revealed ? (
           <div className="border-t px-4 py-4">
-            <div className="flex items-center justify-center gap-4">
+            <div className="flex items-center justify-center gap-3 md:gap-4">
               <button
                 type="button"
-                className="h-11 w-40 rounded-md bg-rise text-sm font-semibold text-white hover:bg-rise/90"
+                className="h-11 flex-1 rounded-md bg-rise text-base font-semibold text-white hover:bg-rise/90 md:w-40 md:flex-none md:text-sm"
                 onClick={() => handleAnswer("buy")}
               >
                 买入
               </button>
               <button
                 type="button"
-                className="h-11 w-40 rounded-md border text-sm font-semibold text-muted-foreground hover:bg-muted/40"
+                className="h-11 flex-1 rounded-md border text-base font-semibold text-muted-foreground hover:bg-muted/40 md:w-40 md:flex-none md:text-sm"
                 onClick={() => handleAnswer("reject")}
               >
                 不买
@@ -394,7 +394,7 @@ function SegChip({
     <button
       type="button"
       className={cn(
-        "rounded-md border px-2.5 py-1 text-xs tabular-nums",
+        "rounded-md border px-2.5 py-2 text-xs tabular-nums md:py-1",
         selected
           ? "border-primary bg-primary/10 font-semibold text-primary"
           : "text-muted-foreground hover:bg-muted/40",
@@ -447,7 +447,7 @@ function BoardSummaryCard({
         <span className="ml-auto flex gap-3">
           <button
             type="button"
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="py-2.5 text-xs text-muted-foreground hover:text-foreground md:py-0"
             onClick={onBack}
           >
             ← 返回
@@ -459,7 +459,7 @@ function BoardSummaryCard({
         {wrongCount > 0 ? (
           <button
             type="button"
-            className="h-9 rounded-md bg-amber-500 px-4 text-sm font-semibold text-white hover:bg-amber-500/90"
+            className="h-11 rounded-md bg-amber-500 px-4 text-sm font-semibold text-white hover:bg-amber-500/90 md:h-9"
             onClick={onRetry}
           >
             乱序重练本轮错题（{wrongCount}题）
@@ -469,7 +469,7 @@ function BoardSummaryCard({
         )}
         <button
           type="button"
-          className="h-9 rounded-md border px-4 text-sm font-semibold text-muted-foreground hover:bg-muted/40"
+          className="h-11 rounded-md border px-4 text-sm font-semibold text-muted-foreground hover:bg-muted/40 md:h-9"
           onClick={onMonthSummary}
         >
           看{unitLabel}总结
@@ -641,10 +641,10 @@ function RevealSection({
         </div>
       )}
 
-      <div className="flex justify-end">
+      <div className="flex md:justify-end">
         <button
           type="button"
-          className="h-9 rounded-md bg-primary px-6 text-sm font-semibold text-primary-foreground hover:bg-primary/90"
+          className="h-11 w-full rounded-md bg-primary text-base font-semibold text-primary-foreground hover:bg-primary/90 md:h-9 md:w-auto md:px-6 md:text-sm"
           onClick={onNext}
         >
           {isLast ? "看本段总结" : "下一题"}
@@ -693,14 +693,14 @@ function MonthSummary({
         <span className="ml-auto flex gap-3">
           <button
             type="button"
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="py-2.5 text-xs text-muted-foreground hover:text-foreground md:py-0"
             onClick={onBack}
           >
             ← 返回
           </button>
           <button
             type="button"
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="py-2.5 text-xs text-muted-foreground hover:text-foreground md:py-0"
             onClick={onRestart}
           >
             重新作答{unitLabel}

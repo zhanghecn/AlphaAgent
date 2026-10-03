@@ -5,16 +5,21 @@ import { describe, expect, it } from "vitest";
 
 import { ShortTermResearchPage } from "./ShortTermResearchPage";
 import { FBB_LIVE_REFRESH_INTERVAL_MS } from "./FanbaoPage";
-import type { FbbLivePayload } from "@/api/fanbao";
+import type { FbbLivePayload, FbbQuizQuestion } from "@/api/fanbao";
 import { FbbLedgerView } from "@/features/fanbao/FbbLedgerView";
 import { FbbLiveView } from "@/features/fanbao/FbbLiveView";
+import { QuizRunner } from "@/features/fanbao/quiz/QuizRunner";
+import { quizQuestionId } from "@/features/fanbao/quiz/quizScore";
+import { ThemeProvider } from "@/theme/ThemeProvider";
 
 function withProviders(node: React.ReactElement, routerEntries: string[] = ["/"]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return (
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={routerEntries}>{node}</MemoryRouter>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={routerEntries}>{node}</MemoryRouter>
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }
 
@@ -321,8 +326,85 @@ describe("ShortTermResearchPage", () => {
     );
     expect(html).toContain("断板反包");
     expect(html).toContain("高位接力");
-    expect(html).toContain("N型补涨打板");
-    expect(html).toContain("潜龙首板");
-    expect(html).toContain("低吸");
+    expect(html).not.toContain("N型补涨打板"); // 2026-10-02 终版下线
+    expect(html).not.toContain("潜龙首板"); // 2026-10-02 全下线
+    expect(html).not.toContain("低吸");
+  });
+});
+
+// ── FbbQuizRunner 手机适配(2026-10-01):与 hpr 侧逐字相同的类名断言=双份同步防呆,
+//    hpr 改了 fbb 漏改 → 本 describe 红 ──
+
+const FBB_QUIZ_Q: FbbQuizQuestion = {
+  seq: 1, vt_symbol: "002312.SZSE", name: "测试反包", decision_date: "2025-06-10",
+  n_board: 2, group6: "2板阴",
+  display: {
+    board_label: "断1天", group6_label: "2板反包·阴",
+    break_drop_pct: -10.2, break_yin_count: 1, last_open_pct: -3.5,
+    last_entity: "阴", today_open_pct: 1.2, day_high_pct: 9.98,
+    prev_close: 10.0, limit_price: 11.0, decision_open: 10.12,
+  },
+  bars_before: [
+    { d: "2025-06-05", o: 9.0, h: 9.9, l: 8.9, c: 9.9, v: 800 },
+    { d: "2025-06-06", o: 9.9, h: 10.9, l: 9.8, c: 10.9, v: 1500 },
+    { d: "2025-06-09", o: 10.5, h: 10.6, l: 9.6, c: 9.8, v: 900 },
+  ],
+  bars_after: [{ d: "2025-06-10", o: 10.12, h: 11.0, l: 10.0, c: 11.0, v: 3000 }],
+  answer: {
+    point: "S1", should_buy: true, ret_pct: 8.0, buy_price: 11.0,
+    sealed: true, hold_days: 2, exit_date: "2025-06-12", exit_price: 11.88,
+    exit_reason: "break_close",
+  },
+  explain: {
+    kind: "hit", scheme_no: "S1", scheme_name: "S1 低开急杀",
+    scheme_desc: "2板断1天,累计跌8~15%只洗一次,末日低开或平开",
+    matched_line: "累计-10.2% × 末日开-3.5%(阴) → 今开+1.2 触板打",
+    case_note: null, high_var: false,
+  },
+};
+
+function renderFbbRunner(answers?: Record<string, { choice: "buy" | "reject"; score: number }>) {
+  return renderToStaticMarkup(
+    withProviders(
+      <QuizRunner
+        month="2025-06"
+        questions={[FBB_QUIZ_Q]}
+        rulesVersion="fbb-v2.1·q1"
+        showName={false}
+        answers={answers ?? {}}
+        onAnswersChange={() => undefined}
+        onBack={() => undefined}
+      />,
+    ),
+  );
+}
+
+describe("FbbQuizRunner 手机适配", () => {
+  it("作答态:买/不买手机撑满一行(text-base 大字),桌面恢复 w-40 定宽(与 hpr 同款)", () => {
+    const html = renderFbbRunner();
+    expect(html).toContain(
+      "h-11 flex-1 rounded-md bg-rise text-base font-semibold text-white hover:bg-rise/90 md:w-40 md:flex-none md:text-sm",
+    );
+    expect(html).toContain(
+      "h-11 flex-1 rounded-md border text-base font-semibold text-muted-foreground hover:bg-muted/40 md:w-40 md:flex-none md:text-sm",
+    );
+    expect(html).toContain("gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 sm:gap-x-6");
+  });
+
+  it("揭示态:下一题手机撑满,桌面恢复右对齐小钮(与 hpr 同款)", () => {
+    const html = renderFbbRunner({
+      [quizQuestionId(FBB_QUIZ_Q)]: { choice: "buy", score: 10 },
+    });
+    expect(html).toContain(
+      "h-11 w-full rounded-md bg-primary text-base font-semibold text-primary-foreground hover:bg-primary/90 md:h-9 md:w-auto md:px-6 md:text-sm",
+    );
+    expect(html).toContain("flex md:justify-end");
+  });
+
+  it("深链 ?view=quiz 直达答题训练页签(fbr-view)", () => {
+    const html = renderToStaticMarkup(
+      withProviders(<ShortTermResearchPage />, ["/short-term?research=fanbao&view=quiz"]),
+    );
+    expect(html).toContain('id="fbr-view-quiz" type="button" role="tab" aria-selected="true"');
   });
 });

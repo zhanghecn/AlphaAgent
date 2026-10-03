@@ -9,7 +9,7 @@ import {
 } from "@/api/highRelay";
 import { EmptyState } from "@/components/EmptyState";
 import { StockIdentityLink } from "@/components/StockIdentityLink";
-import { CopyThsConditionsButton } from "@/features/qianlong/CopyThsConditionsButton";
+import { CopyThsConditionsButton } from "@/components/shared/CopyThsConditionsButton";
 import { cn, formatPct, formatPrice } from "@/lib/utils";
 
 import { SyncStatusBar } from "@/components/SyncStatusBar";

@@ -1933,6 +1933,27 @@ w2s_pool_entries = Table(
 )
 Index("ix_w2s_pool_entries_date", w2s_pool_entries.c.trade_date)
 
+# 答题训练题库(照 hpr_quiz_questions 模式):触发池事件×次日触板×非一字,
+# 应买=白名单命中(actionable);payload 含K线窗/答案/白名单对照讲解。
+w2s_quiz_questions = Table(
+    "w2s_quiz_questions",
+    metadata,
+    Column("decision_date", Date, primary_key=True),   # 入场日(决策日)
+    Column("vt_symbol", String(32), primary_key=True),
+    Column("year", String(4), nullable=False),
+    Column("month", String(7), nullable=False),        # YYYY-MM 切片键
+    Column("seq", Integer, nullable=False),            # 月内题号(匿名题干用)
+    Column("name", String(80), nullable=False),
+    Column("group_key", String(8), nullable=False),
+    Column("point", String(8), nullable=False),        # 组key;—=不该买(白名单外)
+    Column("ret_pct", Float, nullable=True),           # 板留断走收益(判分用)
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("rules_version", String(80), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
+)
+Index("ix_w2s_quiz_questions_month", w2s_quiz_questions.c.month)
+
 # 盘中触发信号:与池同主键,状态机随扫描推进;EOD 定版封板/连板/退出。
 # 该表同时是前推交割单(entered 且有 exit 的行),避免双写不一致。
 w2s_signals = Table(
@@ -2416,6 +2437,8 @@ erbo_pool_entries = Table(
     Column("actionable", Boolean, nullable=False, server_default="false"),
     Column("avoid_static", Text, nullable=True),
     Column("cold_market", Boolean, nullable=False, server_default="false"),
+    Column("reb30", Integer, nullable=True),      # 30日内断≥2天再拉回次数(S4 特征源)
+    Column("s4", Boolean, nullable=False, server_default="false"),  # 断过两回精选标记
     Column("prev_close", Float, nullable=True),
     Column("limit_price", Float, nullable=False),
     Column("rules_version", String(80), nullable=False),
@@ -2564,6 +2587,8 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE hpr_pool_entries ALTER COLUMN auction_gate TYPE VARCHAR(64)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS b3_open FLOAT",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS b3_turn FLOAT",
+        "ALTER TABLE erbo_pool_entries ADD COLUMN IF NOT EXISTS reb30 INTEGER",
+        "ALTER TABLE erbo_pool_entries ADD COLUMN IF NOT EXISTS s4 BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",

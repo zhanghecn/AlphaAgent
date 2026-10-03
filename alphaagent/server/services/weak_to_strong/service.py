@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from alphaagent.server.services.weak_to_strong import (
     backtest as backtest_mod,
     contracts,
+    quiz as quiz_mod,
     repository,
 )
 
@@ -248,6 +249,10 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
             run_id, status="failed", stage="失败",
             finished_at=datetime.now(timezone.utc), error=f"{exc.__class__.__name__}: {exc}")
         raise
+    repository.update_rebuild_run(run_id, status="running", stage="题库构建")
+    T, bars = backtest_mod._LAST_T, backtest_mod._LAST_BARS
+    questions = quiz_mod.build_questions(T, bars)
+    quiz_count = repository.save_quiz_questions(quiz_mod.quiz_rules_version(), questions)
     repository.update_rebuild_run(run_id, status="running", stage="写库")
     repository.save_backtest_report(contracts.W2S_RULES_VERSION, payload)
     summary = payload.get("summary") or {}
@@ -257,7 +262,8 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
         message="; ".join(f"{gk}: n={ (summary.get(gk) or {}).get('n') }"
                           for gk in contracts.GROUP_KEYS),
         metrics={"summary": summary,
-                 "anchor_check": payload.get("anchor_check") or {}},
+                 "anchor_check": payload.get("anchor_check") or {},
+                 "quiz": {"count": quiz_count}},
     )
     return payload
 
@@ -354,3 +360,59 @@ def _pct(value: object) -> float | None:
         return round(float(value) * 100, 2) if value is not None else None  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+# ── 答题训练题库 ──
+
+def get_quiz_overview() -> dict[str, object]:
+    """题库年→月分布(前端年份选择/月份格子);版本不符或空表 → unavailable。"""
+    data = repository.load_quiz_overview()
+    months = data.get("months") or []
+    versions = data.get("rules_versions") or []
+    expect = quiz_mod.quiz_rules_version()
+    if not months or versions != [expect]:
+        return {"status": "unavailable", "rules_version": expect,
+                "stored_versions": versions}
+    years: dict[str, list[dict[str, object]]] = {}
+    total = 0
+    for row in months:
+        y = str(row["year"])
+        years.setdefault(y, []).append({
+            "month": str(row["month"]),
+            "total": int(row["total"]),
+            "buy_count": int(row["buy_count"]),
+            "reject_count": int(row["reject_count"]),
+        })
+        total += int(row["total"])
+    return {
+        "status": "ok",
+        "rules_version": expect,
+        "total": total,
+        "years": [{"year": y, "months": ms} for y, ms in sorted(years.items())],
+    }
+
+
+def get_quiz_questions(month: str) -> dict[str, object]:
+    """该月全部题目(含K线窗口/答案/讲解,一次下发;前端本地判分)。"""
+    questions = repository.load_quiz_questions(month)
+    status = repository.quiz_bank_status()
+    expect = quiz_mod.quiz_rules_version()
+    if status.get("rules_versions") != [expect]:
+        return {"status": "unavailable", "rules_version": expect}
+    return {"status": "ok", "month": month, "rules_version": expect,
+            "count": len(questions), "questions": questions}
+
+
+def get_quiz_mixed(year: str | None = None) -> dict[str, object]:
+    """综合挑战卷:五组每组随机2道好票 + 白名单外雷达差票,每次调用重抽、全卷乱序。"""
+    import random
+    expect = quiz_mod.quiz_rules_version()
+    status = repository.quiz_bank_status()
+    if status.get("rules_versions") != [expect]:
+        return {"status": "unavailable", "rules_version": expect}
+    projection = repository.load_quiz_mix_projection(year)
+    keys = quiz_mod.mix_question_keys(projection)
+    questions = repository.load_quiz_questions_by_keys(keys)
+    random.shuffle(questions)
+    return {"status": "ok", "rules_version": expect, "year": year,
+            "count": len(questions), "questions": questions}

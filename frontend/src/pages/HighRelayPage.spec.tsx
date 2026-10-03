@@ -10,6 +10,7 @@ import type { HprLivePayload, HprQuizQuestion } from "@/api/highRelay";
 import { HprLedgerView } from "@/features/highRelay/HprLedgerView";
 import { HprLiveView } from "@/features/highRelay/HprLiveView";
 import { QuizRunner } from "@/features/highRelay/quiz/QuizRunner";
+import { visibleBarsForWidth } from "@/features/highRelay/quiz/QuizKlineChart";
 import { isWrongAnswer, judge, simulateMonth, summarize, quizQuestionId } from "@/features/highRelay/quiz/quizScore";
 import { overwriteAnswer, saveAnswer } from "@/features/highRelay/quiz/quizProgress";
 
@@ -297,9 +298,9 @@ describe("ShortTermResearchPage", () => {
       withProviders(<ShortTermResearchPage />, ["/short-term?research=high-relay"]),
     );
     expect(html).toContain("高位接力");
-    expect(html).toContain("N型补涨打板");
-    expect(html).toContain("潜龙首板");
-    expect(html).toContain("低吸");
+    expect(html).not.toContain("N型补涨打板"); // 2026-10-02 终版下线
+    expect(html).not.toContain("潜龙首板"); // 2026-10-02 全下线
+    expect(html).not.toContain("低吸");
   });
 });
 
@@ -576,6 +577,50 @@ describe("quizScore.isWrongAnswer 错题判定(重练入选条件)", () => {
     expect(isWrongAnswer(QUIZ_HIT_Q, { choice: "reject", score: -5 })).toBe(true);  // bad 踏空
     expect(isWrongAnswer(QUIZ_HIT_Q, { choice: "buy", score: 10 })).toBe(false);   // great
     expect(isWrongAnswer(QUIZ_HIT_Q, undefined)).toBe(false);                      // 未答
+  });
+});
+
+// ── 手机适配(2026-10-01):手机类与桌面恢复位并存;fbb 侧逐字同款断言=双份同步防呆 ──
+
+describe("QuizRunner 手机适配", () => {
+  it("作答态:买/不买手机撑满一行(text-base 大字),桌面恢复 w-40 定宽", () => {
+    const html = renderRunner();
+    expect(html).toContain(
+      "h-11 flex-1 rounded-md bg-rise text-base font-semibold text-white hover:bg-rise/90 md:w-40 md:flex-none md:text-sm",
+    );
+    expect(html).toContain(
+      "h-11 flex-1 rounded-md border text-base font-semibold text-muted-foreground hover:bg-muted/40 md:w-40 md:flex-none md:text-sm",
+    );
+    // 信息面板:手机 2 列收紧列距,sm+ 恢复桌面列距
+    expect(html).toContain("gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 sm:gap-x-6");
+    // 大字号徽章(数字/阴阳字 text-lg)不被适配破坏
+    expect(html).toContain("text-lg leading-none");
+  });
+
+  it("揭示态:下一题手机撑满,桌面恢复右对齐小钮", () => {
+    const html = renderRunner({
+      answers: { [quizQuestionId(QUIZ_HIT_Q)]: { choice: "buy", score: 10 } },
+    });
+    expect(html).toContain(
+      "h-11 w-full rounded-md bg-primary text-base font-semibold text-primary-foreground hover:bg-primary/90 md:h-9 md:w-auto md:px-6 md:text-sm",
+    );
+    expect(html).toContain("flex md:justify-end");
+  });
+
+  it("深链 ?view=quiz 直达答题训练页签(刷新/书签不丢页签)", () => {
+    const html = renderToStaticMarkup(
+      withProviders(<ShortTermResearchPage />, ["/short-term?research=high-relay&view=quiz"]),
+    );
+    expect(html).toContain('id="hpr-view-quiz" type="button" role="tab" aria-selected="true"');
+  });
+});
+
+describe("QuizKlineChart.visibleBarsForWidth 显示窗按容器宽分档", () => {
+  it("375px 手机绘图区→32根,桌面→48根封顶,极窄下限24", () => {
+    expect(visibleBarsForWidth(261)).toBe(32);   // 375px 机扣价格轴后的绘图区
+    expect(visibleBarsForWidth(400)).toBe(48);   // 400/8=50 → 封顶 48
+    expect(visibleBarsForWidth(936)).toBe(48);   // 桌面
+    expect(visibleBarsForWidth(100)).toBe(24);   // 下限兜底
   });
 });
 

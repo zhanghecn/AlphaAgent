@@ -133,10 +133,10 @@ export function FbbQuizView() {
             判断今天触板打不打；答完看后续走势和口诀讲解。
           </span>
           <span className="ml-auto flex items-center gap-3">
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+            <label className="flex cursor-pointer items-center gap-1.5 py-2 text-xs text-muted-foreground md:py-0">
               <input
                 type="checkbox"
-                className="h-3.5 w-3.5"
+                className="h-4 w-4 md:h-3.5 md:w-3.5"
                 checked={showName}
                 onChange={(e) => setShowName(e.target.checked)}
               />
@@ -144,7 +144,7 @@ export function FbbQuizView() {
             </label>
             <button
               type="button"
-              className="text-xs text-muted-foreground hover:text-foreground"
+              className="py-2.5 text-xs text-muted-foreground hover:text-foreground md:py-0"
               onClick={() => setAnswers(resetAll(rulesVersion))}
             >
               重置全部进度
@@ -157,7 +157,7 @@ export function FbbQuizView() {
               key={y.year}
               type="button"
               className={cn(
-                "rounded-md border px-3 py-1 text-xs",
+                "rounded-md border px-3 py-2 text-xs md:py-1",
                 y.year === activeYear
                   ? "border-primary bg-primary/10 font-semibold text-primary"
                   : "text-muted-foreground hover:bg-muted/40",
@@ -179,7 +179,7 @@ export function FbbQuizView() {
           </span>
           <button
             type="button"
-            className="ml-auto h-8 rounded-md bg-primary px-4 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+            className="ml-auto h-11 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground hover:bg-primary/90 md:h-8 md:text-xs"
             onClick={() => setMixedNonce((n) => (n ?? 0) + 1)}
           >
             开始挑战
@@ -240,7 +240,7 @@ function MixYearChip({
     <button
       type="button"
       className={cn(
-        "rounded-md border px-2.5 py-0.5 text-[11px]",
+        "rounded-md border px-2.5 py-2 text-[11px] md:py-0.5",
         active
           ? "border-primary bg-primary/10 font-semibold text-primary"
           : "text-muted-foreground hover:bg-muted/40",

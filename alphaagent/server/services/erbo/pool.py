@@ -44,7 +44,25 @@ def derive_features(bars: pd.DataFrame) -> pd.DataFrame:
     bars["lim30"] = g["is_lim"].transform(lambda s: s.rolling(30).sum()).shift(1)
     bars["yy"] = np.where(bars["pc"] < bars["pc2"], "阴", "阳")
     bars["last_open"] = (bars["po"] / bars["pc2"] - 1) * 100
+    bars["rebreak30"] = _rebreak30(bars)
     return bars
+
+
+def _rebreak30(bars: pd.DataFrame) -> pd.Series:
+    """30日内「涨停→断≥2天→再涨停」已完成次数(截至昨日,回测/池同一实现)。
+
+    S4 标记的特征源:庄家断板洗盘再拉的手法已重复次数——
+    ≥2 = 手法验证过(36笔胜72%),=1 = 波段只反包过一回(毒票集中区)。
+    """
+    s = bars["is_lim"].astype(int)
+    non_lim = 1 - s
+    # 连续非涨停天数:以「涨停日」为界分段累计(双键含 sid 防跨票污染)
+    norestk = non_lim.groupby(
+        [bars["sid"], s.groupby(bars["sid"]).cumsum()]).cumsum()
+    prev_norestk = norestk.groupby(bars["sid"]).shift(1)
+    rebreak_f = ((s == 1) & (prev_norestk >= 2)).astype(int)
+    return (rebreak_f.groupby(bars["sid"]).transform(lambda x: x.rolling(30).sum())
+            .groupby(bars["sid"]).shift(1))
 
 
 def _struct_ok(d: pd.DataFrame) -> pd.Series:
@@ -105,6 +123,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         point = contracts.tag_point(last_open)
         dead = contracts.dead_open_reason(last_open)
         actionable = point != "—"
+        reb30 = int(r["rebreak30"]) if r["rebreak30"] == r["rebreak30"] else 0
         if actionable:
             act += 1
         entries.append({
@@ -121,6 +140,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "level": contracts.POINT_LEVELS.get(point, "—"),
             "actionable": actionable,
             "avoid_static": dead,
+            "reb30": reb30,
+            "s4": bool(actionable and reb30 >= contracts.REBREAK_MIN),
             "prev_close": round(float(r["pc"]), 2),
             "limit_price": round(float(r["limit_price"]), 2),
         })
@@ -133,5 +154,6 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         "mkt_lim_tm1": mkt_lim_tm1,
         "entries": entries,
         "filter_stats": {"struct_n": len(entries), "actionable": act,
-                         "dead": len(entries) - act},
+                         "dead": len(entries) - act,
+                         "s4": sum(1 for e in entries if e["s4"])},
     }
