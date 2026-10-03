@@ -8,7 +8,9 @@
   开盘≥9.5% 顶格一律不命中=正常开盘口径)
 - 收益主算法(E0/锚点口径) = 持有到首次不再涨停日收盘,15 个交易日兜底;
   胜率 = 次日收盘收益≥0(研究「好票」口径:炸板次日涨回=好票,恰平也算);未完不进统计
-- 产品卖出纪律(E3) = 买入日没封住→当天走;封住→E0;退出价=(退出日最高+最低)/2中间价(v4.1起)
+- 产品卖出纪律(E3) = 买入日没封住→次日走;封住→E0;v6.5 退出价=退出日收盘价
+  (去 v4.3 中间价美化:尾盘 14:57 只有收盘价),收盘跌停仅一字死封顺延(v6.7:其余按
+  跌停价卖出——跌停日69%是水上回落封,封死前有出走机会);v6.4 增 D+2 深开竞价卖
 - 执行口径 = E0(持有到断板,收盘) vs E3(炸板当日走/封住→E0,退出日中间价)对比;
   链式方案无首刻过滤(研究口径=触板即买),触板时刻表不再参与判定
 统计口径: avg_pct=次日收%均值;win=次日收%≥0占比(=研究好票率);bw_pct=持有到断板均值;
@@ -73,10 +75,16 @@ def assemble_report(E: pd.DataFrame) -> dict[str, object]:
         "coverage": coverage,
         "caliber": ("日线口径:昨日恰好2/3连板,当日最高价触涨停价(=昨收×1.10)按涨停价买,"
                     "一字全天不开排除(T字可买);E0=持有到首次断板日收盘(15日兜底,锚点口径),"
-                    "E3=炸板当日走/封住→E0,退出价=(退出日高+低)/2中间价;胜率=次日收盘收益≥0;"
+                    "E3=炸板次日走/封住→断板日,退出价=退出日收盘价(尾盘只有收盘价);"
+                    "收盘跌停仅全天一字死封顺延次日开盘,其余按跌停价卖出(v6.7:跌停日"
+                    "69%是水上回落封,封死前有走的机会);"
+                    "v6.4:D+1封住后D+2开盘≤-5%集合竞价直接卖(高位出货车,不等断板确认);"
+                    "胜率=次日收盘收益≥0;"
                     "无滑点,日线未复权。池=昨日2/3连板全量(雷达),出手=链式七方案命中(正常开盘口径)。"
                     "双口径(v6.1):点成绩/锚点=全信号研究口径;净值曲线/交割单收益汇总=可执行口径"
-                    "(同票持仓未退时的新信号不成交,交割单保留行并标注)。"),
+                    "(同票持仓未退时的新信号不成交,交割单保留行并标注)。"
+                    "C2先手小阳腿(v6.2):首板前日涨1~3%×三板开<7不命中,三开≥7强开链照打。"
+                    "A2前10日腿(v6.3):首板前10个交易日涨幅≥10%(近端透支)不命中,阳组专属。"),
         "group4_labels": contracts.GROUP4_LABELS,
         "point_labels": contracts.POINT_LABELS,
         "point_levels": contracts.POINT_LEVELS,
@@ -156,7 +164,9 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
         point = pool_mod.tag_point(
             group4, rec.get("b1_open"), rec.get("b2_open"),
             rec.get("b3_open"), auction_pct=buy_open, b2_turn=rec.get("b2_turn"),
-            b3_turn=rec.get("b3_turn"))
+            b3_turn=rec.get("b3_turn"), foundation_chg=rec.get("foundation_chg"),
+            pre10_pct=rec.get("pre10_pct"),
+            foundation_ma20=rec.get("foundation_ma20_gap"))
         avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
                                       rec.get("b2_open"), rec.get("pre3_pct"))
         sealed = bool(cols["is_lim"][i])
@@ -184,14 +194,53 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
         # 中间价保底,收盘更高按实际收盘算(尾盘卖出≈收盘价,可执行不吃亏);
         # 判别器不稀释(口诀-miss均收差9.58→9.77)。v4.2=T+1:封住→断板日,
         # 炸板→次日(当天卖不了),一字跌停锁死(高=低全天一价)顺延首个开板日。
+        # v6.4 卖出纪律升级(主人2026-10-03拍板,十方案保守口径对比唯一不降均值
+        # 还减大亏): D+1 封住后, D+2 开盘≤-5%(高位出货车, 触发样本0%回封62%砸停)
+        # → 集合竞价直接卖(开盘价), 不等断板确认(理想口径-0.08微损换保守口径
+        # +0.10+大亏25→23, 欢瑞/国芳类跌停顺延连环坑被救回7~12点/笔)。
+        def _defer(k0: int, dn_close: float) -> tuple[float, int | None, str]:
+            """收盘≈跌停(容差1分):排队卖不出,顺延次日开盘卖(一字跌停续顺延,15日兜底)。"""
+            pc = dn_close
+            for j in range(k0 + 1, MAX_K + 1):
+                jo = float(bars[f"n{j}_open"].iat[i])
+                if jo != jo:
+                    break
+                jh = float(bars[f"n{j}_high"].iat[i])
+                jl = float(bars[f"n{j}_low"].iat[i])
+                jc = float(bars[f"n{j}_close"].iat[i])
+                if jo == jh == jl == jc and (jc / pc - 1) <= -0.095:
+                    pc = jc
+                    continue
+                return float(jo), i + j, "limit_down_defer"
+            return dn_close, i + k0, "limit_down_locked"
+
         if sealed:
-            if hold_days is not None:
-                e3h = bars[f"n{hold_days}_high"].iat[i]
-                e3l = bars[f"n{hold_days}_low"].iat[i]
-                exit_e3 = max(float(exit_e0), (float(e3h) + float(e3l)) / 2)
-                e3_date = exit_idx
+            d2o = bars["n2_open"].iat[i]
+            d1c = bars["n1_close"].iat[i]
+            if (hold_days is not None and hold_days >= 2 and d2o == d2o
+                    and d1c == d1c and (d2o / d1c - 1) <= -0.05):
+                exit_e3, e3_date = float(d2o), i + 2
+                e3_reason = "d2_deep_open_sell"
+            elif hold_days is not None:
+                # v6.5 退出价=断板日收盘价(去 v4.3 中间价美化:尾盘卖出≈收盘价,
+                # 中间价是拿不到的纸面,171 笔里 49 笔收盘在下半区虚高~1点/笔均值;
+                # 主人 2026-10-03 定调收盘价评估);收盘≈跌停→顺延次日开盘
+                exit_e3, e3_date = float(exit_e0), exit_idx
                 e3_reason = ("next_close_fail" if hold_days == 1 else
                              ("max_hold_close" if capped else "break_close"))
+                hd0 = int(hold_days)
+                prev0 = (float(bars[f"n{hd0 - 1}_close"].iat[i]) if hd0 > 1
+                         else float(bars["limit_price"].iat[i]))
+                # v6.7: 仅一字死封(全天一价跌停)才顺延; 其余收盘跌停按跌停价计
+                # (跌停日 69% 是水上回落封, 封死前用户有出走机会, 主人 2026-10-03
+                # 定调按跌停价卖出——排队/尾盘割肉都能拿到跌停价附近)
+                k0o = float(bars[f"n{hd0}_open"].iat[i])
+                k0h = float(bars[f"n{hd0}_high"].iat[i])
+                k0l = float(bars[f"n{hd0}_low"].iat[i])
+                if (float(exit_e0) <= prev0 * 0.905 + 0.011
+                        and k0o == k0h and k0h == k0l
+                        and abs(k0o - float(exit_e0)) <= 0.011):
+                    exit_e3, e3_date, e3_reason = _defer(hd0, float(exit_e0))
             else:  # 数据尾部未完(封住但后续日线未出):保持 NaN/None
                 exit_e3, e3_date, e3_reason = np.nan, None, None
         else:
@@ -207,8 +256,9 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
                 locked = ko == kc == kh == kl and (kc / prev_c - 1) <= -0.095
                 prev_c = kc
                 if locked:
-                    continue  # 一字跌停锁死:排队也卖不掉,顺延
-                exit_e3 = max(kc, (kh + kl) / 2)
+                    continue  # 一字跌停锁死:排队也卖不掉,顺延(v6.7 仅此顺延)
+                # v6.7: 非一字跌停收盘按跌停价计(封死前用户有走的机会)
+                exit_e3 = float(kc)
                 e3_date = i + k
                 e3_reason = "break_day_close"
                 break
@@ -257,6 +307,8 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "b2换手%": rec.get("b2_turn"),
             "b3换手%": rec.get("b3_turn"),
             "前20日涨幅%": rec.get("pre20_pct"),
+            "前10日涨幅%": rec.get("pre10_pct"),
+            "地基距MA20%": rec.get("foundation_ma20_gap"),
             "换手梯度": rec["turn_grad"],
             "昨日涨停家数": int(cols["mkt_prev"][i]) if cols["mkt_prev"][i] == cols["mkt_prev"][i] else None,
         })
@@ -320,24 +372,24 @@ def _monthly(e: pd.DataFrame) -> list[dict[str, object]]:
 
 
 def _curve(e: pd.DataFrame) -> list[dict[str, object]]:
-    """逐笔等权累计收益曲线(每笔固定 1 单位,按入场日汇总后累加,不复利)。
-    可执行口径(v6.1):同票持仓重叠笔不成交,不进曲线。"""
+    """逐笔等权累计收益曲线(每笔固定 1 单位,按入场日汇总后累加,不复利;v6.5 起=E3
+    卖出纪律口径)。可执行口径(v6.1):同票持仓重叠笔不成交,不进曲线。"""
     e = e[~e["同票持仓重叠"].astype(bool)]
     if not len(e):
         return []
-    daily = e.dropna(subset=["持有到断板%"]).groupby(
-        e["买入日"].dt.date)["持有到断板%"].sum().sort_index()
+    daily = e.dropna(subset=["E3%"]).groupby(e["买入日"].dt.date)["E3%"].sum().sort_index()
     cum = daily.cumsum()
     return [{"date": d.isoformat(), "cum_pct": round(float(v), 2)} for d, v in cum.items()]
 
 
 def _yearly_totals(e: pd.DataFrame) -> list[dict[str, object]]:
-    """方案合计的一年总收益(单笔平均/年累计等权/年复利理论上限)。"""
+    """方案合计的一年总收益(单笔平均/年累计等权/年复利理论上限;v6.5 起=E3卖出
+    纪律口径=实盘预期,不再用E0研究口径)。"""
     if not len(e):
         return []
     out = []
     for y, g_ in e.groupby("年"):
-        r = g_["持有到断板%"].dropna()
+        r = g_["E3%"].dropna()
         out.append({"year": y, "n": int(len(g_)),
                     "avg_pct": round(float(r.mean()), 2) if len(r) else None,
                     "sum_pct": round(float(r.sum()), 1),
@@ -369,9 +421,9 @@ def _execution_caliber(done: pd.DataFrame) -> dict[str, object]:
                 "yearly": yearly}
 
     return {
-        "caliber": ("E0=持有到断板(研究锚点口径,收盘);E3=炸板当日走/封住→E0,"
-                    "退出价=退出日(高+低)/2中间价(v4.1);可执行口径=同票 E3 持仓未退时"
-                    "的新信号不成交(轻仓一票一份,v6.1)"),
+        "caliber": ("E0=持有到断板(研究锚点口径,收盘);E3=炸板次日走/封住→断板日,"
+                    "退出价=退出日收盘价,收盘≈跌停排队卖不出→顺延次日开盘(v6.5);"
+                    "可执行口径=同票 E3 持仓未退时的新信号不成交(轻仓一票一份,v6.1)"),
         "subsets": [
             row("方案命中全部·E0", hit),
             row("方案命中全部·E3", hit),

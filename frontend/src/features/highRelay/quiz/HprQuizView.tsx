@@ -133,10 +133,10 @@ export function HprQuizView() {
             判断买不买；答完看后续走势和口诀讲解。
           </span>
           <span className="ml-auto flex items-center gap-3">
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+            <label className="flex cursor-pointer items-center gap-1.5 py-2 text-xs text-muted-foreground md:py-0">
               <input
                 type="checkbox"
-                className="h-3.5 w-3.5"
+                className="h-4 w-4 md:h-3.5 md:w-3.5"
                 checked={showName}
                 onChange={(e) => setShowName(e.target.checked)}
               />
@@ -144,7 +144,7 @@ export function HprQuizView() {
             </label>
             <button
               type="button"
-              className="text-xs text-muted-foreground hover:text-foreground"
+              className="py-2.5 text-xs text-muted-foreground hover:text-foreground md:py-0"
               onClick={() => setAnswers(resetAll(rulesVersion))}
             >
               重置全部进度
@@ -157,7 +157,7 @@ export function HprQuizView() {
               key={y.year}
               type="button"
               className={cn(
-                "rounded-md border px-3 py-1 text-xs",
+                "rounded-md border px-3 py-2 text-xs md:py-1",
                 y.year === activeYear
                   ? "border-primary bg-primary/10 font-semibold text-primary"
                   : "text-muted-foreground hover:bg-muted/40",
@@ -179,7 +179,7 @@ export function HprQuizView() {
           </span>
           <button
             type="button"
-            className="ml-auto h-8 rounded-md bg-primary px-4 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+            className="ml-auto h-11 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground hover:bg-primary/90 md:h-8 md:text-xs"
             onClick={() => setMixedNonce((n) => (n ?? 0) + 1)}
           >
             开始挑战
@@ -220,7 +220,7 @@ export function HprQuizView() {
         月内分「打3板」「打4板」两段，题目每次进入乱序（防背答案）；
         答错的题（没按口诀的）可在段末反复乱序重练直到答对。综合挑战卷与月题共享进度（同一题只答一次）。
         今开≥9.5顶格票开盘即涨停买不到，
-        不出题。收益=E3卖出纪律口径：退出价=max(收盘价, (最高+最低)/2)，炸板次日走（T+1合规）；
+        不出题。收益=E3卖出纪律口径：退出价=退出日收盘价（跌停顺延次日开盘），炸板次日走（T+1合规）；
         K线未复权；主力心理为事后合理解释而非实证。题库版本 {rulesVersion}。
       </p>
     </div>
@@ -240,7 +240,7 @@ function MixYearChip({
     <button
       type="button"
       className={cn(
-        "rounded-md border px-2.5 py-0.5 text-[11px]",
+        "rounded-md border px-2.5 py-2 text-[11px] md:py-0.5",
         active
           ? "border-primary bg-primary/10 font-semibold text-primary"
           : "text-muted-foreground hover:bg-muted/40",

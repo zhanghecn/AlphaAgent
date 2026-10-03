@@ -5,9 +5,10 @@
   miss 口径一致。q4 起顶格票(今开≥9.5)不再出题:一字开盘排队也买不到,「买」这个
   选项现实中不存在,上千道送分废题只会稀释训练(主人2026-09-28拍板:「一字不是选
   不了么」);「开盘≥9.5一律不打」作为硬规则留在规则页,不占用题目。
-- 收益 = E3%(产品卖出纪律,T+1合规:炸板→次日走(一字跌停顺延),封住→断板日,15日兜底;
-  退出价=max(退出日收盘,(高+低)/2)(v4.3,主人拍板:中间价保底,收盘更高按实际算),
-  与交割单同口径;A3/B2 低吸类回测统一按触板价买入计(实盘低开买成本更低)。
+- 收益 = E3%(产品卖出纪律,T+1合规:炸板→次日走,封住→断板日,15日兜底;
+  退出价=退出日收盘价(尾盘只有收盘价;收盘跌停仅一字死封顺延,其余按跌停价
+  卖出——v6.7),与交割单同口径;A3/B2 低吸类回测统一按触板价买入计
+  (实盘低开买成本更低)。
 - K线 = 未复权日线(与回测同口径,除权日可见跳空,题卡页脚注明)。
 
 版本纪律:讲解文案/题库结构变更必升 QUIZ_CONTENT_VERSION;版本串进表/进API/进前端
@@ -19,7 +20,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 19  # v19:编号手术v6.0(E1→C2/E2拆A3+B3)题库scheme_no重物化;持有纪律同v18
+QUIZ_CONTENT_VERSION = 25  # v25:跌停口径修正(hpr-v6.7):仅一字死封顺延,其余按跌停价卖出;# v24:弱票三口诀加地基腿(hpr-v6.6):A3/B2/B3地基距MA20<5%不命中;# v23:退出价口径升级(hpr-v6.5):E3改纯收盘价+跌停顺延,去v4.3中间价美化(尾盘只有收盘价);收益列随v6.5重算
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -95,13 +96,18 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
         b1_open, b2_open, b3_open = _f(r["b1开盘%"]), _f(r["b2开盘%"]), _f(r["b3开盘%"])
         b2_turn, b3_turn = _f(r["b2换手%"]), _f(r["b3换手%"])
         pre20 = _f(r["前20日涨幅%"])
+        pre10 = _f(r["前10日涨幅%"])
+        foundation_chg = _f(r["地基涨跌%"])
         ret = _f(r["E3%"])
         d_date = pd.Timestamp(r["买入日"]).date()
 
         # 命中自检:E 是当次回放产物,point 必须与当前 tag_point 一致(防 contracts 漂移)
         recalc = pool_mod.tag_point(group4, b1_open, b2_open, b3_open,
                                     auction_pct=buy_open,
-                                    b2_turn=b2_turn, b3_turn=b3_turn)
+                                    b2_turn=b2_turn, b3_turn=b3_turn,
+                                    foundation_chg=foundation_chg,
+                                    pre10_pct=pre10,
+                                    foundation_ma20=_f(r["地基距MA20%"]))
         if recalc != point:
             raise RuntimeError(
                 f"题库构建自检失败:{r['名称']} {d_date} E标={point} 重算={recalc}")
@@ -127,12 +133,16 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                 n_board=n_board, yang=yang, group4=group4,
                 b1_open=b1_open, b2_open=b2_open, b3_open=b3_open,
                 b2_turn=b2_turn, b3_turn=b3_turn,
-                buy_open=buy_open, pre20_pct=pre20)
+                buy_open=buy_open, pre20_pct=pre20,
+                foundation_chg=foundation_chg, pre10_pct=pre10,
+                foundation_ma20=_f(r["地基距MA20%"]))
             # 阴阳反串:链形完整命中对面地基组的某条口诀(跨阴阳铁律陷阱,
             # 教学标签最鲜明,覆盖 near/toxic/plain),讲解首位说明
             opp_point = pool_mod.tag_point(
                 _OPPOSITE_GROUP4[group4], b1_open, b2_open, b3_open,
-                auction_pct=buy_open, b2_turn=b2_turn, b3_turn=b3_turn)
+                auction_pct=buy_open, b2_turn=b2_turn, b3_turn=b3_turn,
+                foundation_chg=foundation_chg, pre10_pct=pre10,
+                foundation_ma20=_f(r["地基距MA20%"]))
             if opp_point != "—":
                 trap_kind = "yin_yang"
                 opp_yang = "阳" if _OPPOSITE_GROUP4[group4].endswith("阳") else "阴"
@@ -157,7 +167,7 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                 "board_label": f"打{n_board + 1}板",
                 "b1_open": b1_open, "b2_open": b2_open, "b3_open": b3_open,
                 "b2_turn": b2_turn, "b3_turn": b3_turn,
-                "pre20_pct": pre20,
+                "pre20_pct": pre20, "pre10_pct": pre10,
                 "auction_pct": buy_open,
                 "prev_close": round(float(b_close[i - 1]), 2),
                 "limit_price": _f(r["买价"]),
@@ -199,7 +209,8 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
 
 def explain_miss(*, n_board: int, yang: bool, group4: str,
                  b1_open, b2_open, b3_open, b2_turn, b3_turn,
-                 buy_open: float, pre20_pct) -> tuple[list[str], str]:
+                 buy_open: float, pre20_pct, foundation_chg=None,
+                 pre10_pct=None, foundation_ma20=None) -> tuple[list[str], str]:
     """未命中题的「为什么不该买」:按优先级产 1~3 条人话理由(全部正常中文)。
     返回 (reasons, trap_kind):toxic=毒段规则命中/near=形态接近(链全符差条件)/
     plain=链形不沾边;yin_yang(阴阳反串)由 build_questions 单独判定覆盖。"""
@@ -218,6 +229,13 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
         if pre20_pct is not None and 5 <= pre20_pct <= 15:
             reasons.append(f"阳组半山腰:首板前20日已涨{_pct(pre20_pct)},5~15是最毒档"
                            "(获利盘蹲在半山腰,接二板=接别人的第二波出货)")
+        # 3b. 前10日透支(v6.3 A2 腿):近10日急拉≥10%的高位一字=末段冲刺,
+        # 阳组专属毒(阴组同形态反向肥——阴地基的近期涨幅是洗后启动初期)
+        if pre10_pct is not None and pre10_pct >= 10 and 7 <= buy_open < 8.5:
+            reasons.append(
+                f"首板前10个交易日已涨{_pct(pre10_pct)}(≥10%):近端涨幅透支,"
+                "这时的一字板是高位末段冲刺不是锁仓启动——一字转强不能打"
+                "(此毒阳组专属:阴地基的近期涨幅是洗完刚启动,同形态反而肥)")
         # 4/5. 二板死段/剧强段(阳组研究结论)
         if b2_open is not None and 1 <= b2_open < 3:
             reasons.append(f"二板开{_pct(b2_open)}落在1~3死段:阳组换手大小都救不动,"
@@ -230,18 +248,19 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
         # 是锁仓没换手的另一形态,不是B4的「强开」(主人点名:走强上限必须讲清楚)
         if b2_open is not None and b2_open >= 9.5:
             reasons.append(
-                f"二板开{_pct(b2_open)}是一字开盘,不是强开系续强档的「强开」:口诀的强开是7~8.5"
-                "(强而换手充分,11笔82%/+12.3);一字开盘=获利盘锁在里面没换手,"
-                "阴地基接三板只是抛硬币(58笔50%/+0.8,和不挑就买一样),"
-                "8.5~9.5剧强段更毒(6笔33%/-1.6)")
+                f"口诀【B1·强开系·续强】「二板开7~8.5(一字开盘≥9.5不算)、"
+                f"今天开6~9.5、一板不限」——这题二板开{_pct(b2_open)}是一字开盘,"
+                "口诀明写不算:一字=获利盘锁在里面没换手,阴地基接三板只是抛硬币"
+                "(58笔50%/+0.8,和不挑就买一样)")
         # 阴组二板温吞段:一板低开×今开低开看着像捡尸(三低),但二板平开/微红
         # 不算低开——10笔30%/-1.7比不挑就买还烂(数据口径:一板<0×今开<0的阴地基)
         if (b1_open is not None and b1_open < 0
                 and b2_open is not None and 0 <= b2_open < 2
                 and buy_open < 0):
             reasons.append(
-                f"二板开{_pct(b2_open)}是平开/微红,不是低开:捡尸要一板、二板、"
-                "今天三个开盘都严格低开(<0),缺一不可;数据上二板0~2温吞段"
+                f"口诀【B2·捡尸】「二板开<0或2~3、今天开<0、一板开<0」"
+                f"——这题二板开{_pct(b2_open)}是平开/微红,不在口诀窗:"
+                "捡尸要三个开盘都严格低开(<0),缺一不可;二板0~2温吞段"
                 "10笔仅30%/-1.7,比不挑就买还烂——平开的票没有恐慌割肉盘也没有"
                 "承接资金,不上不下最毒")
     if n_board == 3:
@@ -251,32 +270,50 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
         if b3_turn is not None and 5 <= buy_open < contracts.TODAY_CAP:
             if is_yizi:
                 if not (3 <= b3_turn < 5):
-                    reasons.append(f"三板换手{b3_turn:.1f}:一字系(锁仓板)的换手窗是3~5,"
-                                   "四板便捷版一字系档不能打")
+                    reasons.append(f"口诀【C2·四板便捷·一字系档】「一字系(二板或三板一字)"
+                                   f"——三板换手3~5、今天开6~9.5」"
+                                   f"——这题三板换手{b3_turn:.1f}不在3~5,不能打")
                 elif buy_open < 6:
-                    reasons.append(f"一字系换手{b3_turn:.1f}在3~5但今开{_pct(buy_open)}<6:"
-                                   "温吞=让利没人接(5~6段全灭),四板便捷版一字系档须今开6~9.5")
+                    reasons.append(f"口诀【C2·四板便捷·一字系档】「一字系(二板或三板一字)"
+                                   f"——三板换手3~5、今天开6~9.5」"
+                                   f"——这题换手{b3_turn:.1f}虽在3~5,今开{_pct(buy_open)}<6"
+                                   "温吞=让利没人接(5~6段全灭),不能打")
             elif b3_turn < 10:
-                reasons.append(f"三板换手{b3_turn:.1f}不在10~20:换手不足=没人气的假强缩量板,"
-                               "四板便捷版(三板换手10~20、今开5~9.5直接打)不能打")
+                reasons.append(f"口诀【C2·四板便捷】「三板换手10~20、今天开5~9.5、不分阴阳」"
+                               f"——这题三板换手{b3_turn:.1f}不在10~20:"
+                               "换手不足=没人气的假强缩量板,不能打")
             elif b3_turn >= 20:
-                reasons.append(f"三板换手{b3_turn:.1f}≥20:主力对倒出货,"
-                               "四板便捷版(三板换手10~20、今开5~9.5直接打)不能打")
+                reasons.append(f"口诀【C2·四板便捷】「三板换手10~20、今天开5~9.5、不分阴阳」"
+                               f"——这题三板换手{b3_turn:.1f}不在10~20:主力对倒出货,不能打")
         # 7. 今开温吞毒段(换手合格但开得不冷不热)
         if (b3_turn is not None and 10 <= b3_turn < 20
                 and 6 <= buy_open < 7):
-            reasons.append(f"今开{_pct(buy_open)}落在6~7温吞段:不冷不热,四板便捷版体系内"
-                           "也可以跳过的38%毒段(金核在7~8.5)")
+            reasons.append(f"口诀【C2·四板便捷】「三板换手10~20、今天开5~9.5、不分阴阳」"
+                           f"——这题今开{_pct(buy_open)}落在6~7温吞段:不冷不热,"
+                           "口诀窗内也可以跳过的38%毒段(金核在7~8.5)")
+        # 8. 先手小阳×三板温开(v6.2):首板前一天有人先手拉过1~3个点,
+        # 三板还温着(<7)没人接=半路残局;三板强开(≥7)是主力连续行为照打
+        if (foundation_chg is not None and 1 <= foundation_chg < 3
+                and b3_open is not None and b3_open < 7
+                and 5 <= buy_open < contracts.TODAY_CAP):
+            reasons.append(
+                f"口诀【C2·四板便捷】「先手小阳不碰——首板前日涨1~3%、且三板开<7"
+                f"(三板强开≥7照打)」——这题首板前日涨{_pct(foundation_chg)}×"
+                f"三板开{_pct(b3_open)}温着没人接=半路残局,不能打")
     if reasons:
         return reasons[:3], "toxic"
-    # 8. 兜底:形态接近(链全符差条件) 或 链形不沾边(含本组口诀清单),恒非 None
+    # 9. 兜底:形态接近(链全符差条件) 或 链形不沾边(含本组口诀清单),恒非 None
     nearest, near_hit = _nearest_scheme_line(group4, b1_open, b2_open, b3_open,
-                                             b2_turn, b3_turn, buy_open)
+                                             b2_turn, b3_turn, buy_open,
+                                             foundation_chg, pre10_pct,
+                                             foundation_ma20)
     return [nearest, _MISS_WIN_LINE], ("near" if near_hit else "plain")
 
 
 def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
-                         b2_turn, b3_turn, buy_open: float) -> tuple[str, bool]:
+                         b2_turn, b3_turn, buy_open: float,
+                         foundation_chg=None, pre10_pct=None,
+                         foundation_ma20=None) -> tuple[str, bool]:
     """「为什么不买」的兜底讲解(复刻 tag_point 判定收集明细,只讲解不打标)。
     返回 (文案, 是否形态接近)。
 
@@ -316,6 +353,21 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
         if vol3 is not None and (b3_turn is None
                                  or not (vol3[0] <= b3_turn < vol3[1])):
             fails.append(f"三板换手{_num(b3_turn)},口诀要求{_fmt_range(vol3)}")
+        blk = s.get("block_foundation_chg")
+        if blk is not None:
+            blo, bhi, bcap = blk
+            if (foundation_chg is not None and b3_open is not None
+                    and blo <= foundation_chg < bhi and b3_open < bcap):
+                fails.append(f"首板前日涨{_pct(foundation_chg)}先手小阳×三板开"
+                             f"{_pct(b3_open)}温着(<{bcap:g})=半路残局,不能打")
+        bp10 = s.get("block_pre10")
+        if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
+            fails.append(f"首板前10日已涨{_pct(pre10_pct)}(≥{bp10:g}):近端透支,"
+                         "高位一字是末段冲刺,不能打")
+        bfm = s.get("block_foundation_ma20")
+        if bfm is not None and foundation_ma20 is not None and foundation_ma20 < bfm:
+            fails.append(f"地基距20日线{_pct(foundation_ma20)}(<{bfm:g}):弱票低位接"
+                         "必须接有人做过的,地基贴线的弱票没人要,不能打")
         lo, hi = s["today"]  # type: ignore[misc]
         if not (lo <= buy_open < hi):
             fails.append(f"今开{_pct(buy_open)},口诀要求{_fmt_range((lo, hi))}")
@@ -323,7 +375,7 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
             continue  # 全过=与 tag_point 的 miss 结论矛盾(不该发生),不展示
         score = -len(fails)
         if best is None or score > best[0]:
-            best = (score, f"形态接近口诀【{s['name']}:{s['desc']}】——"
+            best = (score, f"形态接近口诀【{s['no']}·{s['name']}:{s['desc']}】——"
                            f"这题{';'.join(fails[:2])},不能打")
     if best is not None:
         return best[1], True

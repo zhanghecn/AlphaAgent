@@ -157,7 +157,10 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
                     str(entry.get("group4")), entry.get("b1_open"),
                     entry.get("b2_open"), entry.get("b3_open"),
                     auction_pct=auction_pct,
-                    b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"))
+                    b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
+                    foundation_chg=entry.get("foundation_chg"),
+                    pre10_pct=entry.get("pre10_pct"),
+                    foundation_ma20=entry.get("foundation_ma20_gap"))
                 if real_point != str(entry.get("point")):
                     patch["point"] = real_point
                     patch["level"] = contracts.POINT_LEVELS.get(real_point, "—")

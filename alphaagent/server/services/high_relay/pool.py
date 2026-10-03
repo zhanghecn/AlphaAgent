@@ -91,6 +91,7 @@ def derive_daily(bars: pd.DataFrame) -> pd.DataFrame:
     bars["h60"] = g["high_price"].transform(lambda s: s.rolling(60, min_periods=20).max())
     bars["l60"] = g["low_price"].transform(lambda s: s.rolling(60, min_periods=20).min())
     bars["c20"] = gc.shift(20)
+    bars["c10"] = gc.shift(10)
     bars["streak_prev"] = g["streak"].shift(1).fillna(0).astype(int)
     # 连板段尾(供前波查询): 当天涨停且第二天不再涨停
     bars["run_end"] = bars["is_lim"] & (~g["is_lim"].shift(-1).fillna(False).astype(bool))
@@ -115,7 +116,7 @@ def make_ctx(bars: pd.DataFrame) -> dict[str, object]:
     cols = {c: bars[c].to_numpy() for c in
             ["close_price", "open_price", "high_price", "low_price", "prev_close",
              "is_lim", "one_word", "streak", "chg", "lshadow", "turnover_rate",
-             "ma5", "ma10", "ma20", "ma30", "h60", "l60", "c20"]}
+             "ma5", "ma10", "ma20", "ma30", "h60", "l60", "c20", "c10"]}
     sid = bars["sid"].to_numpy()
     pos = bars["pos"].to_numpy()
     # 每只票的首行 iloc(同票行连续 → iloc = start + pos)
@@ -161,6 +162,9 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
         if all(x == x for x in ma) else ""
     ma10 = cols["ma10"][f]
     rec["dist_ma10"] = round((fc / ma10 - 1) * 100, 1) if ma10 == ma10 and ma10 > 0 else None
+    ma20f = cols["ma20"][f]
+    rec["foundation_ma20_gap"] = round((fc / ma20f - 1) * 100, 2) \
+        if ma20f == ma20f and ma20f > 0 else None
     # 前波(连板段尾高度≥2 的段,首板之前)
     ends, hts = ctx["run_by"].get(s, (np.array([]), np.array([])))  # type: ignore[attr-defined]
     b1_pos = pos - n_board + 1                     # 首板日 pos
@@ -204,14 +208,25 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     # 首板前20日涨幅(阳组半山腰毒档5~15%判定/答题信息面板用;与 relay_research 同口径)
     c20 = cols["c20"][f]
     rec["pre20_pct"] = round((fc / c20 - 1) * 100, 1) if c20 == c20 and c20 > 0 else None
+    c10 = cols["c10"][f]
+    rec["pre10_pct"] = round((fc / c10 - 1) * 100, 1) if c10 == c10 and c10 > 0 else None
     return rec
 
 
 def tag_point(group4: str, b1_open, b2_open, b3_open,
-              auction_pct=None, b2_turn=None, b3_turn=None) -> str:
-    """打板口诀卡九条打标(hpr-v4.0,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
+              auction_pct=None, b2_turn=None, b3_turn=None,
+              foundation_chg=None, pre10_pct=None,
+              foundation_ma20=None) -> str:
+    """打板口诀卡七条打标(hpr-v6.3,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
     chain = 数值区间半开[lo,hi);vol2/vol3 = 二板/三板换手率窗(缺数据不命中带窗点);
     vol2_when_b1_low = A2 条件换手(一板<3 板弱时二板一字须换手<5,假锁排除);
+    block_foundation_chg = (lo,hi,cap) 条件回避(v6.2 C2):首板前一日涨跌∈[lo,hi)
+    (先手小阳)且三板开<cap(温开) → 不命中;三开≥cap(强开链)照打(保华瓷们);
+    block_pre10 = X 条件回避(v6.3 A2):首板前10个交易日涨幅≥X(近端透支,
+    一字=高位末段冲刺)不命中——阳组专属毒(阴组反向肥,勿通用);
+    block_foundation_ma20 = X 下限回避(v6.6 A3/B2/B3):首板前一日收盘距
+    20日线<X%(地基贴线的弱票=没人要)不命中——弱票低位接口诀专属
+    (与主池打板相反:强票接力的地基贴线=洗盘充分反而肥,勿通用);
     group4 支持 tuple:C1 冒泡转弱阴阳都打,C2 四板便捷不分阴阳(v6.0 七条);
     auction_pct = 今天开盘 %(池计算时未知传 None → 只按链条件打候选标,
     今天开窗由盘中扫描/回测复核;≥9.5 顶格一律不命中)。"""
@@ -242,6 +257,18 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
         if vol3 is not None and (b3_turn is None
                                  or not (vol3[0] <= b3_turn < vol3[1])):
             continue
+        blk = s.get("block_foundation_chg")
+        if blk is not None:
+            blo, bhi, bcap = blk
+            if (foundation_chg is not None and b3_open is not None
+                    and blo <= foundation_chg < bhi and b3_open < bcap):
+                continue  # 先手小阳×三板温开=半路残局(v6.2)
+        bp10 = s.get("block_pre10")
+        if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
+            continue  # 近10日已涨透支=高位一字末段冲刺(v6.3 A2)
+        bfm = s.get("block_foundation_ma20")
+        if bfm is not None and foundation_ma20 is not None and foundation_ma20 < bfm:
+            continue  # 弱票低位接但地基贴线=没人要(v6.6 A3/B2/B3)
         if auction_pct is None:
             return str(s["no"])
         lo, hi = s["today"]
@@ -253,14 +280,16 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
 
 
 def match_schemes(group4: str, b1_open, b2_open, b3_open,
-                  b2_turn=None, b3_turn=None) -> list[dict]:
+                  b2_turn=None, b3_turn=None,
+                  foundation_chg=None, pre10_pct=None,
+                  foundation_ma20=None) -> list[dict]:
     """按链条件(不含今开)定位全部链全过分支,按 SCHEMES 优先级序返回。
 
     多分支口诀(捡尸/便捷一字系档)共享编号,且存在跨方案链重叠
     (C2 链全不限含 A3/B3;B1 链含转温的二板段):该票今天按哪条出手由今开决定,
     盘前出手条件=全部候选分支窗的条件表(今开落在哪窗就按哪条);
     今开定型后归属=tag_point(首窗命中者,与本列表顺序一致)。
-    镜像 tag_point 的链段判定(改任何一处另一处必须同步)。"""
+    镜像 tag_point 的链段判定(改任何一处另一处必须同步,含 block_foundation_chg/block_pre10)。"""
     c = contracts
     out: list[dict] = []
     for s in c.SCHEMES:
@@ -287,6 +316,18 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
         if vol3 is not None and (b3_turn is None
                                  or not (vol3[0] <= b3_turn < vol3[1])):
             continue
+        blk = s.get("block_foundation_chg")
+        if blk is not None:
+            blo, bhi, bcap = blk
+            if (foundation_chg is not None and b3_open is not None
+                    and blo <= foundation_chg < bhi and b3_open < bcap):
+                continue  # 先手小阳×三板温开(v6.2;镜像 tag_point)
+        bp10 = s.get("block_pre10")
+        if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
+            continue  # 近10日涨幅透支(v6.3 A2;镜像 tag_point)
+        bfm = s.get("block_foundation_ma20")
+        if bfm is not None and foundation_ma20 is not None and foundation_ma20 < bfm:
+            continue  # 地基贴线弱票(v6.6 A3/B2/B3;镜像 tag_point)
         out.append(s)
     return out
 
@@ -401,7 +442,10 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         group4 = ("二接三" if n_board == 2 else "三接四") + ("阳" if yang else "阴")
         point = tag_point(group4, rec.get("b1_open"), rec.get("b2_open"),
                           rec.get("b3_open"), b2_turn=rec.get("b2_turn"),
-                          b3_turn=rec.get("b3_turn"))
+                          b3_turn=rec.get("b3_turn"),
+                          foundation_chg=rec.get("foundation_chg"),
+                          pre10_pct=rec.get("pre10_pct"),
+                          foundation_ma20=rec.get("foundation_ma20_gap"))
         avoid = static_avoid(point, group4, rec.get("b1_open"),
                              rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid
@@ -412,7 +456,10 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
         # 被误判 skipped_auction)→ 竞价门=全部候选窗,出手条件=条件表
         branches = match_schemes(group4, rec.get("b1_open"), rec.get("b2_open"),
                                  rec.get("b3_open"), b2_turn=rec.get("b2_turn"),
-                                 b3_turn=rec.get("b3_turn")) if point != "—" else []
+                                 b3_turn=rec.get("b3_turn"),
+                                 foundation_chg=rec.get("foundation_chg"),
+                                 pre10_pct=rec.get("pre10_pct"),
+                          foundation_ma20=rec.get("foundation_ma20_gap")) if point != "—" else []
         wins = [s["today"] for s in branches]
         gate = ",".join(f"today_{w[0]:g}_{w[1]:g}" for w in wins) or None
         prev_close = float(row.close_price)
@@ -451,6 +498,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "turn_grad": rec["turn_grad"],
             "pre3_pct": rec.get("pre3_pct"),
             "pre20_pct": rec.get("pre20_pct"),
+            "pre10_pct": rec.get("pre10_pct"),
+            "foundation_ma20_gap": rec.get("foundation_ma20_gap"),
             "mkt_lim_tm1": int(mkt_prev),
         })
     stats["actionable"] = n_actionable
