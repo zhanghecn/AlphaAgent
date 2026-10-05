@@ -447,6 +447,7 @@ def get_rules() -> dict[str, object]:
         "point_stats": contracts.POINT_STATS,     # 成绩速览(16笔·胜69%·均+12.0)
         "point_boards": contracts.POINT_BOARDS,   # 板位归属(打3板/打4板)
         "rules": contracts.RULES,
+        "cheat_rows": contracts.CHEAT_ROWS,   # 速查表(规则页主表;单一事实源,前端不维护副本)
         "falsified_rules": contracts.FALSIFIED_RULES,
         "risk_notes": contracts.RISK_NOTES,
         "ths_pool_conditions": contracts.THS_POOL_CONDITIONS,

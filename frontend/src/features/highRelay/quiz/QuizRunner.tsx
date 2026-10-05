@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 
 import type { HprQuizQuestion } from "@/api/highRelay";
+import { CheatTableRow } from "@/features/highRelay/CheatTableRow";
 import { cn, formatPct, formatPrice } from "@/lib/utils";
 
 import { QuizKlineChart } from "./QuizKlineChart";
@@ -223,6 +224,12 @@ export function QuizRunner({
       : null;
   // 匿名题干不带题号(乱序后题号无意义,防按序号背答案);时间背景取该题自己的
   // 决策日(综合卷跨月也能正确显示「x年x月」)
+  // 判分红格(q32,主人「哪里不符合标红色」):miss 题判分后按 fail_fields 标红
+  const failSet = new Set<string>(
+    revealed && question.explain.kind === "miss"
+      ? question.explain.fail_fields ?? []
+      : [],
+  );
   const dd = question.decision_date;
   const title = showName
     ? `${question.name} ${question.vt_symbol.split(".")[0]}`
@@ -310,21 +317,23 @@ export function QuizRunner({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-5 sm:gap-x-6 lg:grid-cols-10">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-5 sm:gap-x-6 lg:grid-cols-11">
           {fBar ? (
             <InfoCell
               label={`地基日 ${fBar.d.slice(5)}`}
-              value={fmtSigned(Math.round((fBar.c / fBar.o - 1) * 1000) / 10)}
+              value={fmtSigned(d.foundation_chg ?? Math.round((fBar.c / fBar.o - 1) * 1000) / 10)}
               extra={fBar.c >= fBar.o ? "阳地基" : "阴地基"}
+              fail={failSet.has("地基日")}
             />
           ) : null}
-          <InfoCell label="地基姿态" value={d.foundation_pose ?? "—"} />
-          <InfoCell label="距前涨停高" value={fmtSigned(d.anchor_pos ?? null)} />
-          <InfoCell label="一板开" value={fmtSigned(d.b1_open)} />
+          <InfoCell label="地基姿态" value={d.foundation_pose ?? "—"} fail={failSet.has("地基姿态")} />
+          <InfoCell label="距前涨停高" value={fmtSigned(d.anchor_pos ?? null)} fail={failSet.has("距前涨停高")} />
+          <InfoCell label="一板开" value={fmtSigned(d.b1_open)} fail={failSet.has("一板开")} />
           <InfoCell
             label="二板开"
             value={fmtSigned(d.b2_open)}
             extra={d.b2_turn != null ? `换手${d.b2_turn.toFixed(1)}` : undefined}
+            fail={failSet.has("二板开")}
           />
           {question.n_board === 3 ? (
             <InfoCell
@@ -332,15 +341,25 @@ export function QuizRunner({
               value={fmtSigned(d.b3_open)}
               extra={d.b3_turn != null ? `换手${d.b3_turn.toFixed(1)}` : undefined}
               highlight
+              fail={failSet.has("三板开")}
             />
           ) : null}
-          <div className="rounded bg-primary/10 px-2 py-1.5">
+          <div
+            className={cn(
+              "rounded px-2 py-1.5",
+              failSet.has("今开") ? "bg-fall/10 ring-1 ring-inset ring-fall/50" : "bg-primary/10",
+            )}
+          >
             <div className="flex items-baseline gap-1 leading-4">
               <span className="text-xs font-bold text-primary">{question.n_board + 1}</span>
               <span
                 className={cn(
                   "text-xs font-bold",
-                  question.group4.endsWith("阳") ? "text-rise" : "text-fall",
+                  failSet.has("阴阳")
+                    ? "text-fall underline decoration-fall/60"
+                    : question.group4.endsWith("阳")
+                      ? "text-rise"
+                      : "text-fall",
                 )}
               >
                 {question.group4.endsWith("阳") ? "阳" : "阴"}
@@ -357,7 +376,8 @@ export function QuizRunner({
             extra={d.day_high_pct >= 9 ? "冲到9%+" : "未到9%"}
             highlight
           />
-          <InfoCell label="首板前20日" value={fmtSigned(d.pre20_pct)} />
+          <InfoCell label="首板前20日" value={fmtSigned(d.pre20_pct)} fail={failSet.has("首板前20日")} />
+          <InfoCell label="首板前10日" value={fmtSigned(d.pre10_pct)} fail={failSet.has("首板前10日")} />
           <InfoCell label="板型链" value={d.chain ?? "--"} plain />
         </div>
 
@@ -545,16 +565,26 @@ function InfoCell({
   extra,
   highlight,
   plain,
+  fail,
 }: {
   label: string;
   value: string;
   extra?: string;
   highlight?: boolean;
   plain?: boolean;
+  fail?: boolean;   // 判分红格(q32):这格对应的腿不符合口诀,判分后标红
 }) {
   return (
-    <div className={cn("rounded px-2 py-1.5", highlight && "bg-primary/10")}>
-      <div className="text-[10px] text-muted-foreground">{label}</div>
+    <div
+      className={cn(
+        "rounded px-2 py-1.5",
+        highlight && !fail && "bg-primary/10",
+        fail && "bg-fall/10 ring-1 ring-inset ring-fall/50",
+      )}
+    >
+      <div className={cn("text-[10px]", fail ? "font-semibold text-fall" : "text-muted-foreground")}>
+        {label}
+      </div>
       <div className={cn("font-mono text-sm tabular-nums", !plain && toneOf(value))}>
         {value}
         {extra ? (
@@ -641,22 +671,25 @@ function RevealSection({
               {ex.matched_line}
             </span>
           </div>
-          <p className="whitespace-pre-line font-mono text-sm leading-6 text-foreground">{ex.scheme_desc}</p>
-          <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
-            主力怎么想：{ex.psycho}
-          </p>
-          {ex.hold_note ? (
-            <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
-              买入后怎么拿：{ex.hold_note}
-            </p>
-          ) : null}
-          {ex.case_note ? (
-            <p className="mt-1 text-xs leading-5 text-primary">典型样例：{ex.case_note}</p>
-          ) : null}
-          {ex.half_mountain ? (
-            <p className="mt-1 text-xs leading-5 text-amber-600">
-              注记：这题首板前20日涨幅在5~15半山腰毒档，口诀命中但背景打折，仓位要轻。
-            </p>
+          {ex.scheme_row ? (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px] border-collapse text-[11px]">
+                <thead>
+                  <tr className="border-b text-left text-muted-foreground">
+                    <th className="py-1 pr-3 font-medium">组</th>
+                    <th className="py-1 pr-3 font-medium">一板</th>
+                    <th className="py-1 pr-3 font-medium">二板</th>
+                    <th className="py-1 pr-3 font-medium">三板</th>
+                    <th className="py-1 pr-3 font-medium">今天开</th>
+                    <th className="py-1 pr-3 font-medium">地基日</th>
+                    <th className="py-1 font-medium">成绩(E3)</th>
+                  </tr>
+                </thead>
+                <tbody className="tabular-nums">
+                  <CheatTableRow row={ex.scheme_row} showName={false} />
+                </tbody>
+              </table>
+            </div>
           ) : null}
         </div>
       ) : (

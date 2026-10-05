@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { fetchHprRules } from "@/api/highRelay";
+import { CheatTableRow } from "@/features/highRelay/CheatTableRow";
 import { PoseCaseChart } from "@/features/highRelay/PoseCaseChart";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
@@ -28,26 +29,8 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
 // 口诀卡顺序(主人定):阴阳分组,组内按二板开盘从低到高;与后端 RULES A/B/E 组序一致
 const POINT_ORDER = ["A1", "A2", "A3", "B2", "B1", "B3", "C1", "C2"] as const;
 
-// 速查表(主人定 2026-10-04 板位视角版):列=一板/二板/三板/今天开 各板条件,
-// 多分支口诀(A1/A2/B1/B2/C2)拆子项一行一支;打3板的「三板」=今天要打的板(条件即「今天开」列),
-// 「不看」=该板不构成判定条件;文案与后端 contracts.RULES/SCHEMES desc 同步(改一边必须改另一边)
-// stat=hpr-v6.9 E3 研究口径;B3 样本极小,数字仅记录不做预期
-const CHEAT_ROWS: { name: string; yang: string; b1: string; b2: string; b3: string; today: string; extra?: string; stat: string }[] = [
-  { name: "A1 双平贴零·低开等强开", yang: "阳·打3板", b1: "低开<0", b2: "开<1·换手<12", b3: "—", today: "强开6~9.5", stat: "7笔·胜100%·均+16.6" },
-  { name: "A1 双平贴零·平开等温开", yang: "阳·打3板", b1: "平开0~3", b2: "开<1·换手<12", b3: "—", today: "温开3~6", stat: "10笔·胜80%·均+8.0" },
-  { name: "A2 一字转强", yang: "阳·打3板", b1: "不限", b2: "一字≥9.5", b3: "—", today: "7~8.5", extra: "一板<3时二板换手<5·前10日涨<10", stat: "14笔·胜64%·均+11.0" },
-  { name: "B2 捡尸·双低", yang: "阴·打3板", b1: "低开<0", b2: "低开<0", b3: "—", today: "低开<0", extra: "地基站线上或骑线", stat: "8笔·胜88%·均+11.3" },
-  { name: "B2 捡尸·承接", yang: "阴·打3板", b1: "低开<0", b2: "开2~3", b3: "—", today: "低开<0", extra: "地基站线上或骑线", stat: "3笔·胜67%·均+8.8" },
-  { name: "C1 冒泡转弱", yang: "阴阳·打3板", b1: "≥7", b2: "开3~7", b3: "—", today: "弱开<3", stat: "15笔·胜73%·均+8.6" },
-  { name: "B1 强开系·转温", yang: "阴·打3板", b1: "≥7", b2: "≥7·换手≥5", b3: "—", today: "温开3~5", stat: "9笔·胜100%·均+23.2" },
-  { name: "B1 强开系·续强", yang: "阴·打3板", b1: "不限", b2: "开7~8.5·一字不算", b3: "—", today: "强开6~9.5", stat: "11笔·胜82%·均+5.8" },
-  { name: "B3 贴零温开", yang: "阴·打4板", b1: "不看", b2: "开<1", b3: "不看", today: "温开3~6", extra: "地基站线上或骑线", stat: "7笔·胜71%·均+18.1" },
-  { name: "C2 四板便捷·主档", yang: "不分·打4板", b1: "不看", b2: "不看", b3: "换手10~20", today: "5~9.5", extra: "锚点:贴前涨停高点(-2~0)或超5%不碰·先手小阳:首板前日涨1~3%且三板<7不碰", stat: "56笔·胜71%·均+8.7" },
-  { name: "C2 四板便捷·二板一字", yang: "不分·打4板", b1: "不看", b2: "一字≥9.5", b3: "换手3~5", today: "6~9.5", extra: "锚点/先手小阳同上", stat: "6笔·胜100%·均+11.9" },
-  { name: "C2 四板便捷·三板一字", yang: "不分·打4板", b1: "不看", b2: "不看", b3: "一字≥9.5·换手3~5", today: "6~9.5", extra: "锚点/先手小阳同上", stat: "4笔·胜75%·均+9.1" },
-];
-
-/** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
+/** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本;
+ * 速查表也随后端 cheat_rows 下发,答题讲解卡取同一份命中行)。 */
 export function HprGuideView() {
   const query = useQuery({
     queryKey: ["hprRules"],
@@ -100,29 +83,18 @@ export function HprGuideView() {
           <thead>
             <tr className="border-b text-left text-xs text-muted-foreground">
               <th className="py-1.5 pr-3 font-medium">口诀</th>
-              <th className="py-1.5 pr-3 font-medium">地基</th>
+              <th className="py-1.5 pr-3 font-medium">组</th>
               <th className="py-1.5 pr-3 font-medium">一板</th>
               <th className="py-1.5 pr-3 font-medium">二板</th>
               <th className="py-1.5 pr-3 font-medium">三板</th>
               <th className="py-1.5 pr-3 font-medium">今天开</th>
-              <th className="py-1.5 pr-3 font-medium">附加</th>
+              <th className="py-1.5 pr-3 font-medium">地基日</th>
               <th className="py-1.5 font-medium">成绩(E3)</th>
             </tr>
           </thead>
           <tbody className="tabular-nums">
-            {CHEAT_ROWS.map((r) => (
-              <tr key={r.name} className="border-b border-muted/40">
-                <td className="py-1.5 pr-3 font-medium whitespace-nowrap">{r.name}</td>
-                <td className={`py-1.5 pr-3 whitespace-nowrap ${r.yang.includes("阳") && !r.yang.includes("阴") ? "text-rise" : r.yang.includes("阴") && !r.yang.includes("阳") ? "text-fall" : "text-muted-foreground"}`}>
-                  {r.yang}
-                </td>
-                <td className={`py-1.5 pr-3 font-mono whitespace-nowrap ${r.b1 === "不看" || r.b1 === "—" ? "text-muted-foreground/50" : ""}`}>{r.b1}</td>
-                <td className="py-1.5 pr-3 font-mono whitespace-nowrap">{r.b2}</td>
-                <td className={`py-1.5 pr-3 font-mono whitespace-nowrap ${r.b3 === "不看" || r.b3 === "—" ? "text-muted-foreground/50" : ""}`}>{r.b3}</td>
-                <td className="py-1.5 pr-3 font-mono font-semibold text-primary whitespace-nowrap">{r.today}</td>
-                <td className="py-1.5 pr-3 font-mono text-muted-foreground">{r.extra ?? "—"}</td>
-                <td className="py-1.5 font-mono text-[11px] text-muted-foreground whitespace-nowrap">{r.stat}</td>
-              </tr>
+            {rules.cheat_rows.map((r) => (
+              <CheatTableRow key={r.name} row={r} />
             ))}
             <tr className="border-t-2 border-muted/60">
               <td className="py-1.5 pr-3 font-semibold" colSpan={5}>合计(七条·去重)</td>

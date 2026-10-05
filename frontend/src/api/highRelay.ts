@@ -252,6 +252,20 @@ export interface HprRuleGroup {
   items: HprRuleItem[];
 }
 
+// 速查表行(后端 contracts.CHEAT_ROWS 单一事实源;多分支口诀拆子项一行一支)
+export interface HprCheatRow {
+  no: HprPoint;
+  sub?: string;      // 子项名(A1 低开等强开/B1 转温/C2 二板一字…;单分支口诀无)
+  name: string;      // 行名=子项全名(A1 双平贴零·低开等强开)
+  yang: string;      // 组=阴阳+板位(阳·打3板)
+  b1: string;
+  b2: string;
+  b3: string;
+  today: string;
+  ground?: string;   // 地基腿条件(姿态/前10日/锚点/先手小阳;主人2026-10-05定名ground)
+  stat: string;      // 成绩(E3口径)
+}
+
 export interface HprRulesPayload {
   rules_version: string;
   group4_labels: Record<HprGroup4, string>;
@@ -263,6 +277,7 @@ export interface HprRulesPayload {
   point_stats: Record<string, string>;   // A1→"16笔·胜69%·均+12.0"成绩速览(E3口径)
   point_boards: Record<string, string>;  // A1→"打3板"板位归属
   rules: HprRuleGroup[];
+  cheat_rows: HprCheatRow[];             // 速查表(规则页主表;答题讲解卡取命中行)
   falsified_rules: string[];
   risk_notes: string[];
   ths_pool_conditions: Record<string, string>;
@@ -340,6 +355,7 @@ export interface HprQuizDisplay {
   b3_turn: number | null;       // 三板换手率(三接四)
   pre20_pct: number | null;     // 首板前20日涨幅(半山腰判定)
   pre10_pct: number | null;     // 首板前10日涨幅(A2近端透支判定)
+  foundation_chg: number | null; // 地基日涨幅%(判定同源单源下发,q32;C2「涨1~3%×三板<7」腿)
   foundation_pose: string | null; // 地基K线姿态(v6.10弱票腿B2/B3判定:站线上/骑线/贴线/掉线下)
   foundation_ma20: number | null; // 地基日收盘距20日线%(v6.10起仅参考)
   anchor_pos: number | null;      // 地基日收盘距前期涨停高点%(v6.8 C2锚点腿:贴着-2~0/超5%不碰)
@@ -366,20 +382,17 @@ export interface HprQuizAnswer {
 export interface HprQuizExplainHit {
   kind: "hit";
   scheme_no: string;
-  scheme_name: string;          // B1 强转弱
-  scheme_desc: string;          // 口诀原文
-  psycho: string;               // 主力心理
-  hold_note: string;            // 持有纪律(四板今开分水岭,q18起)
-  today_window: [number, number] | null;
+  scheme_name: string;          // 子项全名(A1 双平贴零·低开等强开;q31与规则页速查表统一)
+  scheme_row: HprCheatRow | null; // 速查表命中行(表格化讲解;地基/一板/二板/三板/今天开/地基日/成绩)
   matched_line: string;         // 本票数据对照行
-  case_note: string | null;     // 典型样例(19个具名案例之一时)
-  half_mountain: boolean;       // 阳组半山腰注记
+  fail_fields?: string[];       // 命中=空数组(红格仅 miss 题用)
 }
 
 export interface HprQuizExplainMiss {
   kind: "miss";
   trap_kind?: "yin_yang" | "near" | "toxic" | "plain";  // 陷阱类型(q10起,综合挑战卷抽题用)
   reasons: string[];            // 为什么不该买(1~3条)
+  fail_fields?: string[];       // 不符合的腿对应的题面格子标签(q32:前端判分后红格标出)
 }
 
 export interface HprQuizQuestion {

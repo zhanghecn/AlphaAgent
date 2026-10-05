@@ -240,11 +240,13 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     return rec
 
 
-def tag_point(group4: str, b1_open, b2_open, b3_open,
-              auction_pct=None, b2_turn=None, b3_turn=None,
-              foundation_chg=None, pre10_pct=None,
-              foundation_pose=None, anchor_pos=None, anchor_dist=None) -> str:
-    """打板口诀卡七条打标(hpr-v6.8,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
+def tag_scheme(group4: str, b1_open, b2_open, b3_open,
+               auction_pct=None, b2_turn=None, b3_turn=None,
+               foundation_chg=None, pre10_pct=None,
+               foundation_pose=None, anchor_pos=None, anchor_dist=None):
+    """打板口诀卡七条打标·分支版(判定逻辑唯一实现,tag_point 是它的编号薄壳):
+    返回命中的 SCHEMES 条目本身——多分支口诀(A1/B1/B2/C2)定位到具体分支,
+    答题讲解取子项名/速查表行用(q31);未命中返回 None。
     chain = 数值区间半开[lo,hi);vol2/vol3 = 二板/三板换手率窗(缺数据不命中带窗点);
     vol2_when_b1_low = A2 条件换手(一板<3 板弱时二板一字须换手<5,假锁排除);
     block_foundation_chg = (lo,hi,cap) 条件回避(v6.2 C2):首板前一日涨跌∈[lo,hi)
@@ -265,7 +267,7 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
     今天开窗由盘中扫描/回测复核;≥9.5 顶格一律不命中)。"""
     c = contracts
     if auction_pct is not None and auction_pct >= c.TODAY_CAP:
-        return "—"
+        return None
     for s in c.SCHEMES:
         if group4 not in s["group4"]:
             continue
@@ -309,13 +311,28 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
                     or anchor_pos >= aover):
                 continue  # 贴断板锚不涨=没能量 / 超前期涨停锚≥5%=妖顶透支(v6.8 C2)
         if auction_pct is None:
-            return str(s["no"])
+            return s
         lo, hi = s["today"]
         # 链区间存在包含关系(C2 链全不限/B1 含转温的二板段):
         # 链过但今开不在窗 → 继续尝试后面的方案,不能提前返回 —
         if lo <= auction_pct < hi:
-            return str(s["no"])
-    return "—"
+            return s
+    return None
+
+
+def tag_point(group4: str, b1_open, b2_open, b3_open,
+              auction_pct=None, b2_turn=None, b3_turn=None,
+              foundation_chg=None, pre10_pct=None,
+              foundation_pose=None, anchor_pos=None, anchor_dist=None) -> str:
+    """七条口诀编号打标(hpr-v6.8,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
+    tag_scheme 的薄壳:返回命中条目的编号(如「A1」),未命中「—」;
+    判定细节/各腿语义见 tag_scheme docstring。"""
+    s = tag_scheme(group4, b1_open, b2_open, b3_open,
+                   auction_pct=auction_pct, b2_turn=b2_turn, b3_turn=b3_turn,
+                   foundation_chg=foundation_chg, pre10_pct=pre10_pct,
+                   foundation_pose=foundation_pose,
+                   anchor_pos=anchor_pos, anchor_dist=anchor_dist)
+    return str(s["no"]) if s else "—"
 
 
 def match_schemes(group4: str, b1_open, b2_open, b3_open,
@@ -402,7 +419,7 @@ def action_hint(schemes: list[dict]) -> str | None:
     for s in schemes:
         lo, hi = s["today"]
         buy = "低开直接买" if lo < 0 and hi <= 3 else "触板打"
-        label = f"{s['name']}·{s['tag']}" if s.get("tag") else str(s["name"])
+        label = f"{s['name']}·{s['sub']}" if s.get("sub") else str(s["name"])
         parts.append(f"开{_fmt_window(s['today'])}按{label}{buy}")
     return ";".join(parts)
 

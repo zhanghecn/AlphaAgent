@@ -341,9 +341,8 @@ describe("quizScore.summarize 月度统计", () => {
         answer: { point: "A1" as const, should_buy: true, ret_pct: 10, buy_price: 10,
                   sealed: true, hold_days: 2, exit_date: "2024-11-05", exit_price: 11,
                   exit_reason: "break_close" },
-        explain: { kind: "hit" as const, scheme_no: "A1", scheme_name: "A1 双平贴零",
-                   scheme_desc: "", psycho: "", hold_note: "买入后怎么拿：第二天早上9:25竞价就定去留……", today_window: [6, 9.5] as [number, number],
-                   matched_line: "", case_note: null, half_mountain: false },
+        explain: { kind: "hit" as const, scheme_no: "A1", scheme_name: "A1 双平贴零·低开等强开",
+                   scheme_row: null, matched_line: "" },
       },
       {
         seq: 2, vt_symbol: "000002.SZSE", name: "万科A", decision_date: "2024-11-04",
@@ -378,9 +377,8 @@ describe("quizScore.summarize 月度统计", () => {
         answer: { point: "A1" as const, should_buy: true, ret_pct: 10, buy_price: 10,
                   sealed: true, hold_days: 2, exit_date: "2024-11-05", exit_price: 11,
                   exit_reason: "break_close" },
-        explain: { kind: "hit" as const, scheme_no: "A1", scheme_name: "A1 双平贴零",
-                   scheme_desc: "", psycho: "", hold_note: "买入后怎么拿：第二天早上9:25竞价就定去留……", today_window: [6, 9.5] as [number, number],
-                   matched_line: "", case_note: null, half_mountain: false },
+        explain: { kind: "hit" as const, scheme_no: "A1", scheme_name: "A1 双平贴零·低开等强开",
+                   scheme_row: null, matched_line: "" },
       },
       {  // 未命中题 ret=-5,用户也买了(口诀不会买)
         seq: 2, vt_symbol: "000002.SZSE", name: "万科A", decision_date: "2024-11-04",
@@ -420,7 +418,7 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
   display: {
     board_label: "打3板", b1_open: 8.4, b2_open: 10.0, b3_open: null,
     b2_turn: 28.8, b3_turn: null, pre20_pct: 20.0, pre10_pct: null,
-    foundation_pose: "站线上" as const, foundation_ma20: 8.6, anchor_pos: 2.1, auction_pct: 4.16,
+    foundation_chg: 2.6, foundation_pose: "站线上" as const, foundation_ma20: 8.6, anchor_pos: 2.1, auction_pct: 4.16,
     prev_close: 15.0, limit_price: 16.5, decision_open: 15.62, day_high_pct: 9.98,
     chain: "实体→一字",
   },
@@ -436,13 +434,13 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
     exit_reason: "break_close",
   },
   explain: {
-    kind: "hit", scheme_no: "B1", scheme_name: "B1 强开系",
-    scheme_desc: "一板二板都强开(各≥7),二板换手要活(≥5),今天温开3~5",
-    psycho: "弱势票连开两天强开,人气已经聚起来了……", hold_note: "",
-    today_window: [3, 5],
+    kind: "hit", scheme_no: "B1", scheme_name: "B1 强开系·转温",
+    scheme_row: {
+      no: "B1", sub: "转温", name: "B1 强开系·转温",
+      yang: "阴·打3板", b1: "≥7", b2: "≥7·换手≥5", b3: "—",
+      today: "温开3~5", ground: "—", stat: "9笔·胜100%·均+23.2",
+    },
     matched_line: "一板开+8.4 × 二板开+10.0(换手28.8) → 今开+4.2 落在窗3~5",
-    case_note: "B1最大赢家锚点:强强链换手28.8≥5,今天开4.16,+93.1(收益之王)",
-    half_mountain: false,
   },
 };
 
@@ -452,7 +450,7 @@ const QUIZ_MISS_Q: HprQuizQuestion = {
   display: {
     board_label: "打4板", b1_open: 1.3, b2_open: -3.1, b3_open: 10.0,
     b2_turn: 10.1, b3_turn: 1.1, pre20_pct: 4.4, pre10_pct: null,
-    foundation_pose: "骑线" as const, foundation_ma20: 6.2, anchor_pos: null, auction_pct: 9.98,
+    foundation_chg: 3.7, foundation_pose: "骑线" as const, foundation_ma20: 6.2, anchor_pos: null, auction_pct: 9.98,
     prev_close: 20.0, limit_price: 22.0, decision_open: 22.0, day_high_pct: 10.0,
     chain: "实体→一字→一字",
   },
@@ -468,7 +466,7 @@ const QUIZ_MISS_Q: HprQuizQuestion = {
     sealed: false, hold_days: null, exit_date: "2024-11-29", exit_price: 20.76,
     exit_reason: "break_day_close",
   },
-  explain: { kind: "miss", reasons: ["今开+10.0顶格:排队也买不到,口诀一律不打(硬规则)"] },
+  explain: { kind: "miss", reasons: ["今开+10.0顶格:排队也买不到,口诀一律不打(硬规则)"], fail_fields: ["今开"] },
 };
 
 function renderRunner(props?: {
@@ -538,10 +536,12 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("口诀对,行情也对");
     expect(html).toContain("+10");
     expect(html).toContain("粤桂股份");          // 答完揭示票名
-    expect(html).toContain("B1 强开系");           // 口诀卡
-    expect(html).toContain("主力怎么想");
-    expect(html).toContain("典型样例");            // case_note
+    expect(html).toContain("B1 强开系·转温");     // 口诀子项全名(q31:与规则页速查表统一)
     expect(html).toContain("落在窗3~5");           // matched_line
+    expect(html).toContain("温开3~5");             // 速查表行·今天开列(表格化讲解)
+    expect(html).toContain("9笔·胜100%·均+23.2");  // 速查表行·成绩列
+    expect(html).not.toContain("主力怎么想");       // 话术字段已删(q31)
+    expect(html).not.toContain("典型样例");
     expect(html).toContain("断板日卖");              // 退出原因(v4.3:max(收盘,中间价))
   });
 
