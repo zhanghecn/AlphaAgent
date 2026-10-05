@@ -165,6 +165,21 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     ma20f = cols["ma20"][f]
     rec["foundation_ma20_gap"] = round((fc / ma20f - 1) * 100, 2) \
         if ma20f == ma20f and ma20f > 0 else None
+    # 地基K线姿态(v6.10 弱票腿B2/B3): 站线上(最低价离线≥2%=有人扛)/骑线(线穿K线=有人争)
+    # →接;贴线(最低价在线上但<2%=死水)/掉线下(最高价也在线下=没人救)→不接
+    if ma20f == ma20f and ma20f > 0:
+        fl_gap = (float(cols["low_price"][f]) / ma20f - 1) * 100
+        fh_gap = (float(cols["high_price"][f]) / ma20f - 1) * 100
+        if fl_gap >= 2:
+            rec["foundation_pose"] = "站线上"
+        elif fh_gap < 0:
+            rec["foundation_pose"] = "掉线下"
+        elif fl_gap < 0:
+            rec["foundation_pose"] = "骑线"
+        else:
+            rec["foundation_pose"] = "贴线"
+    else:
+        rec["foundation_pose"] = None
     # 前波(连板段尾高度≥2 的段,首板之前)
     ends, hts = ctx["run_by"].get(s, (np.array([]), np.array([])))  # type: ignore[attr-defined]
     b1_pos = pos - n_board + 1                     # 首板日 pos
@@ -210,23 +225,41 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     rec["pre20_pct"] = round((fc / c20 - 1) * 100, 1) if c20 == c20 and c20 > 0 else None
     c10 = cols["c10"][f]
     rec["pre10_pct"] = round((fc / c10 - 1) * 100, 1) if c10 == c10 and c10 > 0 else None
+    # 锚点(v6.8 C2腿): 地基日收盘 vs 地基前20日内最近涨停日最高价
+    # (主人2026-10-04人眼判据: 贴着断板高点不涨=没能量 / 超前期涨停高点5%=妖顶透支)
+    anchor_pos = anchor_dist = None
+    for j in range(f - 1, max(f - 20, start) - 1, -1):
+        if bool(cols["is_lim"][j]):
+            ah = float(cols["high_price"][j])
+            if ah > 0:
+                anchor_pos = round((fc / ah - 1) * 100, 2)
+                anchor_dist = f - j
+            break
+    rec["anchor_pos"] = anchor_pos
+    rec["anchor_dist"] = anchor_dist
     return rec
 
 
 def tag_point(group4: str, b1_open, b2_open, b3_open,
               auction_pct=None, b2_turn=None, b3_turn=None,
               foundation_chg=None, pre10_pct=None,
-              foundation_ma20=None) -> str:
-    """打板口诀卡七条打标(hpr-v6.7,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
+              foundation_pose=None, anchor_pos=None, anchor_dist=None) -> str:
+    """打板口诀卡七条打标(hpr-v6.8,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
     chain = 数值区间半开[lo,hi);vol2/vol3 = 二板/三板换手率窗(缺数据不命中带窗点);
     vol2_when_b1_low = A2 条件换手(一板<3 板弱时二板一字须换手<5,假锁排除);
     block_foundation_chg = (lo,hi,cap) 条件回避(v6.2 C2):首板前一日涨跌∈[lo,hi)
     (先手小阳)且三板开<cap(温开) → 不命中;三开≥cap(强开链)照打(保华瓷们);
     block_pre10 = X 条件回避(v6.3 A2):首板前10个交易日涨幅≥X(近端透支,
     一字=高位末段冲刺)不命中——阳组专属毒(阴组反向肥,勿通用);
-    block_foundation_ma20 = X 下限回避(v6.6 A3/B2/B3):首板前一日收盘距
-    20日线<X%(地基贴线的弱票=没人要)不命中——弱票低位接口诀专属
-    (与主池打板相反:强票接力的地基贴线=洗盘充分反而肥,勿通用);
+    block_foundation_ma20 = (已废弃v6.10)原首板前日收盘距20日线<X%回避,
+    被 foundation_pose_ok 姿态尺替代(数字口径混掉穿线/整根线下两类,见FALSIFIED);
+    foundation_pose_ok = 地基K线姿态尺(v6.10 B2/B3):首板前一日K线 vs 20日线——
+    站线上(最低价离线≥2%=有人扛)或骑线(线从K线中间穿过=还有人争)才命中;
+    贴线(最低价在线上但离线<2%=死水)与掉线下(最高价也在线下=没人救)不命中
+    (主人2026-10-05提出看K线整根位置:信隆穿线+51/神雾整根线下-26,收盘口径永远分不开);
+    block_anchor = ((lo,hi),dist,cap) 锚点回避(v6.8 C2):地基日收盘距
+    地基前20日内最近涨停日高点∈[lo,hi)(贴锚)且距≤dist(刚断) → 不命中
+    (断单板贴着不动=没能量);或距锚≥cap(大超) → 不命中(连板妖顶透支);
     group4 支持 tuple:C1 冒泡转弱阴阳都打,C2 四板便捷不分阴阳(v6.0 七条);
     auction_pct = 今天开盘 %(池计算时未知传 None → 只按链条件打候选标,
     今天开窗由盘中扫描/回测复核;≥9.5 顶格一律不命中)。"""
@@ -266,9 +299,15 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
         bp10 = s.get("block_pre10")
         if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
             continue  # 近10日已涨透支=高位一字末段冲刺(v6.3 A2)
-        bfm = s.get("block_foundation_ma20")
-        if bfm is not None and foundation_ma20 is not None and foundation_ma20 < bfm:
-            continue  # 弱票低位接但地基贴线=没人要(v6.6 A3/B2/B3)
+        fpok = s.get("foundation_pose_ok")
+        if fpok and foundation_pose not in ("站线上", "骑线"):
+            continue  # 弱票地基要有人做:站线上=有人扛/骑线=有人争;贴线死水掉线下没人救(v6.10)
+        banch = s.get("block_anchor")
+        if banch is not None and anchor_pos is not None:
+            (alo, ahi), adist, aover = banch
+            if ((alo <= anchor_pos < ahi and anchor_dist is not None and anchor_dist <= adist)
+                    or anchor_pos >= aover):
+                continue  # 贴断板锚不涨=没能量 / 超前期涨停锚≥5%=妖顶透支(v6.8 C2)
         if auction_pct is None:
             return str(s["no"])
         lo, hi = s["today"]
@@ -282,7 +321,7 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
 def match_schemes(group4: str, b1_open, b2_open, b3_open,
                   b2_turn=None, b3_turn=None,
                   foundation_chg=None, pre10_pct=None,
-                  foundation_ma20=None) -> list[dict]:
+                  foundation_pose=None, anchor_pos=None, anchor_dist=None) -> list[dict]:
     """按链条件(不含今开)定位全部链全过分支,按 SCHEMES 优先级序返回。
 
     多分支口诀(捡尸/便捷一字系档)共享编号,且存在跨方案链重叠
@@ -325,9 +364,15 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
         bp10 = s.get("block_pre10")
         if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
             continue  # 近10日涨幅透支(v6.3 A2;镜像 tag_point)
-        bfm = s.get("block_foundation_ma20")
-        if bfm is not None and foundation_ma20 is not None and foundation_ma20 < bfm:
-            continue  # 地基贴线弱票(v6.6 A3/B2/B3;镜像 tag_point)
+        fpok = s.get("foundation_pose_ok")
+        if fpok and foundation_pose not in ("站线上", "骑线"):
+            continue  # 地基姿态尺(v6.10 B2/B3;镜像 tag_point)
+        banch = s.get("block_anchor")
+        if banch is not None and anchor_pos is not None:
+            (alo, ahi), adist, aover = banch
+            if ((alo <= anchor_pos < ahi and anchor_dist is not None and anchor_dist <= adist)
+                    or anchor_pos >= aover):
+                continue  # 锚点腿(v6.8 C2;镜像 tag_point)
         out.append(s)
     return out
 
@@ -445,7 +490,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                           b3_turn=rec.get("b3_turn"),
                           foundation_chg=rec.get("foundation_chg"),
                           pre10_pct=rec.get("pre10_pct"),
-                          foundation_ma20=rec.get("foundation_ma20_gap"))
+                          foundation_pose=rec.get("foundation_pose"),
+                          anchor_pos=rec.get("anchor_pos"),
+                          anchor_dist=rec.get("anchor_dist"))
         avoid = static_avoid(point, group4, rec.get("b1_open"),
                              rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid
@@ -459,7 +506,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                                  b3_turn=rec.get("b3_turn"),
                                  foundation_chg=rec.get("foundation_chg"),
                                  pre10_pct=rec.get("pre10_pct"),
-                          foundation_ma20=rec.get("foundation_ma20_gap")) if point != "—" else []
+                                 foundation_pose=rec.get("foundation_pose"),
+                                 anchor_pos=rec.get("anchor_pos"),
+                                 anchor_dist=rec.get("anchor_dist")) if point != "—" else []
         wins = [s["today"] for s in branches]
         gate = ",".join(f"today_{w[0]:g}_{w[1]:g}" for w in wins) or None
         prev_close = float(row.close_price)
@@ -500,6 +549,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "pre20_pct": rec.get("pre20_pct"),
             "pre10_pct": rec.get("pre10_pct"),
             "foundation_ma20_gap": rec.get("foundation_ma20_gap"),
+            "foundation_pose": rec.get("foundation_pose"),
+            "anchor_pos": rec.get("anchor_pos"),
+            "anchor_dist": rec.get("anchor_dist"),
             "mkt_lim_tm1": int(mkt_prev),
         })
     stats["actionable"] = n_actionable

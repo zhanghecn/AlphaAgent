@@ -419,7 +419,8 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
   n_board: 2, group4: "二接三阴",
   display: {
     board_label: "打3板", b1_open: 8.4, b2_open: 10.0, b3_open: null,
-    b2_turn: 28.8, b3_turn: null, pre20_pct: 20.0, auction_pct: 4.16,
+    b2_turn: 28.8, b3_turn: null, pre20_pct: 20.0, pre10_pct: null,
+    foundation_pose: "站线上" as const, foundation_ma20: 8.6, anchor_pos: 2.1, auction_pct: 4.16,
     prev_close: 15.0, limit_price: 16.5, decision_open: 15.62, day_high_pct: 9.98,
     chain: "实体→一字",
   },
@@ -450,7 +451,8 @@ const QUIZ_MISS_Q: HprQuizQuestion = {
   n_board: 3, group4: "三接四阳",
   display: {
     board_label: "打4板", b1_open: 1.3, b2_open: -3.1, b3_open: 10.0,
-    b2_turn: 10.1, b3_turn: 1.1, pre20_pct: 4.4, auction_pct: 9.98,
+    b2_turn: 10.1, b3_turn: 1.1, pre20_pct: 4.4, pre10_pct: null,
+    foundation_pose: "骑线" as const, foundation_ma20: 6.2, anchor_pos: null, auction_pct: 9.98,
     prev_close: 20.0, limit_price: 22.0, decision_open: 22.0, day_high_pct: 10.0,
     chain: "实体→一字→一字",
   },
@@ -506,7 +508,7 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("买入");
     expect(html).toContain("不买");
     // 阴阳组判定依据亮出:地基日格 + 徽标写全「·阴地基」(主人点名:阴阳不像正常逻辑)
-    expect(html).toContain("二接三 ·");
+    expect(html).toContain("打3板");
     expect(html).toContain("地基");
     expect(html).toContain("地基日 11-08");
     expect(html).toContain("阴地基");
@@ -591,10 +593,10 @@ describe("QuizRunner 手机适配", () => {
     expect(html).toContain(
       "h-11 flex-1 rounded-md border text-base font-semibold text-muted-foreground hover:bg-muted/40 md:w-40 md:flex-none md:text-sm",
     );
-    // 信息面板:手机 2 列收紧列距,sm+ 恢复桌面列距
-    expect(html).toContain("gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 sm:gap-x-6");
-    // 大字号徽章(数字/阴阳字 text-lg)不被适配破坏
-    expect(html).toContain("text-lg leading-none");
+    // 信息面板:手机 2 列收紧列距,sm+ 恢复桌面列距(v6.8 加锚位/地基距格后 5 列·lg 10 列)
+    expect(html).toContain("gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-5 sm:gap-x-6");
+    // 今开徽章(数字/阴阳字)不被适配破坏(v6.8 信息格重排后为 text-xs font-bold)
+    expect(html).toContain("text-xs font-bold text-fall");
   });
 
   it("揭示态:下一题手机撑满,桌面恢复右对齐小钮", () => {

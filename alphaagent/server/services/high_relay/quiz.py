@@ -20,7 +20,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 25  # v25:跌停口径修正(hpr-v6.7):仅一字死封顺延,其余按跌停价卖出;# v24:弱票三口诀加地基腿(hpr-v6.6):A3/B2/B3地基距MA20<5%不命中;# v23:退出价口径升级(hpr-v6.5):E3改纯收盘价+跌停顺延,去v4.3中间价美化(尾盘只有收盘价);收益列随v6.5重算
+QUIZ_CONTENT_VERSION = 30  # v30:hpr-v6.10——弱票地基腿换K线姿态尺(站线上/骑线=接,贴线/掉线下=不接),题面「地基距20日线」数值格改「地基姿态」标签,B2 7→11笔/B3 5→7笔(信隆+51/东百+31.8回归,神雾-25.9/新乡-18.3挡外);# v29:A1口诀文案人话化(主人反馈「低开→6~9.5/平开→3~6」箭头式读不懂,改「一板低开(<0)的,等今天强开6~9.5」句式,判定零漂移仅文案);# v28:hpr-v6.9——A1交叉反转双分支(一板低开<0等强开6~9.5/一板平开0~3等温开3~6,题库重打标:长白山归miss/津药·滨海·国创等10笔入A1);# v27:hpr-v6.8——C2锚点腿(前期涨停高点贴着没过/超5%不碰)+A3退役(题库重打标,利君/京能/万安归miss)+题面补「距前涨停高」格;# v26:题面补「地基距20日线」格(v6.6弱票腿判定字段上题面,做题可判,主人2026-10-04做题撞出)+修讲解「不能打,不能打」重复;# v25:跌停口径修正(hpr-v6.7):仅一字死封顺延,其余按跌停价卖出;# v24:弱票三口诀加地基腿(hpr-v6.6):A3/B2/B3地基距MA20<5%不命中;# v23:退出价口径升级(hpr-v6.5):E3改纯收盘价+跌停顺延,去v4.3中间价美化(尾盘只有收盘价);收益列随v6.5重算
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -107,7 +107,9 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                                     b2_turn=b2_turn, b3_turn=b3_turn,
                                     foundation_chg=foundation_chg,
                                     pre10_pct=pre10,
-                                    foundation_ma20=_f(r["地基距MA20%"]))
+                                    foundation_pose=(r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
+                                    anchor_pos=_f(r["锚位%"]),
+                                    anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None))
         if recalc != point:
             raise RuntimeError(
                 f"题库构建自检失败:{r['名称']} {d_date} E标={point} 重算={recalc}")
@@ -135,14 +137,18 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                 b2_turn=b2_turn, b3_turn=b3_turn,
                 buy_open=buy_open, pre20_pct=pre20,
                 foundation_chg=foundation_chg, pre10_pct=pre10,
-                foundation_ma20=_f(r["地基距MA20%"]))
+                foundation_pose=(r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
+                                    anchor_pos=_f(r["锚位%"]),
+                                    anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None))
             # 阴阳反串:链形完整命中对面地基组的某条口诀(跨阴阳铁律陷阱,
             # 教学标签最鲜明,覆盖 near/toxic/plain),讲解首位说明
             opp_point = pool_mod.tag_point(
                 _OPPOSITE_GROUP4[group4], b1_open, b2_open, b3_open,
                 auction_pct=buy_open, b2_turn=b2_turn, b3_turn=b3_turn,
                 foundation_chg=foundation_chg, pre10_pct=pre10,
-                foundation_ma20=_f(r["地基距MA20%"]))
+                foundation_pose=(r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
+                                    anchor_pos=_f(r["锚位%"]),
+                                    anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None))
             if opp_point != "—":
                 trap_kind = "yin_yang"
                 opp_yang = "阳" if _OPPOSITE_GROUP4[group4].endswith("阳") else "阴"
@@ -168,6 +174,13 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                 "b1_open": b1_open, "b2_open": b2_open, "b3_open": b3_open,
                 "b2_turn": b2_turn, "b3_turn": b3_turn,
                 "pre20_pct": pre20, "pre10_pct": pre10,
+                # v6.10 弱票腿判定字段(B2/B3 地基K线姿态):口诀第四行要求的数据
+                # 必须上题面,否则做题人拿隐藏变量被毙(主人2026-10-04做题撞出);
+                # v6.10 起显示姿态标签(站线上/骑线/贴线/掉线下),数值留参考
+                "foundation_pose": (r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
+                "foundation_ma20": _f(r["地基距MA20%"]),
+                # v6.8 C2 锚点腿判定字段:地基收盘距前期涨停高点(题面可判原则)
+                "anchor_pos": _f(r["锚位%"]),
                 "auction_pct": buy_open,
                 "prev_close": round(float(b_close[i - 1]), 2),
                 "limit_price": _f(r["买价"]),
@@ -210,7 +223,8 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
 def explain_miss(*, n_board: int, yang: bool, group4: str,
                  b1_open, b2_open, b3_open, b2_turn, b3_turn,
                  buy_open: float, pre20_pct, foundation_chg=None,
-                 pre10_pct=None, foundation_ma20=None) -> tuple[list[str], str]:
+                 pre10_pct=None, foundation_pose=None,
+                 anchor_pos=None, anchor_dist=None) -> tuple[list[str], str]:
     """未命中题的「为什么不该买」:按优先级产 1~3 条人话理由(全部正常中文)。
     返回 (reasons, trap_kind):toxic=毒段规则命中/near=形态接近(链全符差条件)/
     plain=链形不沾边;yin_yang(阴阳反串)由 build_questions 单独判定覆盖。"""
@@ -300,20 +314,36 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
                 f"口诀【C2·四板便捷】「先手小阳不碰——首板前日涨1~3%、且三板开<7"
                 f"(三板强开≥7照打)」——这题首板前日涨{_pct(foundation_chg)}×"
                 f"三板开{_pct(b3_open)}温着没人接=半路残局,不能打")
+        # 9. 锚点腿(v6.8):地基收盘贴断板高点不涨=没能量 / 超前期涨停高点5%=妖顶透支
+        if (anchor_pos is not None and b3_turn is not None
+                and (10 <= b3_turn < 20 or (b2_open is not None and b2_open >= 9.5)
+                     or (b3_open is not None and b3_open >= 9.5))
+                and 5 <= buy_open < contracts.TODAY_CAP):
+            if -2.0 <= anchor_pos < 0.0 and anchor_dist is not None and anchor_dist <= 7:
+                reasons.append(
+                    f"口诀【C2·四板便捷】「锚点不碰——前期涨停高点贴着没过(-2~0)」"
+                    f"——这题地基收盘距前期涨停高点{anchor_pos:+.1f}%(刚断{anchor_dist}日"
+                    "贴着不动)=断单板没能量,不能打")
+            elif anchor_pos >= 5.0:
+                reasons.append(
+                    f"口诀【C2·四板便捷】「锚点不碰——或已超高点5%」"
+                    f"——这题已超前期涨停高点{anchor_pos:+.1f}%=连板妖顶透支"
+                    "接最后一棒,不能打")
     if reasons:
         return reasons[:3], "toxic"
     # 9. 兜底:形态接近(链全符差条件) 或 链形不沾边(含本组口诀清单),恒非 None
     nearest, near_hit = _nearest_scheme_line(group4, b1_open, b2_open, b3_open,
                                              b2_turn, b3_turn, buy_open,
                                              foundation_chg, pre10_pct,
-                                             foundation_ma20)
+                                             foundation_pose, anchor_pos, anchor_dist)
     return [nearest, _MISS_WIN_LINE], ("near" if near_hit else "plain")
 
 
 def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
                          b2_turn, b3_turn, buy_open: float,
                          foundation_chg=None, pre10_pct=None,
-                         foundation_ma20=None) -> tuple[str, bool]:
+                         foundation_pose=None, anchor_pos=None,
+                         anchor_dist=None) -> tuple[str, bool]:
     """「为什么不买」的兜底讲解(复刻 tag_point 判定收集明细,只讲解不打标)。
     返回 (文案, 是否形态接近)。
 
@@ -359,15 +389,27 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
             if (foundation_chg is not None and b3_open is not None
                     and blo <= foundation_chg < bhi and b3_open < bcap):
                 fails.append(f"首板前日涨{_pct(foundation_chg)}先手小阳×三板开"
-                             f"{_pct(b3_open)}温着(<{bcap:g})=半路残局,不能打")
+                             f"{_pct(b3_open)}温着(<{bcap:g})=半路残局")
         bp10 = s.get("block_pre10")
         if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
             fails.append(f"首板前10日已涨{_pct(pre10_pct)}(≥{bp10:g}):近端透支,"
-                         "高位一字是末段冲刺,不能打")
-        bfm = s.get("block_foundation_ma20")
-        if bfm is not None and foundation_ma20 is not None and foundation_ma20 < bfm:
-            fails.append(f"地基距20日线{_pct(foundation_ma20)}(<{bfm:g}):弱票低位接"
-                         "必须接有人做过的,地基贴线的弱票没人要,不能打")
+                         "高位一字是末段冲刺")
+        fpok = s.get("foundation_pose_ok")
+        if fpok and foundation_pose not in ("站线上", "骑线", None):
+            if foundation_pose == "贴线":
+                fails.append("地基K线贴着20日线悬着(离线不到2%)=死水没人做,"
+                             "弱票要接有人做过的")
+            else:
+                fails.append("地基K线整根掉在20日线下头=没人救了,"
+                             "弱票要接有人做过的")
+        banch = s.get("block_anchor")
+        if banch is not None and anchor_pos is not None:
+            (alo, ahi), adist, aover = banch
+            if alo <= anchor_pos < ahi and anchor_dist is not None and anchor_dist <= adist:
+                fails.append(f"地基收盘距前期涨停高点{anchor_pos:+.1f}%(刚断{anchor_dist}日"
+                             "贴着不动)=断单板没能量")
+            elif anchor_pos >= aover:
+                fails.append(f"已超前期涨停高点{anchor_pos:+.1f}%=妖顶透支接最后一棒")
         lo, hi = s["today"]  # type: ignore[misc]
         if not (lo <= buy_open < hi):
             fails.append(f"今开{_pct(buy_open)},口诀要求{_fmt_range((lo, hi))}")
@@ -375,7 +417,8 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
             continue  # 全过=与 tag_point 的 miss 结论矛盾(不该发生),不展示
         score = -len(fails)
         if best is None or score > best[0]:
-            best = (score, f"形态接近口诀【{s['no']}·{s['name']}:{s['desc']}】——"
+            desc = s.get("desc") or contracts.POINT_DESC.get(str(s["no"]), "")
+            best = (score, f"形态接近口诀【{s['no']}·{s['name']}:{desc}】——"
                            f"这题{';'.join(fails[:2])},不能打")
     if best is not None:
         return best[1], True

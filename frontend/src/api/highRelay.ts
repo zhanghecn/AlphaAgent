@@ -271,6 +271,7 @@ export interface HprRulesPayload {
   anchors: Record<string, HprAnchorStats>;
   anchor_tolerances: Record<string, number>;
   case_gates: Omit<HprCaseGate, "actual_points" | "pass">[];
+  pose_cases?: import("@/features/highRelay/PoseCaseChart").HprPoseCase[]; // 地基姿态案例K线窗(v6.10,随物化出)
 }
 
 export function fetchHprLive(date?: string) {
@@ -338,6 +339,10 @@ export interface HprQuizDisplay {
   b2_turn: number | null;       // 二板换手率
   b3_turn: number | null;       // 三板换手率(三接四)
   pre20_pct: number | null;     // 首板前20日涨幅(半山腰判定)
+  pre10_pct: number | null;     // 首板前10日涨幅(A2近端透支判定)
+  foundation_pose: string | null; // 地基K线姿态(v6.10弱票腿B2/B3判定:站线上/骑线/贴线/掉线下)
+  foundation_ma20: number | null; // 地基日收盘距20日线%(v6.10起仅参考)
+  anchor_pos: number | null;      // 地基日收盘距前期涨停高点%(v6.8 C2锚点腿:贴着-2~0/超5%不碰)
   auction_pct: number;          // 今开%(决策日竞价)
   prev_close: number;
   limit_price: number | null;   // 涨停价(打板买入价)

@@ -281,7 +281,7 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
     repository.update_rebuild_run(run_id, status="running", stage="全量回放", started_at=now)
     try:
         E, bars = backtest_mod.build_events()
-        payload = backtest_mod.assemble_report(E)
+        payload = backtest_mod.assemble_report(E, bars)
         repository.update_rebuild_run(run_id, status="running", stage="题库构建")
         questions = quiz_mod.build_questions(E, bars)
     except Exception as exc:  # noqa: BLE001
@@ -428,6 +428,14 @@ def get_quiz_mixed(year: str | None = None) -> dict[str, object]:
 # ── 规则契约 ──
 
 def get_rules() -> dict[str, object]:
+    # 姿态案例K线窗随物化 payload 出(v6.10 规则页四宫格图解;旧物化无此键→空表)
+    pose_cases: list[dict[str, object]] = []
+    try:
+        row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
+        if row:
+            pose_cases = list(row.get("pose_cases") or [])
+    except Exception:
+        pose_cases = []
     return {
         "rules_version": contracts.HPR_RULES_VERSION,
         "group4_labels": contracts.GROUP4_LABELS,
@@ -447,6 +455,7 @@ def get_rules() -> dict[str, object]:
         "anchors": contracts.BACKTEST_ANCHORS,
         "anchor_tolerances": contracts.ANCHOR_TOLERANCES,
         "case_gates": contracts.CASE_GATES,
+        "pose_cases": pose_cases,
     }
 
 

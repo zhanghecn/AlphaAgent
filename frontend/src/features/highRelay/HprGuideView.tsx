@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { fetchHprRules } from "@/api/highRelay";
+import { PoseCaseChart } from "@/features/highRelay/PoseCaseChart";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { CopyThsConditionsButton } from "@/components/shared/CopyThsConditionsButton";
@@ -27,18 +28,23 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
 // 口诀卡顺序(主人定):阴阳分组,组内按二板开盘从低到高;与后端 RULES A/B/E 组序一致
 const POINT_ORDER = ["A1", "A2", "A3", "B2", "B1", "B3", "C1", "C2"] as const;
 
-// 速查表(主人定 2026-09-28):只要「阴阳地基 → 二板开 → 今天开 → 附加」四列,
-// 数据注记不进表;文案与后端 contracts.RULES/SCHEMES desc 同步(改一边必须改另一边)
-const CHEAT_ROWS: { name: string; yang: string; board: string; today: string; extra?: string; stat: string }[] = [
-  { name: "A1 双平贴零", yang: "阳·打3板", board: "二板<1", today: "6~9.5", extra: "一板<3·二板换手<12", stat: "16笔·胜69%·均+12.0" },
-  { name: "A2 一字转强", yang: "阳·打3板", board: "二板≥9.5一字", today: "7~8.5", extra: "一板<3时二板换手<5", stat: "25笔·胜64%·均+8.3" },
-  { name: "A3 高开低吸", yang: "阳·打4板", board: "三板开5~7", today: "<0", extra: "低开直接买", stat: "7笔·胜71%·均+8.9" },
-  { name: "B2 捡尸", yang: "阴·打3板", board: "二板<0或2~3", today: "<0", extra: "一板<0", stat: "14笔·胜79%·均+9.0" },
-  { name: "C1 冒泡转弱", yang: "阴阳·打3板", board: "二板3~7", today: "<3", extra: "一板≥7", stat: "14笔·胜86%·均+10.7" },
-  { name: "B1 强开系·转温", yang: "阴·打3板", board: "二板≥7", today: "3~5", extra: "一板≥7·换手≥5", stat: "19笔·胜89%·均+20.8(合体)" },
-  { name: "B1 强开系·续强", yang: "阴·打3板", board: "二板7~8.5(一字不算)", today: "6~9.5", extra: "一板不限", stat: "同上(两档合计)" },
-  { name: "B3 贴零温开", yang: "阴·打4板", board: "二板<1", today: "3~6", stat: "12笔·胜83%·均+12.7" },
-  { name: "C2 四板便捷", yang: "不分·打4板", board: "三板换手10~20", today: "5~9.5", extra: "一字系:换手3~5·今开6~9.5", stat: "78笔·胜69%·均+9.8" },
+// 速查表(主人定 2026-10-04 板位视角版):列=一板/二板/三板/今天开 各板条件,
+// 多分支口诀(A1/A2/B1/B2/C2)拆子项一行一支;打3板的「三板」=今天要打的板(条件即「今天开」列),
+// 「不看」=该板不构成判定条件;文案与后端 contracts.RULES/SCHEMES desc 同步(改一边必须改另一边)
+// stat=hpr-v6.9 E3 研究口径;B3 样本极小,数字仅记录不做预期
+const CHEAT_ROWS: { name: string; yang: string; b1: string; b2: string; b3: string; today: string; extra?: string; stat: string }[] = [
+  { name: "A1 双平贴零·低开等强开", yang: "阳·打3板", b1: "低开<0", b2: "开<1·换手<12", b3: "—", today: "强开6~9.5", stat: "7笔·胜100%·均+16.6" },
+  { name: "A1 双平贴零·平开等温开", yang: "阳·打3板", b1: "平开0~3", b2: "开<1·换手<12", b3: "—", today: "温开3~6", stat: "10笔·胜80%·均+8.0" },
+  { name: "A2 一字转强", yang: "阳·打3板", b1: "不限", b2: "一字≥9.5", b3: "—", today: "7~8.5", extra: "一板<3时二板换手<5·前10日涨<10", stat: "14笔·胜64%·均+11.0" },
+  { name: "B2 捡尸·双低", yang: "阴·打3板", b1: "低开<0", b2: "低开<0", b3: "—", today: "低开<0", extra: "地基站线上或骑线", stat: "8笔·胜88%·均+11.3" },
+  { name: "B2 捡尸·承接", yang: "阴·打3板", b1: "低开<0", b2: "开2~3", b3: "—", today: "低开<0", extra: "地基站线上或骑线", stat: "3笔·胜67%·均+8.8" },
+  { name: "C1 冒泡转弱", yang: "阴阳·打3板", b1: "≥7", b2: "开3~7", b3: "—", today: "弱开<3", stat: "15笔·胜73%·均+8.6" },
+  { name: "B1 强开系·转温", yang: "阴·打3板", b1: "≥7", b2: "≥7·换手≥5", b3: "—", today: "温开3~5", stat: "9笔·胜100%·均+23.2" },
+  { name: "B1 强开系·续强", yang: "阴·打3板", b1: "不限", b2: "开7~8.5·一字不算", b3: "—", today: "强开6~9.5", stat: "11笔·胜82%·均+5.8" },
+  { name: "B3 贴零温开", yang: "阴·打4板", b1: "不看", b2: "开<1", b3: "不看", today: "温开3~6", extra: "地基站线上或骑线", stat: "7笔·胜71%·均+18.1" },
+  { name: "C2 四板便捷·主档", yang: "不分·打4板", b1: "不看", b2: "不看", b3: "换手10~20", today: "5~9.5", extra: "锚点:贴前涨停高点(-2~0)或超5%不碰·先手小阳:首板前日涨1~3%且三板<7不碰", stat: "56笔·胜71%·均+8.7" },
+  { name: "C2 四板便捷·二板一字", yang: "不分·打4板", b1: "不看", b2: "一字≥9.5", b3: "换手3~5", today: "6~9.5", extra: "锚点/先手小阳同上", stat: "6笔·胜100%·均+11.9" },
+  { name: "C2 四板便捷·三板一字", yang: "不分·打4板", b1: "不看", b2: "不看", b3: "一字≥9.5·换手3~5", today: "6~9.5", extra: "锚点/先手小阳同上", stat: "4笔·胜75%·均+9.1" },
 ];
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本)。 */
@@ -66,7 +72,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            打板口诀卡七条(hpr-v6.7:A=阳B=阴C=中性,字母语义跨板位统一)全市场验证(2023-01 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
+            打板口诀卡七条(hpr-v6.10:A=阳B=阴C=中性,字母语义跨板位统一)全市场验证(2023-01 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
           </span>
         </div>
         <div className="mt-2 border-t pt-2 text-xs leading-5 text-muted-foreground">
@@ -83,7 +89,7 @@ export function HprGuideView() {
         <div className="mb-1 text-sm font-semibold">
           一句话：昨天恰好 2/3 连板的票，今天冲下一板——只对这七句口诀出手
           <span className="ml-2 font-mono text-xs font-normal text-primary">
-            合计 185笔·E3胜74%·均+11.06·月均4.3笔
+            合计 150笔·E3胜77%·均+10.6·月均3.3笔
           </span>
         </div>
         <div className="mb-2 text-xs text-muted-foreground">
@@ -95,7 +101,9 @@ export function HprGuideView() {
             <tr className="border-b text-left text-xs text-muted-foreground">
               <th className="py-1.5 pr-3 font-medium">口诀</th>
               <th className="py-1.5 pr-3 font-medium">地基</th>
-              <th className="py-1.5 pr-3 font-medium">判别腿</th>
+              <th className="py-1.5 pr-3 font-medium">一板</th>
+              <th className="py-1.5 pr-3 font-medium">二板</th>
+              <th className="py-1.5 pr-3 font-medium">三板</th>
               <th className="py-1.5 pr-3 font-medium">今天开</th>
               <th className="py-1.5 pr-3 font-medium">附加</th>
               <th className="py-1.5 font-medium">成绩(E3)</th>
@@ -103,24 +111,74 @@ export function HprGuideView() {
           </thead>
           <tbody className="tabular-nums">
             {CHEAT_ROWS.map((r) => (
-              <tr key={r.name} className="border-b border-muted/40 last:border-0">
-                <td className="py-1.5 pr-3 font-medium">{r.name}</td>
-                <td className={`py-1.5 pr-3 ${r.yang.includes("阳") && !r.yang.includes("阴") ? "text-rise" : r.yang.includes("阴") && !r.yang.includes("阳") ? "text-fall" : "text-muted-foreground"}`}>
+              <tr key={r.name} className="border-b border-muted/40">
+                <td className="py-1.5 pr-3 font-medium whitespace-nowrap">{r.name}</td>
+                <td className={`py-1.5 pr-3 whitespace-nowrap ${r.yang.includes("阳") && !r.yang.includes("阴") ? "text-rise" : r.yang.includes("阴") && !r.yang.includes("阳") ? "text-fall" : "text-muted-foreground"}`}>
                   {r.yang}
                 </td>
-                <td className="py-1.5 pr-3 font-mono">{r.board}</td>
-                <td className="py-1.5 pr-3 font-mono font-semibold text-primary">{r.today}</td>
+                <td className={`py-1.5 pr-3 font-mono whitespace-nowrap ${r.b1 === "不看" || r.b1 === "—" ? "text-muted-foreground/50" : ""}`}>{r.b1}</td>
+                <td className="py-1.5 pr-3 font-mono whitespace-nowrap">{r.b2}</td>
+                <td className={`py-1.5 pr-3 font-mono whitespace-nowrap ${r.b3 === "不看" || r.b3 === "—" ? "text-muted-foreground/50" : ""}`}>{r.b3}</td>
+                <td className="py-1.5 pr-3 font-mono font-semibold text-primary whitespace-nowrap">{r.today}</td>
                 <td className="py-1.5 pr-3 font-mono text-muted-foreground">{r.extra ?? "—"}</td>
-                <td className="py-1.5 font-mono text-[11px] text-muted-foreground">{r.stat}</td>
+                <td className="py-1.5 font-mono text-[11px] text-muted-foreground whitespace-nowrap">{r.stat}</td>
               </tr>
             ))}
+            <tr className="border-t-2 border-muted/60">
+              <td className="py-1.5 pr-3 font-semibold" colSpan={5}>合计(七条·去重)</td>
+              <td className="py-1.5 pr-3" colSpan={2} />
+              <td className="py-1.5 font-mono text-[11px] font-semibold">150笔·胜77%·均+10.6</td>
+            </tr>
           </tbody>
         </table>
         <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
           换手心法：二接三看二板换手（阳锁阴活），三接四看三板换手，一板换手永远不用看；
           盘中首次触涨停价打（低吸类低开直接买），开盘≥9.5%顶格不命中；
           炸板次日走（T+1，一字跌停顺延），封住拿到断板（15日兜底）。
-          合计154笔 月均3.4笔（hpr-v6.7）；不挑就买是亏的（对照 41%/-1.5），其余一概不碰。
+          合计150笔 月均3.3笔（hpr-v6.10）；不挑就买是亏的（对照 41%/-1.5），其余一概不碰。
+        </p>
+      </section>
+
+      <section className="rounded-lg border p-4" aria-label="地基姿态图解">
+        <div className="mb-1 text-sm font-semibold">
+          地基姿态图解（捡尸 B2 / 贴零温开 B3 的附加腿，v6.10）
+        </div>
+        <div className="mb-2 text-xs text-muted-foreground">
+          看首板前一天那根K线（箭头「地基日」）和 20日线（蓝线）的位置——
+          站线上、骑线的，接；贴线的、掉线下的，不接。四张图=真实特征票K线（地基日前12根~买入日）。
+        </div>
+        {rules.pose_cases && rules.pose_cases.length > 0 ? (
+          <div className="grid gap-3 md:grid-cols-2">
+            {rules.pose_cases.map((c) => (
+              <div key={`${c.name}-${c.date}`} className="rounded-md border p-2">
+                <div className="mb-1 flex items-baseline gap-2">
+                  <span className="text-xs font-semibold">
+                    {c.pose}{c.pose === "站线上" || c.pose === "骑线" ? "（✅接）" : "（❌不接）"}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground">
+                    {c.name} {c.date.slice(2)} {c.e3 != null ? `${c.e3 > 0 ? "+" : ""}${c.e3.toFixed(1)}%` : ""}
+                  </span>
+                </div>
+                <PoseCaseChart c={c} />
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{c.note}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <pre className="overflow-x-auto rounded-md bg-muted/40 p-3 font-mono text-xs leading-5">{`   ①站线上(有人扛)    ②骑线(有人争)     ③贴线(死水)      ④掉线下(没人救)
+                          ┃
+      ┃                   ┃                ┃
+      ┃                   ┃                ┃
+      ┃                   ┃                ┃
+ ═════╧═══ MA20     ═════╪═══ MA20    ═════╧═══ MA20   ═══════════ MA20
+                          ┃                                 ┃
+                          ┃                                 ┃
+ 最低价离线≥2%        线拦腰穿过K线      最低价贴线<2%      最高价也在线下
+      ✅接                ✅接              ❌不接             ❌不接`}</pre>
+        )}
+        <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+          数字口径：最低价距20日线≥2%＝站线上；最低价在线下且最高价在线上＝骑线；
+          最低价在线上但离线&lt;2%＝贴线；最高价也在线下＝掉线下。
         </p>
       </section>
 
@@ -159,9 +217,14 @@ export function HprGuideView() {
                   </span>
                 </div>
                 <p className="whitespace-pre-line font-mono text-sm leading-6 text-foreground">{ruleText}</p>
-                <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
-                  成绩:{it.evidence}
-                </p>
+                <div className="mt-1 text-xs leading-5">
+                  <span className="text-muted-foreground">成绩:</span>
+                  {it.evidence.split("\n").map((ln, j) => (
+                    <div key={j} className={j === 0 ? "font-medium text-foreground" : "pl-3 text-muted-foreground"}>
+                      {ln}
+                    </div>
+                  ))}
+                </div>
                 {rules.point_psycho?.[pk] ? (
                   <p className="mt-1 whitespace-pre-line text-xs leading-5 text-muted-foreground">
                     主力怎么想:{rules.point_psycho[pk]}

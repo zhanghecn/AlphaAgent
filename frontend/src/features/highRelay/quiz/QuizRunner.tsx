@@ -310,7 +310,7 @@ export function QuizRunner({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-4 sm:gap-x-6 lg:grid-cols-8">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-5 sm:gap-x-6 lg:grid-cols-10">
           {fBar ? (
             <InfoCell
               label={`地基日 ${fBar.d.slice(5)}`}
@@ -318,6 +318,8 @@ export function QuizRunner({
               extra={fBar.c >= fBar.o ? "阳地基" : "阴地基"}
             />
           ) : null}
+          <InfoCell label="地基姿态" value={d.foundation_pose ?? "—"} />
+          <InfoCell label="距前涨停高" value={fmtSigned(d.anchor_pos ?? null)} />
           <InfoCell label="一板开" value={fmtSigned(d.b1_open)} />
           <InfoCell
             label="二板开"

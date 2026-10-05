@@ -41,13 +41,14 @@ MAX_K = 15                 # 前向列深度:n1=入场次日 … n15=兜底出�
 def run_backtest() -> dict[str, object]:
     """全量回放并返回物化 payload(不写库,由调用方持久化)。"""
     E, _bars = build_events()
-    return assemble_report(E)
+    return assemble_report(E, _bars)
 
 
-def assemble_report(E: pd.DataFrame) -> dict[str, object]:
+def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[str, object]:
     """由事件表组装物化报告(service  rebuild 时与题库构建共用同一次回放)。
 
-    只在此处挂「同票持仓重叠」标记(题库构建用原始 E 表,不受影响)。"""
+    只在此处挂「同票持仓重叠」标记(题库构建用原始 E 表,不受影响)。
+    bars 传入时附 pose_cases(地基姿态案例K线窗,规则页四宫格图解用,v6.10)。"""
     done = E[~E["未完"]].copy()
     _mark_overlap(done)
 
@@ -102,7 +103,38 @@ def assemble_report(E: pd.DataFrame) -> dict[str, object]:
         "radar": _radar_stats(done),
     }
     payload["ledger_days"] = _ledger_days(frames["all"], repository.load_touch_map())
+    if bars is not None:
+        payload["pose_cases"] = _pose_cases(E, bars)
     return payload
+
+
+def _pose_cases(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, object]]:
+    """地基姿态四案例的K线窗(地基日前12根~决策日,含ma20线与地基日序号)。
+
+    规则说明页四宫格渲染用(v6.10,主人2026-10-05:示意图须真实案例票K线,
+    放大到能看清地基日K线与20日线的距离)。"""
+    out: list[dict[str, object]] = []
+    for case in contracts.FOUNDATION_POSE_CASES:
+        d = pd.Timestamp(case["date"])
+        row = E[(E["名称"].str.replace(" ", "", regex=False) == case["name"])
+                & (E["买入日"] == d)]
+        if not len(row):
+            continue
+        r = row.iloc[0]
+        i = int(r["_bar_i"])
+        f = i - 1 - int(r["N"])              # 地基日
+        w0 = max(0, f - 12)
+        sub = bars.iloc[w0:i + 1]
+        sub = sub[sub["vt_symbol"] == str(r["代码"])]
+        kline = [{
+            "time": pd.Timestamp(b["trade_date"]).date().isoformat(),
+            "open": float(b["open_price"]), "high": float(b["high_price"]),
+            "low": float(b["low_price"]), "close": float(b["close_price"]),
+            "ma20": (float(b["ma20"]) if b["ma20"] == b["ma20"] else None),
+        } for _, b in sub.iterrows()]
+        out.append({**case, "code": str(r["代码"]), "kline": kline,
+                    "foundation_idx": int(f - w0), "e3": float(r["E3%"])})
+    return out
 
 
 # ── 事件池构建(买入日 D 行;静态字段由 pool.static_fields 按行算) ──
@@ -166,7 +198,8 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             rec.get("b3_open"), auction_pct=buy_open, b2_turn=rec.get("b2_turn"),
             b3_turn=rec.get("b3_turn"), foundation_chg=rec.get("foundation_chg"),
             pre10_pct=rec.get("pre10_pct"),
-            foundation_ma20=rec.get("foundation_ma20_gap"))
+            foundation_pose=rec.get("foundation_pose"),
+            anchor_pos=rec.get("anchor_pos"), anchor_dist=rec.get("anchor_dist"))
         avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
                                       rec.get("b2_open"), rec.get("pre3_pct"))
         sealed = bool(cols["is_lim"][i])
@@ -309,6 +342,9 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "前20日涨幅%": rec.get("pre20_pct"),
             "前10日涨幅%": rec.get("pre10_pct"),
             "地基距MA20%": rec.get("foundation_ma20_gap"),
+            "地基姿态": rec.get("foundation_pose"),   # v6.10 B2/B3判定字段(站线上/骑线/贴线/掉线下)
+            "锚位%": rec.get("anchor_pos"),      # 地基收盘距前20日最近涨停高点(v6.8 C2腿)
+            "锚距": rec.get("anchor_dist"),
             "换手梯度": rec["turn_grad"],
             "昨日涨停家数": int(cols["mkt_prev"][i]) if cols["mkt_prev"][i] == cols["mkt_prev"][i] else None,
         })
