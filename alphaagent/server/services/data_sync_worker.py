@@ -25,10 +25,10 @@ EXPECTED_RUNTIME_CONSTANTS = {
     "SCHEDULER_TICK_SECONDS": 2,
 }
 SCHEDULE_HEARTBEAT_MAX_AGE_SECONDS = {
-    "low_suction_live_scan": 180,
+    # 2026-10-02 短线页双主线重构:低吸线全线下线(调度停),
+    # low_suction_live_scan 心跳要求随之移除(此前健康检查误报 503 ~3天)
 }
 SCHEDULE_ACTIONS = {
-    "low_suction_live_scan": "low_suction_live_scan",
 }
 
 
