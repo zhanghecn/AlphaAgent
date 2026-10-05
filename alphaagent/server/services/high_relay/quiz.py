@@ -20,7 +20,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 32  # v32:C2口诀直白化+判分红格(主人2026-10-05「读不懂/前后矛盾/哪里不符合标红」):C2两条腿弃研究黑话(先手小阳/锚点)改直白句式,「首板前日」统一叫「地基日」与题面格子同名;速查表「附加」列改「地基日」列(腿全部进主列正常字号);miss讲解加fail_fields(题面格子标签,前端判分后红格标出不符合的腿);题面地基日涨幅数字单源(display.foundation_chg下发,修前端拿K线c/o重算与判定字段两口径+1.7/+1.8裂开);判定零漂移;# v31:命中讲解卡与规则页速查表统一(主人2026-10-05「答题这里没有统一」):scheme_name 改子项全名(A1 双平贴零·低开等强开式,tag_scheme 定位分支),讲解改表格行(scheme_row=速查表命中行:地基/一板/二板/三板/今天开/附加/成绩),删话术字段(scheme_desc/psycho/hold_note/case_note/half_mountain/today_window——「不需要其他多余的话术」);判定零漂移(tag_scheme=tag_point 原逻辑拆壳);# v30:hpr-v6.10——弱票地基腿换K线姿态尺(站线上/骑线=接,贴线/掉线下=不接),题面「地基距20日线」数值格改「地基姿态」标签,B2 7→11笔/B3 5→7笔(信隆+51/东百+31.8回归,神雾-25.9/新乡-18.3挡外);# v29:A1口诀文案人话化(主人反馈「低开→6~9.5/平开→3~6」箭头式读不懂,改「一板低开(<0)的,等今天强开6~9.5」句式,判定零漂移仅文案);# v28:hpr-v6.9——A1交叉反转双分支(一板低开<0等强开6~9.5/一板平开0~3等温开3~6,题库重打标:长白山归miss/津药·滨海·国创等10笔入A1);# v27:hpr-v6.8——C2锚点腿(前期涨停高点贴着没过/超5%不碰)+A3退役(题库重打标,利君/京能/万安归miss)+题面补「距前涨停高」格;# v26:题面补「地基距20日线」格(v6.6弱票腿判定字段上题面,做题可判,主人2026-10-04做题撞出)+修讲解「不能打,不能打」重复;# v25:跌停口径修正(hpr-v6.7):仅一字死封顺延,其余按跌停价卖出;# v24:弱票三口诀加地基腿(hpr-v6.6):A3/B2/B3地基距MA20<5%不命中;# v23:退出价口径升级(hpr-v6.5):E3改纯收盘价+跌停顺延,去v4.3中间价美化(尾盘只有收盘价);收益列随v6.5重算
+QUIZ_CONTENT_VERSION = 34  # v34:miss题讲解配「错误口诀」表格+红列(主人2026-10-05「错误的口诀也应该给出表格,把错误的某一列标记红色提示哪里没有匹配上」):explain_miss 四元组加 scheme_row(毒段/形态接近题=最接近口诀的速查表行,链形不沾边=None),下发 row_fails 列键(题面格子标签映射:换手归板位列/地基日各腿归地基日列/半山腰无列丢弃);阴阳反串题表格=对面口诀行,红列只标「组」(对面全符唯一错阴阳,原组腿标签不进对面行防误导);hit 题对称下发 row_fails=[];# v33:hpr-v6.11 C2一拆二——四板便捷退役:实体板归C2四板换手/一字锁仓归C3一字换手(主人「这明显不是一个口诀,口诀分界线没弄明白」),判定集合零漂移纯编号手术,题库重打标C2 66→56+C3 10;讲解口诀名同步(【C2·四板换手】【C3·一字换手】);# v32:C2口诀直白化+判分红格(主人2026-10-05「读不懂/前后矛盾/哪里不符合标红」):C2两条腿弃研究黑话(先手小阳/锚点)改直白句式,「首板前日」统一叫「地基日」与题面格子同名;速查表「附加」列改「地基日」列(腿全部进主列正常字号);miss讲解加fail_fields(题面格子标签,前端判分后红格标出不符合的腿);题面地基日涨幅数字单源(display.foundation_chg下发,修前端拿K线c/o重算与判定字段两口径+1.7/+1.8裂开);判定零漂移;# v31:命中讲解卡与规则页速查表统一(主人2026-10-05「答题这里没有统一」):scheme_name 改子项全名(A1 双平贴零·低开等强开式,tag_scheme 定位分支),讲解改表格行(scheme_row=速查表命中行:地基/一板/二板/三板/今天开/附加/成绩),删话术字段(scheme_desc/psycho/hold_note/case_note/half_mountain/today_window——「不需要其他多余的话术」);判定零漂移(tag_scheme=tag_point 原逻辑拆壳);# v30:hpr-v6.10——弱票地基腿换K线姿态尺(站线上/骑线=接,贴线/掉线下=不接),题面「地基距20日线」数值格改「地基姿态」标签,B2 7→11笔/B3 5→7笔(信隆+51/东百+31.8回归,神雾-25.9/新乡-18.3挡外);# v29:A1口诀文案人话化(主人反馈「低开→6~9.5/平开→3~6」箭头式读不懂,改「一板低开(<0)的,等今天强开6~9.5」句式,判定零漂移仅文案);# v28:hpr-v6.9——A1交叉反转双分支(一板低开<0等强开6~9.5/一板平开0~3等温开3~6,题库重打标:长白山归miss/津药·滨海·国创等10笔入A1);# v27:hpr-v6.8——C2锚点腿(前期涨停高点贴着没过/超5%不碰)+A3退役(题库重打标,利君/京能/万安归miss)+题面补「距前涨停高」格;# v26:题面补「地基距20日线」格(v6.6弱票腿判定字段上题面,做题可判,主人2026-10-04做题撞出)+修讲解「不能打,不能打」重复;# v25:跌停口径修正(hpr-v6.7):仅一字死封顺延,其余按跌停价卖出;# v24:弱票三口诀加地基腿(hpr-v6.6):A3/B2/B3地基距MA20<5%不命中;# v23:退出价口径升级(hpr-v6.5):E3改纯收盘价+跌停顺延,去v4.3中间价美化(尾盘只有收盘价);收益列随v6.5重算
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 _MISS_WIN_LINE = "正常开盘未命中对照2180笔:胜率41% 均-1.4——不挑就买是亏的"
@@ -36,7 +36,7 @@ MIX_TRAP_MAX = 35
 MIX_TRAP_KINDS = ("yin_yang", "near", "toxic")
 
 # 阴阳反串判定:对面地基组完整命中某条口诀(链+换手+今开全判)。
-# C1冒泡转弱/四板便捷两组都含,天然不会误判(哪组判都命中的票不是 miss)。
+# C1冒泡转弱/四板换手两组都含,天然不会误判(哪组判都命中的票不是 miss)。
 _OPPOSITE_GROUP4 = {"二接三阳": "二接三阴", "二接三阴": "二接三阳",
                     "三接四阳": "三接四阴", "三接四阴": "三接四阳"}
 
@@ -118,20 +118,19 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
             # 讲解与规则页速查表统一(q31,主人2026-10-05):子项全名(A1 双平贴零·低开等强开)
             # + 速查表命中行表格化讲解,替代口诀全文/主力心理/持有纪律等话术
             sub = str(hit_scheme.get("sub") or "")  # type: ignore[union-attr]
-            scheme_row = next((rr for rr in contracts.CHEAT_ROWS
-                               if rr["no"] == point and rr.get("sub", "") == sub), None)
             explain: dict[str, object] = {
                 "kind": "hit",
                 "scheme_no": point,
                 "scheme_name": contracts.POINT_LABELS.get(point, point)
                                + (f"·{sub}" if sub else ""),
-                "scheme_row": scheme_row,
+                "scheme_row": _cheat_row(point, sub),
                 "matched_line": _matched_line(n_board, b1_open, b2_open, b3_open,
                                               b2_turn, b3_turn, buy_open, win),
                 "fail_fields": [],
+                "row_fails": [],
             }
         else:
-            reasons, trap_kind, fail_fields = explain_miss(
+            reasons, trap_kind, fail_fields, miss_row = explain_miss(
                 n_board=n_board, yang=yang, group4=group4,
                 b1_open=b1_open, b2_open=b2_open, b3_open=b3_open,
                 b2_turn=b2_turn, b3_turn=b3_turn,
@@ -142,13 +141,15 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                                     anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None))
             # 阴阳反串:链形完整命中对面地基组的某条口诀(跨阴阳铁律陷阱,
             # 教学标签最鲜明,覆盖 near/toxic/plain),讲解首位说明
-            opp_point = pool_mod.tag_point(
+            opp_scheme = pool_mod.tag_scheme(
                 _OPPOSITE_GROUP4[group4], b1_open, b2_open, b3_open,
                 auction_pct=buy_open, b2_turn=b2_turn, b3_turn=b3_turn,
                 foundation_chg=foundation_chg, pre10_pct=pre10,
                 foundation_pose=(r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
                                     anchor_pos=_f(r["锚位%"]),
                                     anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None))
+            opp_point = str(opp_scheme["no"]) if opp_scheme else "—"
+            row_fails = _row_fails(fail_fields)
             if opp_point != "—":
                 trap_kind = "yin_yang"
                 opp_yang = "阳" if _OPPOSITE_GROUP4[group4].endswith("阳") else "阴"
@@ -160,8 +161,13 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, objec
                     *reasons[:2],
                 ]
                 fail_fields = ["阴阳", *fail_fields]
+                # 反串题表格=对面口诀行,红列只标「组」(对面口诀本身全符,
+                # 唯一错的是地基阴阳;原组视角的腿标签不进对面行,防误导)
+                miss_row = _cheat_row(opp_point, str(opp_scheme.get("sub") or ""))
+                row_fails = ["yang"]
             explain = {"kind": "miss", "trap_kind": trap_kind, "reasons": reasons,
-                       "fail_fields": fail_fields}
+                       "fail_fields": fail_fields, "scheme_row": miss_row,
+                       "row_fails": row_fails}
 
         hold_days = exit_off  # E3 口径持有交易日数(炸板=1,顺延>1,封住=到断板)
         payload = {
@@ -229,16 +235,19 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
                  b1_open, b2_open, b3_open, b2_turn, b3_turn,
                  buy_open: float, pre20_pct, foundation_chg=None,
                  pre10_pct=None, foundation_pose=None,
-                 anchor_pos=None, anchor_dist=None) -> tuple[list[str], str, list[str]]:
+                 anchor_pos=None, anchor_dist=None) -> tuple[list[str], str, list[str], dict | None]:
     """未命中题的「为什么不该买」:按优先级产 1~3 条人话理由(全部正常中文)。
-    返回 (reasons, trap_kind, fail_fields):fail_fields=不符合的腿对应的题面格子标签
-    (前端判分后红格标出,主人2026-10-05「哪里不符合标红色」)。trap_kind:
+    返回 (reasons, trap_kind, fail_fields, scheme_row):
+    fail_fields=不符合的腿对应的题面格子标签(前端判分后红格标出,主人2026-10-05
+    「哪里不符合标红色」);scheme_row=最接近口诀的速查表行(主人2026-10-05
+    「错误的口诀也应该给出表格」——毒段/形态接近题=链全符差一腿的口诀行,
+    链形不沾边题=None 无行)。trap_kind:
     toxic=毒段规则命中/near=形态接近(链全符差条件)/plain=链形不沾边;
     yin_yang(阴阳反串)由 build_questions 单独判定覆盖。"""
     # 1. 顶格:终结论,只报这条(q4 起题库已剔顶格,此为防御分支,正常不会触发)
     if buy_open >= contracts.TODAY_CAP:
         return ([f"今开{_pct(buy_open)}顶格:排队也买不到,口诀一律不打(硬规则)"],
-                "plain", ["今开"])
+                "plain", ["今开"], None)
     reasons: list[str] = []
     ffails: list[str] = []
     if n_board == 2 and yang:
@@ -299,29 +308,29 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
         if b3_turn is not None and 5 <= buy_open < contracts.TODAY_CAP:
             if is_yizi:
                 if not (3 <= b3_turn < 5):
-                    reasons.append(f"口诀【C2·四板便捷·一字系档】「一字系(二板或三板一字)"
+                    reasons.append(f"口诀【C3·一字换手】「二板或三板一字"
                                    f"——三板换手3~5、今天开6~9.5」"
                                    f"——这题三板换手{b3_turn:.1f}不在3~5,不能打")
                     ffails.append("三板开")
                 elif buy_open < 6:
-                    reasons.append(f"口诀【C2·四板便捷·一字系档】「一字系(二板或三板一字)"
+                    reasons.append(f"口诀【C3·一字换手】「二板或三板一字"
                                    f"——三板换手3~5、今天开6~9.5」"
                                    f"——这题换手{b3_turn:.1f}虽在3~5,今开{_pct(buy_open)}<6"
                                    "温吞=让利没人接(5~6段全灭),不能打")
                     ffails.append("今开")
             elif b3_turn < 10:
-                reasons.append(f"口诀【C2·四板便捷】「三板换手10~20、今天开5~9.5、不分阴阳」"
+                reasons.append(f"口诀【C2·四板换手】「三板换手10~20=有人真接力,今天开5~9.5,打」"
                                f"——这题三板换手{b3_turn:.1f}不在10~20:"
                                "换手不足=没人气的假强缩量板,不能打")
                 ffails.append("三板开")
             elif b3_turn >= 20:
-                reasons.append(f"口诀【C2·四板便捷】「三板换手10~20、今天开5~9.5、不分阴阳」"
+                reasons.append(f"口诀【C2·四板换手】「三板换手10~20=有人真接力,今天开5~9.5,打」"
                                f"——这题三板换手{b3_turn:.1f}不在10~20:主力对倒出货,不能打")
                 ffails.append("三板开")
         # 7. 今开温吞毒段(换手合格但开得不冷不热)
         if (b3_turn is not None and 10 <= b3_turn < 20
                 and 6 <= buy_open < 7):
-            reasons.append(f"口诀【C2·四板便捷】「三板换手10~20、今天开5~9.5、不分阴阳」"
+            reasons.append(f"口诀【C2·四板换手】「三板换手10~20=有人真接力,今天开5~9.5,打」"
                            f"——这题今开{_pct(buy_open)}落在6~7温吞段:不冷不热,"
                            "口诀窗内也可以跳过的38%毒段(金核在7~8.5)")
             ffails.append("今开")
@@ -331,7 +340,7 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
                 and b3_open is not None and b3_open < 7
                 and 5 <= buy_open < contracts.TODAY_CAP):
             reasons.append(
-                f"口诀【C2·四板便捷】「地基日涨了1~3个点——三板要开到7以上才打,"
+                f"口诀【C2·四板换手】「地基日涨了1~3个点——三板要开到7以上才打,"
                 f"温开不碰」——这题地基日涨{_pct(foundation_chg)}×"
                 f"三板开{_pct(b3_open)}温着没人接=有人先手的半路残局,不能打")
             ffails.append("地基日")
@@ -342,44 +351,51 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
                 and 5 <= buy_open < contracts.TODAY_CAP):
             if -2.0 <= anchor_pos < 0.0 and anchor_dist is not None and anchor_dist <= 7:
                 reasons.append(
-                    f"口诀【C2·四板便捷】「前面涨停过的——地基日贴着涨停价上不去,"
+                    f"口诀【C2·四板换手】「前面涨停过的——地基日贴着涨停价上不去,"
                     f"不碰」——这题地基日收盘距前期涨停高点{anchor_pos:+.1f}%"
                     f"(刚断{anchor_dist}日贴着不动)=断单板没能量,不能打")
                 ffails.append("距前涨停高")
             elif anchor_pos >= 5.0:
                 reasons.append(
-                    f"口诀【C2·四板便捷】「前面涨停过的——已高出涨停价5个点以上,"
+                    f"口诀【C2·四板换手】「前面涨停过的——已高出涨停价5个点以上,"
                     f"不碰」——这题已超前期涨停高点{anchor_pos:+.1f}%"
                     "=连板妖顶透支接最后一棒,不能打")
                 ffails.append("距前涨停高")
     if reasons:
-        return reasons[:3], "toxic", ffails[:4]
-    # 9. 兜底:形态接近(链全符差条件) 或 链形不沾边(含本组口诀清单),恒非 None
-    nearest, near_hit, near_ffails = _nearest_scheme_line(
+        # 毒段题也配最接近口诀行(链全符差一腿,主人「错误的口诀也应该给出表格」);
+        # 链形不沾边 → 行 None(无错误口诀可对照)
+        *_, row = _nearest_scheme_line(
+            group4, b1_open, b2_open, b3_open,
+            b2_turn, b3_turn, buy_open,
+            foundation_chg, pre10_pct,
+            foundation_pose, anchor_pos, anchor_dist)
+        return reasons[:3], "toxic", ffails[:4], row
+    # 9. 兜底:形态接近(链全符差差条件) 或 链形不沾边(含本组口诀清单),恒非 None
+    nearest, near_hit, near_ffails, row = _nearest_scheme_line(
         group4, b1_open, b2_open, b3_open,
         b2_turn, b3_turn, buy_open,
         foundation_chg, pre10_pct,
         foundation_pose, anchor_pos, anchor_dist)
-    return [nearest, _MISS_WIN_LINE], ("near" if near_hit else "plain"), near_ffails
+    return [nearest, _MISS_WIN_LINE], ("near" if near_hit else "plain"), near_ffails, row
 
 
 def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
                          b2_turn, b3_turn, buy_open: float,
                          foundation_chg=None, pre10_pct=None,
                          foundation_pose=None, anchor_pos=None,
-                         anchor_dist=None) -> tuple[str, bool, list[str]]:
+                         anchor_dist=None) -> tuple[str, bool, list[str], dict | None]:
     """「为什么不买」的兜底讲解(复刻 tag_point 判定收集明细,只讲解不打标)。
-    返回 (文案, 是否形态接近, fail格子标签)。
+    返回 (文案, 是否形态接近, fail格子标签, 最接近口诀的速查表行)。
 
     两阶段(主人定:链腿不符的方案不能叫「最接近」——核心形态都不对,推荐即误导;
     阴阳分组必须说清楚):
     1. 链三腿全部符合的方案(形态对,只是换手/今开差一点) →
-       「形态接近【名字:口诀】——这题xx,口诀要求xx,不能打」;
+       「形态接近【名字:口诀】——这题xx,口诀要求xx,不能打」+ 该口诀速查表行;
     2. 链全不符 → 「链形(一板开x × 二板开x)不在任何口诀区间——这题是X地基的
-       二接三/三接四,能对照的口诀:名/名/名,都不沾」。
+       二接三/三接四,能对照的口诀:名/名/名,都不沾」,行 None。
     """
     # 阶段1:链全符,只差换手/今开
-    best: tuple[int, str, list[str]] | None = None
+    best: tuple[int, str, list[str], dict | None] | None = None
     for s in contracts.SCHEMES:
         if group4 not in s["group4"]:
             continue
@@ -453,9 +469,10 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
         if best is None or score > best[0]:
             desc = s.get("desc") or contracts.POINT_DESC.get(str(s["no"]), "")
             best = (score, f"形态接近口诀【{s['no']}·{s['name']}:{desc}】——"
-                           f"这题{';'.join(fails[:2])},不能打", tags)
+                           f"这题{';'.join(fails[:2])},不能打", tags,
+                    _cheat_row(str(s["no"]), str(s.get("sub") or "")))
     if best is not None:
-        return best[1], True, best[2]
+        return best[1], True, best[2], best[3]
     # 阶段2:链全不符——报链形 + 本组(阴阳分清)能对照的口诀清单(v4.4多分支共享名,去重)
     names = list(dict.fromkeys(
         str(s["name"]) for s in contracts.SCHEMES if group4 in s["group4"]))
@@ -466,7 +483,7 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
     if pos_label == "三接四":
         chain_desc += f" × 三板开{_pct(b3_open)}"
     return (f"链形({chain_desc})不在任何口诀区间——这题是{yang_label}地基的{pos_label},"
-            f"能对照的口诀:{'/'.join(names)},形态都不沾,不用买"), False, chain_tags
+            f"能对照的口诀:{'/'.join(names)},形态都不沾,不用买"), False, chain_tags, None
 
 
 def _matched_line(n_board: int, b1_open, b2_open, b3_open,
@@ -484,6 +501,25 @@ def _matched_line(n_board: int, b1_open, b2_open, b3_open,
     if win:
         line += f" 落在窗{_fmt_range(win)}"
     return line
+
+
+def _cheat_row(no: str, sub: str) -> dict | None:
+    """(编号,子项) → 速查表行(C2 一拆二后单分支口诀 sub 传空串)。"""
+    return next((rr for rr in contracts.CHEAT_ROWS
+                 if rr["no"] == no and rr.get("sub", "") == sub), None)
+
+
+# 题面格子标签 → 速查表列键(主人2026-10-05「错误的口诀也给出表格+错误列标红」):
+# 换手并进对应板位列文案(b2/b3),地基日各腿(姿态/锚点/前10日)都归「地基日」列;
+# 首板前20日=半山腰背景毒,表格无对应列,丢弃
+_FIELD_TO_COL = {"阴阳": "yang", "一板开": "b1", "二板开": "b2", "三板开": "b3",
+                 "今开": "today", "地基日": "ground", "地基姿态": "ground",
+                 "距前涨停高": "ground", "首板前10日": "ground"}
+
+
+def _row_fails(fail_fields: list[str]) -> list[str]:
+    return list(dict.fromkeys(
+        _FIELD_TO_COL[f] for f in fail_fields if f in _FIELD_TO_COL))
 
 
 def _pct(v) -> str:

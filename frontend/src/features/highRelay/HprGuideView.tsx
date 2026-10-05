@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { fetchHprRules } from "@/api/highRelay";
@@ -93,11 +94,20 @@ export function HprGuideView() {
             </tr>
           </thead>
           <tbody className="tabular-nums">
-            {rules.cheat_rows.map((r) => (
-              <CheatTableRow key={r.name} row={r} />
+            {rules.cheat_rows.map((r, i) => (
+              <Fragment key={r.name}>
+                {i === 0 || r.yang.replace(/^.*·/, "") !== rules.cheat_rows[i - 1].yang.replace(/^.*·/, "") ? (
+                  <tr className="border-b-2 border-muted/40">
+                    <td className="py-1 pr-3 text-[11px] font-semibold text-muted-foreground" colSpan={8}>
+                      {r.yang.replace(/^.*·/, "") === "打3板" ? "打3板（二接三）" : "打4板（三接四）"}
+                    </td>
+                  </tr>
+                ) : null}
+                <CheatTableRow row={r} />
+              </Fragment>
             ))}
             <tr className="border-t-2 border-muted/60">
-              <td className="py-1.5 pr-3 font-semibold" colSpan={5}>合计(七条·去重)</td>
+              <td className="py-1.5 pr-3 font-semibold" colSpan={5}>合计(八条·去重)</td>
               <td className="py-1.5 pr-3" colSpan={2} />
               <td className="py-1.5 font-mono text-[11px] font-semibold">150笔·胜77%·均+10.6</td>
             </tr>
@@ -107,7 +117,7 @@ export function HprGuideView() {
           换手心法：二接三看二板换手（阳锁阴活），三接四看三板换手，一板换手永远不用看；
           盘中首次触涨停价打（低吸类低开直接买），开盘≥9.5%顶格不命中；
           炸板次日走（T+1，一字跌停顺延），封住拿到断板（15日兜底）。
-          合计150笔 月均3.3笔（hpr-v6.10）；不挑就买是亏的（对照 41%/-1.5），其余一概不碰。
+          合计150笔 月均3.3笔（hpr-v6.11）；不挑就买是亏的（对照 41%/-1.5），其余一概不碰。
         </p>
       </section>
 

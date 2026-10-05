@@ -54,7 +54,8 @@ const LIVE_PAYLOAD: HprLivePayload = {
     C1: "C1 冒泡转弱",
     A3: "A3 高开低吸",
     B3: "B3 贴零温开",
-    C2: "C2 四板便捷",
+    C2: "C2 四板换手",
+    C3: "C3 一字换手",
   },
   point_levels: { A1: "A", A2: "A", B1: "A", B2: "A", C1: "A", A3: "A", B3: "A", C2: "A" },
   last_scan: null,
@@ -466,7 +467,8 @@ const QUIZ_MISS_Q: HprQuizQuestion = {
     sealed: false, hold_days: null, exit_date: "2024-11-29", exit_price: 20.76,
     exit_reason: "break_day_close",
   },
-  explain: { kind: "miss", reasons: ["今开+10.0顶格:排队也买不到,口诀一律不打(硬规则)"], fail_fields: ["今开"] },
+  explain: { kind: "miss", reasons: ["今开+10.0顶格:排队也买不到,口诀一律不打(硬规则)"],
+             fail_fields: ["今开"], scheme_row: null, row_fails: ["today"] },
 };
 
 function renderRunner(props?: {
@@ -554,6 +556,7 @@ describe("QuizRunner 答题流", () => {
     expect(html).toContain("为什么不买");
     expect(html).toContain("顶格");
     expect(html).toContain("只看不做");
+    expect(html).not.toContain("成绩(E3)");        // 顶格题链形不沾边=无最接近口诀,不渲染表格(q34)
     expect(html).toContain("打4板");
     expect(html).toContain("看本段总结");          // 最后一题揭示后的入口
   });
@@ -655,6 +658,13 @@ describe("QuizRunner 综合挑战卷(mixed)", () => {
       kind: "miss",
       trap_kind: "yin_yang",
       reasons: ["链形是口诀【A2 一字转强】的形态,但那条只在阳地基成立——这题是阴地基,阴阳反了不能打(跨阴阳铁律)"],
+      fail_fields: ["阴阳"],
+      scheme_row: {
+        no: "A2", name: "A2 一字转强",
+        yang: "阳·打3板", b1: "不限", b2: "一字≥9.5·一板<3时换手<5", b3: "—",
+        today: "7~8.5", ground: "首板前10日涨<10", stat: "14笔·胜64%·均+11.0",
+      },
+      row_fails: ["yang"],
     },
   };
 
@@ -683,11 +693,17 @@ describe("QuizRunner 综合挑战卷(mixed)", () => {
     expect(html).toContain("2025年3月 · 打3板");
   });
 
-  it("已答跨月陷阱题:讲解含阴阳反串说明", () => {
+  it("已答跨月陷阱题:讲解含阴阳反串说明+对面口诀表格红组列(q34)", () => {
     const html = renderMixed({
       [quizQuestionId(CROSS_MONTH_Q)]: { choice: "reject", score: 10 },
     });
     expect(html).toContain("阴阳反了不能打");
     expect(html).toContain("跨阴阳铁律");
+    // 错误口诀也给表格:反串题=对面口诀(A2 一字转强)速查表行
+    expect(html).toContain("成绩(E3)");
+    expect(html).toContain("14笔·胜64%·均+11.0");
+    expect(html).toContain("阳·打3板");
+    // 组列标红(阴阳反了=组不符):红样式与题面判分红格同款
+    expect(html).toContain("bg-fall/10");
   });
 });

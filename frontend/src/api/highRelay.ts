@@ -6,11 +6,11 @@ import { apiClient } from "./client";
 // 触涨停价即打(低吸类低开直接买);开盘≥9.5%顶格不命中(正常开盘口径)。
 // 池 = 昨日2/3连板全量(雷达),七条 v6.0(A=阳B=阴C=中性,字母语义跨板位统一):
 // A1双平贴零/A2一字转强/A3高开低吸(三接四阳) B1强开系/B2捡尸/B3贴零温开(三接四阴)
-// C1冒泡转弱(二接三,阴阳都打)/C2四板便捷(三接四不分阴阳,含一字系3~5档)。
+// C1冒泡转弱(二接三,阴阳都打)/C2四板换手+C3一字换手(三接四不分阴阳,v6.11拆分)。
 
 export type HprPoint =
   | "A1" | "A2" | "B1" | "B2" | "C1"
-  | "A3" | "B3" | "C2" | "—";   // v6.0:A=阳/B=阴/C=中性(字母跨板位统一,E退休)
+  | "A3" | "B3" | "C2" | "C3" | "—";   // v6.0:A=阳/B=阴/C=中性(字母跨板位统一,E退休);v6.11:C3一字换手拆自C2
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
 
 export type HprStatus =
@@ -386,6 +386,7 @@ export interface HprQuizExplainHit {
   scheme_row: HprCheatRow | null; // 速查表命中行(表格化讲解;地基/一板/二板/三板/今天开/地基日/成绩)
   matched_line: string;         // 本票数据对照行
   fail_fields?: string[];       // 命中=空数组(红格仅 miss 题用)
+  row_fails?: string[];         // 速查表红列键(q34;hit 恒空)
 }
 
 export interface HprQuizExplainMiss {
@@ -393,6 +394,8 @@ export interface HprQuizExplainMiss {
   trap_kind?: "yin_yang" | "near" | "toxic" | "plain";  // 陷阱类型(q10起,综合挑战卷抽题用)
   reasons: string[];            // 为什么不该买(1~3条)
   fail_fields?: string[];       // 不符合的腿对应的题面格子标签(q32:前端判分后红格标出)
+  scheme_row?: HprCheatRow | null; // 最接近口诀的速查表行(q34「错误的口诀也给出表格」;链形不沾边=null)
+  row_fails?: string[];         // 速查表红列键(yang/b1/b2/b3/today/ground;q34;反串题只标组列)
 }
 
 export interface HprQuizQuestion {

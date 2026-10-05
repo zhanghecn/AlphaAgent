@@ -51,10 +51,11 @@ const POINT_BADGES: Record<string, { label: string; full: string; className: str
   C1: { label: "C1", full: "C1 冒泡转弱(阴阳都打,今开<3)", className: "bg-emerald-500/15 text-emerald-500" },
   A3: { label: "A3", full: "A3 高开低吸(三接四阳,低开直接买)", className: "bg-rose-500/15 text-rose-500 ring-1 ring-rose-500/40" },
   B3: { label: "B3", full: "B3 贴零温开(三接四阴)", className: "bg-orange-500/15 text-orange-500" },
-  C2: { label: "C2", full: "C2 四板便捷(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
+  C2: { label: "C2", full: "C2 四板换手(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
+  C3: { label: "C3", full: "C3 一字换手(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
 };
 
-const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2"] as const;
+const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",

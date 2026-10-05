@@ -9,7 +9,7 @@ import type {
 import { EmptyState } from "@/components/EmptyState";
 import { cn, formatPct } from "@/lib/utils";
 
-const POINTS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2"] as const;
+const POINTS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"] as const;
 const POINT_SHORT: Record<string, string> = {
   A1: "A1 双平贴零",
   A2: "A2 一字转强",
@@ -18,7 +18,8 @@ const POINT_SHORT: Record<string, string> = {
   C1: "C1 冒泡转弱",
   A3: "A3 高开低吸",
   B3: "B3 贴零温开",
-  C2: "C2 四板便捷",
+  C2: "C2 四板换手",
+  C3: "C3 一字换手",
   all: "方案合计",
 };
 const POINT_TONE: Record<string, string> = {

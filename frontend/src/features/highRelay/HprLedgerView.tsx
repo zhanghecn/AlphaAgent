@@ -12,7 +12,7 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底卖",
 };
 
-const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2"] as const;  // v6.0 八键
+const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"] as const;  // v6.11 九键
 
 const POINT_BADGES: Record<string, { label: string; className: string }> = {
   A1: { label: "A1", className: "bg-rise/15 text-rise" },
@@ -23,6 +23,7 @@ const POINT_BADGES: Record<string, { label: string; className: string }> = {
   A3: { label: "A3", className: "bg-rose-500/15 text-rose-500" },
   B3: { label: "B3", className: "bg-orange-500/15 text-orange-500" },
   C2: { label: "C2", className: "bg-primary/15 text-primary" },
+  C3: { label: "C3", className: "bg-primary/15 text-primary" },
 };
 
 /** 高位接力历史交割单:横向平铺列表(全部命中信号逐笔,不限仓位),支持月份/点/搜票筛选。 */

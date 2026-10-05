@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import type { HprQuizQuestion } from "@/api/highRelay";
+import type { HprCheatRow, HprQuizQuestion } from "@/api/highRelay";
 import { CheatTableRow } from "@/features/highRelay/CheatTableRow";
 import { cn, formatPct, formatPrice } from "@/lib/utils";
 
@@ -559,6 +559,32 @@ function TierGrid({ summary }: { summary: QuizMonthSummary }) {
   );
 }
 
+/** 讲解卡速查表(hit=命中行/miss=最接近口诀行+红列,q34 主人「错误的口诀也给出表格,
+ *  错误的某一列标红」);表头与规则页速查表一致(去掉口诀列——徽章已显示全名)。 */
+function SchemeRowTable({ row, failCols }: { row: HprCheatRow | null; failCols?: string[] }) {
+  if (!row) return null;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[560px] border-collapse text-[11px]">
+        <thead>
+          <tr className="border-b text-left text-muted-foreground">
+            <th className="py-1 pr-3 font-medium">组</th>
+            <th className="py-1 pr-3 font-medium">一板</th>
+            <th className="py-1 pr-3 font-medium">二板</th>
+            <th className="py-1 pr-3 font-medium">三板</th>
+            <th className="py-1 pr-3 font-medium">今天开</th>
+            <th className="py-1 pr-3 font-medium">地基日</th>
+            <th className="py-1 font-medium">成绩(E3)</th>
+          </tr>
+        </thead>
+        <tbody className="tabular-nums">
+          <CheatTableRow row={row} showName={false} failCols={failCols} />
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function InfoCell({
   label,
   value,
@@ -671,30 +697,16 @@ function RevealSection({
               {ex.matched_line}
             </span>
           </div>
-          {ex.scheme_row ? (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[560px] border-collapse text-[11px]">
-                <thead>
-                  <tr className="border-b text-left text-muted-foreground">
-                    <th className="py-1 pr-3 font-medium">组</th>
-                    <th className="py-1 pr-3 font-medium">一板</th>
-                    <th className="py-1 pr-3 font-medium">二板</th>
-                    <th className="py-1 pr-3 font-medium">三板</th>
-                    <th className="py-1 pr-3 font-medium">今天开</th>
-                    <th className="py-1 pr-3 font-medium">地基日</th>
-                    <th className="py-1 font-medium">成绩(E3)</th>
-                  </tr>
-                </thead>
-                <tbody className="tabular-nums">
-                  <CheatTableRow row={ex.scheme_row} showName={false} />
-                </tbody>
-              </table>
-            </div>
-          ) : null}
+          <SchemeRowTable row={ex.scheme_row} />
         </div>
       ) : (
         <div className="rounded-md border px-3 py-2.5">
           <div className="mb-1 text-xs font-semibold">为什么不买（对照口诀）</div>
+          {ex.scheme_row ? (
+            <div className="mb-2">
+              <SchemeRowTable row={ex.scheme_row} failCols={ex.row_fails} />
+            </div>
+          ) : null}
           <ul className="list-disc space-y-1 pl-5 text-xs leading-5 text-muted-foreground">
             {ex.reasons.map((reason) => (
               <li key={reason}>{reason}</li>
