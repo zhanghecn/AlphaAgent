@@ -12,10 +12,12 @@ export function CheatTableRow({
   row,
   showName = true,
   failCols,
+  statText,
 }: {
   row: HprCheatRow;
   showName?: boolean;
   failCols?: string[];
+  statText?: string;   // 成绩列覆盖文本(动态口诀组传近12月动态成绩;缺省=row.stat研究锚定)
 }) {
   const fail = (col: string) => (failCols ?? []).includes(col);
   const yangCls = fail("yang")
@@ -52,7 +54,7 @@ export function CheatTableRow({
       </td>
       <td className={cn("py-1.5 pr-3 font-mono font-semibold whitespace-nowrap rounded", fail("today") ? ["text-fall", FAIL_TD] : "text-primary")}>{row.today}</td>
       <td className={cn("py-1.5 pr-3 font-mono whitespace-nowrap rounded text-muted-foreground", fail("ground") && ["font-semibold", "text-fall", FAIL_TD])}>{row.ground ?? "—"}</td>
-      <td className="py-1.5 font-mono text-[11px] text-muted-foreground whitespace-nowrap">{row.stat}</td>
+      <td className="py-1.5 font-mono text-[11px] text-muted-foreground whitespace-nowrap">{statText ?? row.stat}</td>
     </tr>
   );
 }

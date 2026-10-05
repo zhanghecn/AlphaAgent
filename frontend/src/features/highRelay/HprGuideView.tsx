@@ -1,7 +1,7 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchHprRules } from "@/api/highRelay";
+import { fetchHprKoujueCurrent, fetchHprRules } from "@/api/highRelay";
 import { CheatTableRow } from "@/features/highRelay/CheatTableRow";
 import { PoseCaseChart } from "@/features/highRelay/PoseCaseChart";
 import { LoadingState } from "@/components/LoadingState";
@@ -38,6 +38,14 @@ export function HprGuideView() {
     queryFn: fetchHprRules,
     staleTime: 300_000,
   });
+  // 动态口诀组(v7.0):用户点「获取最新口诀」才拉取——数字动态计算,1分钟内不重复请求
+  const [koujueOpen, setKoujueOpen] = useState(false);
+  const koujue = useQuery({
+    queryKey: ["hprKoujue"],
+    queryFn: fetchHprKoujueCurrent,
+    enabled: koujueOpen,
+    staleTime: 60_000,
+  });
   if (query.isLoading && !query.data) return <LoadingState rows={6} />;
   if (query.isError || !query.data) {
     return <ErrorState message="规则契约暂时不可用" onRetry={() => void query.refetch()} />;
@@ -67,6 +75,93 @@ export function HprGuideView() {
           <span className="font-medium text-foreground">阴/阳地基</span>＝首板前一天 K 线收阴/收阳——
           同一条口诀放在另一个地基常常全灭，所以字母 A/B 就是这么分的。
         </div>
+      </section>
+
+      <section className="rounded-lg border border-primary/40 p-4" aria-label="获取最新口诀">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-sm font-semibold">动态口诀组</span>
+          <span className="text-xs text-muted-foreground">
+            近一年哪组口诀赚得多，就用哪组（每月末看一次；胜率收益动态计算）
+          </span>
+          <button
+            type="button"
+            onClick={() => { setKoujueOpen(true); void koujue.refetch(); }}
+            className="rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+          >
+            获取最新口诀
+          </button>
+          {koujue.data ? (
+            <span className="font-mono text-[11px] text-muted-foreground">数据至 {koujue.data.asof}</span>
+          ) : null}
+        </div>
+        {koujueOpen && koujue.isLoading ? <LoadingState rows={3} /> : null}
+        {koujue.isError ? (
+          <ErrorState message="动态口诀组暂时不可用" onRetry={() => void koujue.refetch()} />
+        ) : null}
+        {koujue.data?.status === "unavailable" ? (
+          <p className="mt-2 text-xs text-muted-foreground">{koujue.data.reason ?? "回测物化未完成"}</p>
+        ) : null}
+        {koujue.data?.status === "ok" ? (
+          <div className="mt-3 space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-xs text-muted-foreground">当前启用</span>
+              <span className={`rounded px-2 py-1 text-sm font-bold ${
+                koujue.data.current_group === "strong"
+                  ? "bg-primary/15 text-primary"
+                  : koujue.data.current_group === "weak"
+                    ? "bg-amber-500/15 text-amber-500"
+                    : "bg-muted text-foreground"
+              }`}>
+                {koujue.data.current_group === "strong" ? "强市组（A1~C3 八条）"
+                  : koujue.data.current_group === "weak" ? "弱市组（K系六条）" : "双开"}
+              </span>
+              {koujue.data.switch_history.length > 0 ? (
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  切换历史：{koujue.data.switch_history.map((s) => `${s.month.slice(2)} ${s.from}→${s.to}`).join("；")}
+                </span>
+              ) : null}
+            </div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {(["weak", "strong"] as const).map((g) => {
+                const gs = koujue.data!.groups[g];
+                const active = koujue.data!.current_group === g;
+                return (
+                  <div key={g} className={`rounded-md border px-3 py-2 ${active ? "border-primary/60 bg-primary/5" : "border-muted"}`}>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-xs font-semibold">{gs.label}</span>
+                      {active ? <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">当前</span> : null}
+                      <span className="ml-auto font-mono text-xs tabular-nums">
+                        近{koujue.data!.window_months}月 {gs.n}笔
+                        {gs.avg != null ? <>·均{gs.avg > 0 ? "+" : ""}{gs.avg}</> : null}
+                        {gs.win != null ? <>·胜{Math.round(gs.win * 100)}%</> : null}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <table className="w-full border-collapse text-sm">
+              <thead>
+                <tr className="border-b text-left text-xs text-muted-foreground">
+                  <th className="py-1.5 pr-3 font-medium">口诀</th>
+                  <th className="py-1.5 pr-3 font-medium">组</th>
+                  <th className="py-1.5 pr-3 font-medium">一板</th>
+                  <th className="py-1.5 pr-3 font-medium">二板</th>
+                  <th className="py-1.5 pr-3 font-medium">三板</th>
+                  <th className="py-1.5 pr-3 font-medium">今天开</th>
+                  <th className="py-1.5 pr-3 font-medium">地基日</th>
+                  <th className="py-1.5 font-medium">近{koujue.data.window_months}月成绩</th>
+                </tr>
+              </thead>
+              <tbody className="tabular-nums">
+                {koujue.data.current_rows.map((r) => (
+                  <CheatTableRow key={r.name} row={r} statText={r.dyn_stat || r.stat} />
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[11px] leading-5 text-muted-foreground">{koujue.data.caliber}</p>
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-lg border p-4">

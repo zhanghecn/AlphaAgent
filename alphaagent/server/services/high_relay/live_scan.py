@@ -68,16 +68,23 @@ def run_live_scan_tick(now: datetime | None = None) -> dict[str, object]:
     return result
 
 
-def _first_jump_status(entry: dict[str, object], auction_pct: float) -> str | None:
-    """竞价定型后的终态判定;None=继续观察等触板(今天开窗命中)。"""
+def _first_jump_status(entry: dict[str, object], auction_pct: float,
+                       strong_ok: bool = True, weak_ok: bool = False) -> str | None:
+    """竞价定型后的终态判定;None=继续观察等触板(今天开窗命中)。
+    v7.1 动态口诀组:竞价门=启用组的候选窗并集(强市 auction_gate + 弱市 weak_gate),
+    未启用组的窗不参与判定(强市候选在弱市组启用时不再拦弱市出手)。"""
     if auction_pct >= contracts.TODAY_CAP:
         return "skipped_gap"        # 顶格≥9.5%,排队买不到,正常开盘口径外
     if str(entry.get("group4")) == "三接四阴" and auction_pct < 0:
-        return "skipped_auction"    # 板深低开=没人接(盘中回避)
-    gate = entry.get("auction_gate")            # 多窗: today_{lo}_{hi}[,...]
-    if gate:
+        return "skipped_auction"    # 板深低开=没人接(盘中回避;K系窗全≥0,不冲突)
+    parts: list[str] = []
+    if strong_ok and entry.get("auction_gate"):
+        parts.append(str(entry["auction_gate"]))
+    if weak_ok and entry.get("weak_gate"):
+        parts.append(str(entry["weak_gate"]))
+    if parts:
         in_any = False
-        for part in str(gate).split(","):
+        for part in ",".join(parts).split(","):   # 多窗: today_{lo}_{hi}[,...]
             seg = part.split("_")
             if len(seg) == 3 and seg[0] == "today":
                 try:
@@ -87,7 +94,7 @@ def _first_jump_status(entry: dict[str, object], auction_pct: float) -> str | No
                 except ValueError:
                     continue
         if not in_any:
-            return "skipped_auction"            # 不在任何候选「今天开」窗
+            return "skipped_auction"            # 不在任何启用组候选「今天开」窗
     return None
 
 
@@ -108,20 +115,34 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
         return {"status": "skipped", "message": "现货快照非今日数据"}
 
     signals = repository.load_signal_map(today)
+    # v7.1 动态口诀组:当前组启用哪组,哪组的候选才触发(另一组候选只展示;
+    # both=双开;无物化兜底 both)。判定读 service 进程缓存(1h),不每跳打库。
+    from alphaagent.server.services.high_relay import service as hpr_service
+    grp = str(hpr_service.current_dyn_group().get("group") or "both")
     touched = entered = auction_skipped = 0
     writes: list[tuple[str, dict[str, object]]] = []
 
     for entry in pool:
-        if not bool(entry.get("actionable")):
-            continue  # 雷达票(未命中/静态回避)只展示不触发,不写信号
+        strong_ok = bool(entry.get("actionable")) and grp in ("strong", "both")
+        weak_hit = str(entry.get("weak_point") or "—") != "—"
+        weak_ok = weak_hit and grp in ("weak", "both")
+        if not (strong_ok or weak_ok):
+            continue  # 雷达票(未命中/静态回避/未启用组候选)只展示不触发,不写信号
         vt = str(entry["vt_symbol"])
         sig = signals.get(vt)
         status = str(sig.get("status")) if sig else "watching"
         if status in _TERMINAL_STATUSES:
             continue
+        # 点位口径:双命中归 K 系(与回测 dyn_trades 归属一致);弱市组级别=A
+        if weak_ok:
+            point = str(entry["weak_point"])
+            level = "A"
+        else:
+            point = str(entry.get("point") or "—")
+            level = str(entry.get("level") or "—")
         patch: dict[str, object] = {
             "name": entry.get("name"), "group4": entry.get("group4"),
-            "point": entry.get("point"), "level": entry.get("level"),
+            "point": point, "level": level,
             "prev_close": entry.get("prev_close"),
             "limit_price": entry.get("limit_price"),
             "rules_version": contracts.HPR_RULES_VERSION,
@@ -139,33 +160,49 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
         patch["last_price"] = last_price
         patch["change_pct"] = round((last_price / prev_close - 1) * 100, 3)
 
-        # 首跳:竞价涨幅定型 → 顶格/回避/今天开窗判定
+        # 首跳:竞价涨幅定型 → 顶格/回避/今天开窗判定(启用组候选窗并集)
         if status == "watching" and (sig is None or sig.get("auction_pct") is None):
             if open_price and open_price > 0:
                 auction_pct = round((open_price / prev_close - 1) * 100, 2)
                 patch["auction_pct"] = auction_pct
-                term = _first_jump_status(entry, auction_pct)
+                term = _first_jump_status(entry, auction_pct,
+                                          strong_ok=strong_ok, weak_ok=weak_ok)
                 if term is not None:
                     patch["status"] = term
                     auction_skipped += 1
                     writes.append((vt, patch))
                     continue
-                # 在窗:多分支/链重叠票(E1×E2、B1×B4、多分支共享编号)按今开重算
-                # 方案点——盘前标是链首过点,今开定型后归首窗命中者(与回测一致)
+                # 在窗:按今开重算点位归属——盘前标是链首过点,今开定型后归首窗
+                # 命中者(与回测一致);弱市组启用时归 tag_weak(双命中归 K 系),
+                # 强市组照旧 tag_point(v7.1 起池条目带 b3_turn,三板换手窗可复核)
                 from alphaagent.server.services.high_relay import pool as pool_mod
-                real_point = pool_mod.tag_point(
-                    str(entry.get("group4")), entry.get("b1_open"),
-                    entry.get("b2_open"), entry.get("b3_open"),
-                    auction_pct=auction_pct,
-                    b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
-                    foundation_chg=entry.get("foundation_chg"),
-                    pre10_pct=entry.get("pre10_pct"),
-                    foundation_pose=entry.get("foundation_pose"),
-                    anchor_pos=entry.get("anchor_pos"),
-                    anchor_dist=entry.get("anchor_dist"))
-                if real_point != str(entry.get("point")):
+                real_weak = None
+                if weak_ok:
+                    real_weak = pool_mod.tag_weak(
+                        str(entry.get("group4")), entry.get("b1_open"),
+                        entry.get("b2_open"), entry.get("b3_open"),
+                        auction_pct=auction_pct, b1_turn=entry.get("b1_turn"),
+                        b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
+                        foundation_chg=entry.get("foundation_chg"),
+                        prev_wave60=entry.get("prev_wave60"),
+                        dist_h60=entry.get("dist_h60"))
+                real_point = str(real_weak["no"]) if real_weak else None
+                if real_point is None:
+                    # 弱市窗不含今开(如 both 双开落在强市窗)→ 强市复核兜底
+                    real_point = pool_mod.tag_point(
+                        str(entry.get("group4")), entry.get("b1_open"),
+                        entry.get("b2_open"), entry.get("b3_open"),
+                        auction_pct=auction_pct,
+                        b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
+                        foundation_chg=entry.get("foundation_chg"),
+                        pre10_pct=entry.get("pre10_pct"),
+                        foundation_pose=entry.get("foundation_pose"),
+                        anchor_pos=entry.get("anchor_pos"),
+                        anchor_dist=entry.get("anchor_dist"))
+                if real_point != point:
                     patch["point"] = real_point
-                    patch["level"] = contracts.POINT_LEVELS.get(real_point, "—")
+                    patch["level"] = ("A" if str(real_point).startswith("K")
+                                      else contracts.POINT_LEVELS.get(real_point, "—"))
 
         if status == "watching":
             # 触板即买:现价首次 ≥ 涨停价 → 按涨停价打(链式研究口径,无时间窗)
@@ -182,9 +219,9 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
         repository.upsert_signal(today, vt, **patch)
     _save_run(today, now, status="ok", pool_count=len(pool),
               touched_count=touched, entered_count=entered, spot_active_symbols=fresh,
-              message=f"池 {len(pool)} / 新触发 {touched} / 新买入 {entered} / "
+              message=f"口诀组={grp} 池 {len(pool)} / 新触发 {touched} / 新买入 {entered} / "
                       f"竞价回避 {auction_skipped} / 写 {len(writes)}")
-    return {"status": "ok", "pool": len(pool), "touched": touched,
+    return {"status": "ok", "group": grp, "pool": len(pool), "touched": touched,
             "entered": entered, "writes": len(writes)}
 
 

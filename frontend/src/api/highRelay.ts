@@ -11,7 +11,10 @@ import { apiClient } from "./client";
 export type HprPoint =
   | "A1" | "A2" | "B1" | "B2" | "C1"
   | "A3" | "B3" | "C2" | "C3" | "—";   // v6.0:A=阳/B=阴/C=中性(字母跨板位统一,E退休);v6.11:C3一字换手拆自C2
+export type HprWeakPoint = "K2" | "K4" | "K5" | "K7" | "K9" | "K3";   // 弱市组(v7.0,定型于2020-22)
+export type HprAnyPoint = HprPoint | HprWeakPoint;   // 动态口诀组:点位可能是两组任一编号
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
+export type HprDynGroup = "weak" | "strong" | "both";
 
 export type HprStatus =
   | "watching" | "sealed_watch" | "entered" | "holding" | "pending_exit" | "closed"
@@ -22,7 +25,7 @@ export interface HprLiveEntry {
   name: string | null;
   group4: HprGroup4;
   n_board: number | null;
-  point: HprPoint;
+  point: HprAnyPoint;
   level: "A" | "B" | "—";
   actionable: boolean;
   avoid_static: string | null;
@@ -31,6 +34,18 @@ export interface HprLiveEntry {
   action_hint: string | null;
   /** 出手今开窗列表(全部候选分支窗;无窗为空数组) */
   today_window: [number, number][];
+  /** 弱市组候选(v7.1 动态口诀组):K系链级命中,当前组=weak/both 才出手 */
+  weak_point: HprWeakPoint | "—";
+  weak_label: string | null;
+  weak_hint: string | null;
+  weak_windows: [number, number][];
+  b3_turn: number | null;
+  /** 动态组标注(v7.1,后端 get_live 下发):strong/weak_active=该组当前启用且命中;
+   *  active=出手资格(启用组任一命中);paused_label=命中但所属组未启用(灰显) */
+  strong_active?: boolean;
+  weak_active?: boolean;
+  active?: boolean;
+  paused_label?: string | null;
   prev_close: number | null;
   limit_price: number | null;
   foundation_yang: boolean | null;
@@ -72,12 +87,17 @@ export interface HprLivePayload {
   session_stage:
     | "preopen" | "auction" | "first_window" | "morning" | "lunch" | "afternoon" | "closed";
   rules_version: string;
+  /** 当前启用口诀组(v7.1:出手资格按组过滤;asof=数据截止月) */
+  dyn_group: { group: HprDynGroup; asof: string | null; label: string } | null;
   counts: {
     pool: number;
     actionable: number;
+    /** 当前组出手数(启用组命中;未启用组命中只展示) */
+    active?: number;
     signals: number;
     by_group: Record<string, number>;
     by_point: Record<string, number>;
+    by_weak_point?: Record<string, number>;
     by_status: Record<string, number>;
   };
   /** 昨日主板非ST涨停家数(信息项) */
@@ -252,9 +272,9 @@ export interface HprRuleGroup {
   items: HprRuleItem[];
 }
 
-// 速查表行(后端 contracts.CHEAT_ROWS 单一事实源;多分支口诀拆子项一行一支)
+// 速查表行(后端 contracts.CHEAT_ROWS/WEAK_CHEAT_ROWS 单一事实源;多分支口诀拆子项一行支)
 export interface HprCheatRow {
-  no: HprPoint;
+  no: HprAnyPoint;
   sub?: string;      // 子项名(A1 低开等强开/B1 转温/C2 二板一字…;单分支口诀无)
   name: string;      // 行名=子项全名(A1 双平贴零·低开等强开)
   yang: string;      // 组=阴阳+板位(阳·打3板)
@@ -292,6 +312,32 @@ export interface HprRulesPayload {
 export function fetchHprLive(date?: string) {
   const query = date ? `?date=${encodeURIComponent(date)}` : "";
   return apiClient.get<HprLivePayload>(`/high-relay/live${query}`);
+}
+
+// ── 动态口诀组(v7.0:「近一年哪组口诀赚得多就用哪组」,规则页「获取最新口诀」) ──
+export interface HprKoujueGroupStats {
+  n: number;
+  avg: number | null;
+  win: number | null;
+  label: string;                     // 弱市组/强市组
+  rows: (HprCheatRow & { dyn_stat: string })[];   // 速查表行+近12月动态成绩(多分支仅首行)
+}
+
+export interface HprKoujueCurrent {
+  status: "ok" | "unavailable";
+  rules_version: string;
+  window_months: number;
+  asof: string;                      // 数据截止月(YYYY-MM)
+  current_group: "weak" | "strong" | "both";
+  groups: { weak: HprKoujueGroupStats; strong: HprKoujueGroupStats };
+  current_rows: (HprCheatRow & { dyn_stat: string })[];
+  switch_history: { month: string; from: string; to: string }[];
+  caliber: string;
+  reason?: string;
+}
+
+export function fetchHprKoujueCurrent() {
+  return apiClient.get<HprKoujueCurrent>("/high-relay/koujue/current");
 }
 
 export function fetchHprLiveDates() {
@@ -365,10 +411,15 @@ export interface HprQuizDisplay {
   decision_open: number;        // 决策日开盘价(今开十字bar用)
   day_high_pct: number;         // 决策日盘中最高涨幅%(第二决策信息:冲到9%快触板才决定打不打)
   chain: string | null;         // 板型链 实体→一字
+  // 弱市组题判定格(v7.1,仅2020-22题下发;题面可判原则):K4/K7一板换手腿/
+  // K5前波命根/K3距新高贴顶腿
+  b1_turn?: number | null;
+  prev_wave60?: number | null;
+  dist_h60?: number | null;
 }
 
 export interface HprQuizAnswer {
-  point: HprPoint;              // —=不该买
+  point: HprAnyPoint;           // —=不该买;2020-22题=K系编号(弱市组),2023+题=强市组编号
   should_buy: boolean;
   ret_pct: number | null;       // E3收益%(判分用)
   buy_price: number | null;

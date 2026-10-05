@@ -130,7 +130,8 @@ export function HprQuizView() {
           <span className="text-sm font-semibold">高位接力 · 答题训练</span>
           <span className="text-xs text-muted-foreground">
             全历史 {overview.total} 题（命中口诀的该买，未命中的该拒）——看截断K线和今开，
-            判断买不买；答完看后续走势和口诀讲解。
+            判断买不买；答完看后续走势和口诀讲解。2020-2022 是弱市组题（按K系口诀判断），
+            2023 起是强市组题。
           </span>
           <span className="ml-auto flex items-center gap-3">
             <label className="flex cursor-pointer items-center gap-1.5 py-2 text-xs text-muted-foreground md:py-0">
@@ -174,7 +175,8 @@ export function HprQuizView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold text-primary">综合挑战卷</span>
           <span className="text-xs text-muted-foreground">
-            七条口诀各抽 2 道好票 + 28~35 道陷阱票（阴阳反串／形态接近／毒段，每卷随机）——
+            两组口诀各抽 2 道好票（强市组八条 + 弱市组六条）+ 28~35 道陷阱票
+            （阴阳反串／形态接近／毒段，每卷随机）——
             每卷练全所有口诀，认熟「看着像但不能打」的票；每次进入重新随机抽题。
           </span>
           <button

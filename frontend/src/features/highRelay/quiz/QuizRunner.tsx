@@ -21,7 +21,7 @@ import { overwriteAnswer, resetMonth, saveAnswer } from "./quizProgress";
  *   答对出列、答错留池,成绩以最后一次为准。
  */
 
-// 方案点徽标配色(v5.1 七条;与 HprGuideView/HprLiveView 同色系)
+// 方案点徽标配色(强市组八条 + 弱市组K系v7.1紫系;与 HprGuideView/HprLiveView 同色系)
 const POINT_BADGES: Record<string, string> = {
   A1: "bg-rise/15 text-rise",
   A2: "bg-teal-500/15 text-teal-500",
@@ -31,6 +31,13 @@ const POINT_BADGES: Record<string, string> = {
   A3: "bg-rose-500/15 text-rose-500",
   B3: "bg-orange-500/15 text-orange-500",
   C2: "bg-primary/15 text-primary",
+  C3: "bg-primary/15 text-primary",
+  K2: "bg-violet-500/15 text-violet-500",
+  K4: "bg-violet-500/15 text-violet-500",
+  K5: "bg-violet-500/15 text-violet-500",
+  K7: "bg-violet-500/15 text-violet-500",
+  K9: "bg-violet-500/15 text-violet-500",
+  K3: "bg-violet-500/15 text-violet-500",
 };
 
 const TIER_STYLES: Record<string, string> = {
@@ -231,6 +238,8 @@ export function QuizRunner({
       : [],
   );
   const dd = question.decision_date;
+  // v7.1 动态口诀组时代标签:2020-22=弱市组题(该买=K系),2023+=强市组题
+  const weakEra = dd < "2023-01-01";
   const title = showName
     ? `${question.name} ${question.vt_symbol.split(".")[0]}`
     : `${Number(dd.slice(0, 4))}年${Number(dd.slice(5, 7))}月 · ${d.board_label}`;
@@ -295,6 +304,19 @@ export function QuizRunner({
       <section className="rounded-lg border">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-3">
           <span className="text-sm font-semibold">{title}</span>
+          <span
+            className={cn(
+              "rounded px-1.5 py-0.5 text-[10px] font-medium",
+              weakEra
+                ? "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40"
+                : "bg-primary/10 text-primary",
+            )}
+            title={weakEra
+              ? "弱市时代(2020-22)题:按弱市组K系口诀判断(强市八条该时代不启用)"
+              : "强市时代(2023起)题:按强市组A1~C3口诀判断"}
+          >
+            {weakEra ? "弱市组题" : "强市组题"}
+          </span>
           {!showName ? (
             <span className="ml-auto text-[11px] text-muted-foreground">
               匿名模式（答完揭示票名）
@@ -378,6 +400,23 @@ export function QuizRunner({
           />
           <InfoCell label="首板前20日" value={fmtSigned(d.pre20_pct)} fail={failSet.has("首板前20日")} />
           <InfoCell label="首板前10日" value={fmtSigned(d.pre10_pct)} fail={failSet.has("首板前10日")} />
+          {d.b1_turn != null ? (
+            // v7.1 弱市组判定格(仅2020-22题下发):K4/K7 一板放量实体板腿(换手≥5)
+            <InfoCell label="一板换手" value={`${d.b1_turn.toFixed(1)}`} fail={failSet.has("一板换手")} />
+          ) : null}
+          {d.prev_wave60 != null ? (
+            // K5 命根:前波=0(60日没炒过);来过波的是二波残局
+            <InfoCell
+              label="前波60日"
+              value={`${d.prev_wave60}板`}
+              extra={d.prev_wave60 === 0 ? "没炒过" : "来过波"}
+              fail={failSet.has("前波60日")}
+            />
+          ) : null}
+          {d.dist_h60 != null ? (
+            // K3 贴顶腿:距60日新高≥-8(套牢盘已消化)
+            <InfoCell label="距新高" value={fmtSigned(d.dist_h60)} fail={failSet.has("距新高")} />
+          ) : null}
           <InfoCell label="板型链" value={d.chain ?? "--"} plain />
         </div>
 

@@ -320,6 +320,103 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
     return None
 
 
+def tag_weak(group4: str, b1_open, b2_open, b3_open,
+             auction_pct=None, b1_turn=None, b2_turn=None, b3_turn=None,
+             foundation_chg=None, prev_wave60=None, dist_h60=None):
+    """弱市口诀组打标(v7.0,与 量化因子研究/高位接力/弱市口诀卡v5.md 一致)。
+
+    判定独立于 tag_scheme(强市组零回归):K系含缩量承接(三换<二换)/前波=0/
+    距新高贴顶等强市组 matcher 没有的条件。返回命中的 WEAK_SCHEMES 条目
+    (K4 双分支定位到子条目),未命中 None;顺序即优先级(vol3 12~15 与 K2 的
+    10~15 交集归 K2);缺数据的带窗条件不命中(对齐 tag_scheme 惯例);
+    顶格≥9.5 一律不命中。字段语义见 contracts.WEAK_SCHEMES 注释。"""
+    if auction_pct is not None and auction_pct >= contracts.TODAY_CAP:
+        return None
+    for s in contracts.WEAK_SCHEMES:
+        if group4 not in s["group4"]:
+            continue
+        ok = True
+        for key, val in (("b1", b1_open), ("b2", b2_open), ("b3", b3_open)):
+            rng = s.get(key)
+            if rng is None:
+                continue
+            if val is None or not (rng[0] <= val < rng[1]):
+                ok = False
+                break
+        if not ok:
+            continue
+        vol3 = s.get("vol3")
+        if vol3 is not None and (b3_turn is None
+                                 or not (vol3[0] <= b3_turn < vol3[1])):
+            continue
+        tmin = s.get("b1_turn_min")
+        if tmin is not None and (b1_turn is None or b1_turn < tmin):
+            continue
+        rng = s.get("today")
+        if rng is not None and (auction_pct is None
+                                or not (rng[0] <= auction_pct < rng[1])):
+            continue
+        fmax = s.get("foundation_chg_max")
+        if fmax is not None and (foundation_chg is None or foundation_chg > fmax):
+            continue
+        wmax = s.get("prev_wave_max")
+        if wmax is not None and (prev_wave60 is None or prev_wave60 > wmax):
+            continue
+        dmin = s.get("dist_h60_min")
+        if dmin is not None and (dist_h60 is None or dist_h60 < dmin):
+            continue
+        if s.get("vol3_lt_vol2") and (b3_turn is None or b2_turn is None
+                                      or b3_turn >= b2_turn):
+            continue
+        return s
+    return None
+
+
+def match_weak_schemes(group4: str, b1_open, b2_open, b3_open,
+                       b1_turn=None, b2_turn=None, b3_turn=None,
+                       foundation_chg=None, prev_wave60=None,
+                       dist_h60=None) -> list[dict]:
+    """弱市组链级候选定位(v7.1,不含今开窗;镜像 tag_weak 的链段判定,
+    改任何一处另一处必须同步)。返回链条件全过的 WEAK_SCHEMES 条目按优先级序——
+    池打标/竞价门用(窗=全部候选条目 today 并集,竞价定型后归属=tag_weak 首窗命中者,
+    与强市组 match_schemes 同构);K4 双分支同窗由调用方去重。"""
+    out: list[dict] = []
+    for s in contracts.WEAK_SCHEMES:
+        if group4 not in s["group4"]:
+            continue
+        ok = True
+        for key, val in (("b1", b1_open), ("b2", b2_open), ("b3", b3_open)):
+            rng = s.get(key)
+            if rng is None:
+                continue
+            if val is None or not (rng[0] <= val < rng[1]):
+                ok = False
+                break
+        if not ok:
+            continue
+        vol3 = s.get("vol3")
+        if vol3 is not None and (b3_turn is None
+                                 or not (vol3[0] <= b3_turn < vol3[1])):
+            continue
+        tmin = s.get("b1_turn_min")
+        if tmin is not None and (b1_turn is None or b1_turn < tmin):
+            continue
+        fmax = s.get("foundation_chg_max")
+        if fmax is not None and (foundation_chg is None or foundation_chg > fmax):
+            continue
+        wmax = s.get("prev_wave_max")
+        if wmax is not None and (prev_wave60 is None or prev_wave60 > wmax):
+            continue
+        dmin = s.get("dist_h60_min")
+        if dmin is not None and (dist_h60 is None or dist_h60 < dmin):
+            continue
+        if s.get("vol3_lt_vol2") and (b3_turn is None or b2_turn is None
+                                      or b3_turn >= b2_turn):
+            continue
+        out.append(s)
+    return out
+
+
 def tag_point(group4: str, b1_open, b2_open, b3_open,
               auction_pct=None, b2_turn=None, b3_turn=None,
               foundation_chg=None, pre10_pct=None,
@@ -528,6 +625,20 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                                  anchor_dist=rec.get("anchor_dist")) if point != "—" else []
         wins = [s["today"] for s in branches]
         gate = ",".join(f"today_{w[0]:g}_{w[1]:g}" for w in wins) or None
+        # 弱市组候选(v7.1 动态口诀组):链级打标,当前组=weak/both 时才出手
+        # (get_live/live_scan 按当前组过滤);竞价门=候选条目 today 并集
+        weak_branches = match_weak_schemes(
+            group4, rec.get("b1_open"), rec.get("b2_open"), rec.get("b3_open"),
+            b1_turn=rec.get("b1_turn"), b2_turn=rec.get("b2_turn"),
+            b3_turn=rec.get("b3_turn"), foundation_chg=rec.get("foundation_chg"),
+            prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"))
+        weak_point = str(weak_branches[0]["no"]) if weak_branches else "—"
+        weak_wins: list[tuple[float, float]] = []
+        for s in weak_branches:
+            w = tuple(s["today"])  # type: ignore[arg-type]
+            if w not in weak_wins:
+                weak_wins.append(w)
+        weak_gate = ",".join(f"today_{w[0]:g}_{w[1]:g}" for w in weak_wins) or None
         prev_close = float(row.close_price)
         entries.append({
             "vt_symbol": str(row.vt_symbol),
@@ -541,6 +652,11 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "auction_gate": gate,
             "action_hint": action_hint(branches),
             "today_windows": [[w[0], w[1]] for w in wins],
+            "weak_point": weak_point,
+            "weak_label": contracts.WEAK_POINT_LABELS.get(weak_point, "—"),
+            "weak_gate": weak_gate,
+            "weak_hint": action_hint(weak_branches) if weak_branches else None,
+            "weak_windows": [[w[0], w[1]] for w in weak_wins],
             "prev_close": prev_close,
             "limit_price": round(prev_close * 1.10 + 1e-9, 2),
             "foundation_yang": yang,
@@ -561,6 +677,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "b3_open": rec.get("b3_open"),
             "b1_turn": rec.get("b1_turn"),
             "b2_turn": rec.get("b2_turn"),
+            # v7.1 修存量缺列:盘中竞价复核(tag_point/tag_weak)三板换手窗要读它,
+            # 此前池条目没存→C2/C3 复核时 vol3 拿不到被误判「—」
+            "b3_turn": rec.get("b3_turn"),
             "turn_grad": rec["turn_grad"],
             "pre3_pct": rec.get("pre3_pct"),
             "pre20_pct": rec.get("pre20_pct"),
@@ -572,6 +691,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             "mkt_lim_tm1": int(mkt_prev),
         })
     stats["actionable"] = n_actionable
+    stats["weak_pool"] = sum(1 for e in entries if e["weak_point"] != "—")
     for pk in contracts.POINT_KEYS:
         stats[f"pool_{pk}"] = sum(1 for e in entries if e["point"] == pk)
         stats[f"act_{pk}"] = sum(1 for e in entries if e["point"] == pk and e["actionable"])

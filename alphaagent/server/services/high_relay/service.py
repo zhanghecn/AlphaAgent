@@ -56,9 +56,32 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
             entries.append(_live_row(None, sig))
     entries.sort(key=_live_sort_key)
 
+    # 动态口诀组(v7.1):按当前启用组标注出手资格——强市组命中/弱市组命中,
+    # 只有启用组的命中才是「出手」;另一组的候选保留展示但灰显(未启用)。
+    dyn = current_dyn_group()
+    grp = str(dyn["group"])
+    active_count = 0
+    for e in entries:
+        strong_hit = bool(e.get("actionable"))
+        weak_hit = str(e.get("weak_point") or "—") != "—"
+        e["strong_active"] = strong_hit and grp in ("strong", "both")
+        e["weak_active"] = weak_hit and grp in ("weak", "both")
+        e["active"] = bool(e["strong_active"] or e["weak_active"])
+        if e["active"]:
+            active_count += 1
+            # 展示口径:出手票的点位徽章优先弱市组(双命中归 K 系,与 dyn_trades 一致)
+            if e["weak_active"]:
+                e["point"] = e.get("weak_point")
+                e["level"] = "A"
+        elif strong_hit and not e["strong_active"]:
+            e["paused_label"] = "强市组未启用"
+        elif weak_hit:
+            e["paused_label"] = "弱市组未启用"
+
     status_counts: dict[str, int] = {}
     group_counts: dict[str, int] = {}
     point_counts: dict[str, int] = {}
+    weak_point_counts: dict[str, int] = {}
     actionable_count = 0
     for e in entries:
         sk = str(e["status"])
@@ -69,6 +92,9 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
         pk = str(e.get("point") or "—")
         if pk != "—":
             point_counts[pk] = point_counts.get(pk, 0) + 1
+        wk = str(e.get("weak_point") or "—")
+        if wk != "—":
+            weak_point_counts[wk] = weak_point_counts.get(wk, 0) + 1
         actionable_count += int(bool(e.get("actionable")))
     mkt_lim_tm1 = next((e.get("mkt_lim_tm1") for e in pool
                         if e.get("mkt_lim_tm1") is not None), None)
@@ -79,12 +105,19 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
         "stale": stale,
         "session_stage": stage,
         "rules_version": contracts.HPR_RULES_VERSION,
+        "dyn_group": {
+            "group": grp,
+            "asof": dyn.get("asof"),
+            "label": {"weak": "弱市组", "strong": "强市组", "both": "双开(样本不足)"}[grp],
+        },
         "counts": {
             "pool": len(pool),
             "actionable": actionable_count,
+            "active": active_count,
             "signals": len(signals),
             "by_group": group_counts,
             "by_point": point_counts,
+            "by_weak_point": weak_point_counts,
             "by_status": status_counts,
         },
         "mkt_lim_tm1": mkt_lim_tm1,
@@ -119,6 +152,11 @@ def _live_row(entry: dict[str, object] | None,
             "auction_gate": entry.get("auction_gate"),
             "action_hint": entry.get("action_hint"),
             "today_window": _parse_gate(entry.get("auction_gate")),
+            "weak_point": entry.get("weak_point"),
+            "weak_label": entry.get("weak_label"),
+            "weak_hint": entry.get("weak_hint"),
+            "weak_windows": _parse_gate(entry.get("weak_gate")),
+            "b3_turn": entry.get("b3_turn"),
             "prev_close": entry.get("prev_close"),
             "limit_price": entry.get("limit_price"),
             "foundation_yang": entry.get("foundation_yang"),
@@ -427,6 +465,136 @@ def get_quiz_mixed(year: str | None = None) -> dict[str, object]:
 
 # ── 规则契约 ──
 
+def _dyn_group_state(trades: list[dict[str, object]], ms: set[str],
+                     min_n: int = 8) -> str:
+    """按月窗口判当前启用口诀组(weak/strong/both);trades=dyn_trades 轻表。
+    判据=窗口内两组各自每笔 E3 均值,高者整组启用;样本不足/均非正=双开
+    (组级样本门槛 n5/8/12 等价,取研究定版值 8)。"""
+    def agg(g: str) -> tuple[int, float | None]:
+        rs = [float(t["r"]) for t in trades if str(t["m"]) in ms and t["g"] == g]
+        return len(rs), (sum(rs) / len(rs) if rs else None)
+    wn, wa = agg("weak")
+    sn, sa = agg("strong")
+    if wn >= min_n and sn >= min_n and wa is not None and sa is not None:
+        return "weak" if wa > sa else "strong"
+    if wn >= min_n and wa is not None and wa > 0:
+        return "weak"
+    if sn >= min_n and sa is not None and sa > 0:
+        return "strong"
+    return "both"
+
+
+_dyn_group_cache: dict[str, object] = {"ts": 0.0, "data": None}
+_DYN_GROUP_TTL = 3600.0  # 进程内缓存(盘中扫描每分钟读,不能每跳打库)
+
+
+def current_dyn_group() -> dict[str, object]:
+    """当前启用口诀组(v7.1 实时推荐/盘中扫描联动):读最新物化 dyn_trades
+    近 DYN_GROUP_WINDOW 个月滚动判定;无物化/无数据 → both(双开兜底=两组都可出手,
+    行为同机制上线前)。缓存 1h(组只在月末切换,读旧一档无风险)。"""
+    import time as _time
+    now = _time.time()
+    cached = _dyn_group_cache["data"]
+    if cached is not None and now - float(_dyn_group_cache["ts"]) < _DYN_GROUP_TTL:
+        return dict(cached)  # type: ignore[arg-type]
+    try:
+        row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
+        trades = list((row or {}).get("dyn_trades") or [])
+    except Exception:  # noqa: BLE001
+        trades = []
+    group, asof = "both", None
+    if trades:
+        months = sorted({str(t["m"]) for t in trades})
+        group = _dyn_group_state(trades, set(months[-contracts.DYN_GROUP_WINDOW:]))
+        asof = months[-1]
+    out = {"group": group, "asof": asof}
+    _dyn_group_cache.update(ts=now, data=out)
+    return dict(out)
+
+
+def get_current_koujue() -> dict[str, object]:
+    """获取最新口诀(v7.0 动态口诀组:近一年哪组口诀赚得多就用哪组)。
+
+    从最新物化报告的 dyn_trades 逐笔表滚动汇总近 DYN_GROUP_WINDOW 个月两组成绩,
+    数字全部动态计算不写死;当前组=近窗每笔平均E3高的一组(样本不足时双开)。
+    同时下发当前组的速查表行(静态研究锚定+近12月动态成绩双列)与切换历史。"""
+    row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
+    trades = list((row or {}).get("dyn_trades") or [])
+    if not trades:
+        return {"status": "unavailable", "rules_version": contracts.HPR_RULES_VERSION,
+                "reason": "回测物化未生成动态口诀组数据,请等待 rebuild 完成"}
+    win = contracts.DYN_GROUP_WINDOW
+    months = sorted({str(t["m"]) for t in trades})
+    recent = set(months[-win:])
+
+    def agg(g: str, ms: set[str] | None = None) -> dict[str, object]:
+        scope = recent if ms is None else ms
+        rs = [float(t["r"]) for t in trades if str(t["m"]) in scope and t["g"] == g]
+        return {"n": len(rs),
+                "avg": round(sum(rs) / len(rs), 2) if rs else None,
+                "win": round(sum(1 for x in rs if x > 0) / len(rs), 3) if rs else None}
+
+    wk, st = agg("weak"), agg("strong")
+    current = _dyn_group_state(trades, recent)
+
+    # 组内口诀逐条近12月动态成绩
+    def point_dyn(prefix_keys: list[str]) -> dict[str, dict[str, object]]:
+        out: dict[str, dict[str, object]] = {}
+        for no in prefix_keys:
+            rs = [float(t["r"]) for t in trades
+                  if str(t["m"]) in recent and t["p"] == no]
+            out[no] = {"n": len(rs),
+                       "avg": round(sum(rs) / len(rs), 2) if rs else None,
+                       "win": round(sum(1 for x in rs if x > 0) / len(rs), 3) if rs else None}
+        return out
+
+    def rows_with_dyn(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+        dyn = point_dyn([str(r["no"]) for r in rows])
+        out = []
+        seen: set[str] = set()
+        for r in rows:
+            no = str(r["no"])
+            # 多分支口诀(A1/B1/B2/C3)按编号汇总,动态数只填首行——分支行重复显示会误读为双倍笔数
+            if no in seen:
+                out.append({**r, "dyn_stat": ""})
+                continue
+            seen.add(no)
+            d = dyn.get(no) or {"n": 0}
+            ds = (f"近{win}月 {d['n']}笔"
+                  + (f"·胜{round(d['win'] * 100)}%·均{d['avg']:+.1f}" if d["n"] else "无出手"))
+            out.append({**r, "dyn_stat": ds})
+        return out
+
+    weak_rows = rows_with_dyn(contracts.WEAK_CHEAT_ROWS)
+    strong_rows = rows_with_dyn(contracts.CHEAT_ROWS)
+
+    # 切换历史:物化起点逐月滚动(前 win 月暖机,样本不足=双开)
+    history: list[dict[str, str]] = []
+    state = "both"
+    for i in range(win, len(months) + 1):
+        ms = set(months[max(0, i - win):i])
+        s = _dyn_group_state(trades, ms)
+        if s != state:
+            tag_m = months[i - 1] if i - 1 < len(months) else months[-1]
+            history.append({"month": tag_m, "from": state, "to": s})
+            state = s
+
+    return {
+        "status": "ok",
+        "rules_version": contracts.HPR_RULES_VERSION,
+        "window_months": win,
+        "asof": months[-1],
+        "current_group": current,
+        "groups": {"weak": {**wk, "label": "弱市组", "rows": weak_rows},
+                   "strong": {**st, "label": "强市组", "rows": strong_rows}},
+        "current_rows": weak_rows if current == "weak" else
+                        strong_rows if current == "strong" else weak_rows + strong_rows,
+        "switch_history": history,
+        "caliber": ("近12个月两组各自命中的每笔平均收益(E3,产品卖出纪律),"
+                    "高的一组整组启用;月末滚动,样本不足时双开;数字动态计算"),
+    }
+
+
 def get_rules() -> dict[str, object]:
     # 姿态案例K线窗随物化 payload 出(v6.10 规则页四宫格图解;旧物化无此键→空表)
     pose_cases: list[dict[str, object]] = []
@@ -448,6 +616,9 @@ def get_rules() -> dict[str, object]:
         "point_boards": contracts.POINT_BOARDS,   # 板位归属(打3板/打4板)
         "rules": contracts.RULES,
         "cheat_rows": contracts.CHEAT_ROWS,   # 速查表(规则页主表;单一事实源,前端不维护副本)
+        "weak_cheat_rows": contracts.WEAK_CHEAT_ROWS,  # 弱市组速查表(v7.0动态口诀组)
+        "weak_point_boards": contracts.WEAK_POINT_BOARDS,
+        "dyn_group_window": contracts.DYN_GROUP_WINDOW,
         "falsified_rules": contracts.FALSIFIED_RULES,
         "risk_notes": contracts.RISK_NOTES,
         "ths_pool_conditions": contracts.THS_POOL_CONDITIONS,

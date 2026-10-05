@@ -99,6 +99,17 @@ def rules():
     return ok(service.get_rules())
 
 
+@router.get("/koujue/current", response_model=None)
+def koujue_current():
+    """获取最新口诀(v7.0 动态口诀组):近12个月弱市组/强市组各自平均收益,高的整组启用。"""
+    try:
+        return ok(service.get_current_koujue())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "HPR_KOUJUE_UNAVAILABLE", "动态口诀组暂时不可用",
+            {"reason": exc.__class__.__name__}))
+
+
 @router.get("/quiz/overview", response_model=None)
 def quiz_overview():
     """答题训练题库:年→月题数分布(年份选择/月份格子用;题库未生成→unavailable)。"""

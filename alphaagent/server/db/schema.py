@@ -2107,6 +2107,12 @@ hpr_pool_entries = Table(
     Column("b3_turn", Float, nullable=True),             # 三板换手 %(2026-09-28)
     Column("turn_grad", Float, nullable=True),           # 换手梯度 b2-b1
     Column("mkt_lim_tm1", Integer, nullable=True),       # 昨日大盘涨停家数(信息项)
+    # 弱市组候选(v7.1 动态口诀组):K系链级命中;weak_gate=today_{lo}_{hi}[,...] 并集窗,
+    # 当前组=weak/both 才出手(get_live/live_scan 按组过滤)
+    Column("weak_point", String(4), nullable=False, server_default="—"),  # K2/K4/K5/K7/K9/K3/—
+    Column("weak_label", String(24), nullable=True),     # K5 贴零强开
+    Column("weak_gate", String(64), nullable=True),
+    Column("weak_hint", String(128), nullable=True),
     Column("rules_version", String(80), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
@@ -2587,6 +2593,11 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE hpr_pool_entries ALTER COLUMN auction_gate TYPE VARCHAR(64)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS b3_open FLOAT",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS b3_turn FLOAT",
+        # v7.1 动态口诀组:弱市组候选打标(K系链级命中,当前组=weak/both 才出手)
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_point VARCHAR(4) NOT NULL DEFAULT '—'",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_label VARCHAR(24)",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_gate VARCHAR(64)",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_hint VARCHAR(128)",
         "ALTER TABLE erbo_pool_entries ADD COLUMN IF NOT EXISTS reb30 INTEGER",
         "ALTER TABLE erbo_pool_entries ADD COLUMN IF NOT EXISTS s4 BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",

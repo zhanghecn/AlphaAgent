@@ -42,7 +42,7 @@ const EXIT_REASON_LABELS: Record<string, string> = {
   max_hold_close: "15日兜底·收盘卖",
 };
 
-/** 打板口诀卡七条硬编码映射(hpr-v5.1;A=阳 B=阴 C=中性阴阳都打 E=三接四)。 */
+/** 打板口诀卡映射(强市组A1~C3 + 弱市组K系v7.1;A=阳 B=阴 C=中性 K=弱市组紫)。 */
 const POINT_BADGES: Record<string, { label: string; full: string; className: string }> = {
   A1: { label: "A1", full: "A1 双平贴零(二接三阳)", className: "bg-rise/15 text-rise ring-1 ring-rise/40" },
   A2: { label: "A2", full: "A2 一字转强(二接三阳)", className: "bg-teal-500/15 text-teal-500" },
@@ -53,9 +53,17 @@ const POINT_BADGES: Record<string, { label: string; full: string; className: str
   B3: { label: "B3", full: "B3 贴零温开(三接四阴)", className: "bg-orange-500/15 text-orange-500" },
   C2: { label: "C2", full: "C2 四板换手(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
   C3: { label: "C3", full: "C3 一字换手(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
+  // 弱市组(v7.0,定型于2020-22;紫系与强市组区分)
+  K2: { label: "K2", full: "K2 三板换手强开(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K4: { label: "K4", full: "K4 换足弱开捡(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K5: { label: "K5", full: "K5 贴零强开(弱市组,前波=0)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K7: { label: "K7", full: "K7 贴零弱开捡(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K9: { label: "K9", full: "K9 洗后温推(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K3: { label: "K3", full: "K3 双洗温推贴顶(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
 };
 
 const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"] as const;
+const WEAK_POINT_KEYS = ["K2", "K4", "K5", "K7", "K9", "K3"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
@@ -66,6 +74,19 @@ const POINT_COUNT_TONE: Record<string, string> = {
   A3: "text-rose-500",
   B3: "text-orange-500",
   C2: "text-primary",
+  K2: "text-violet-500",
+  K4: "text-violet-500",
+  K5: "text-violet-500",
+  K7: "text-violet-500",
+  K9: "text-violet-500",
+  K3: "text-violet-500",
+};
+
+/** 动态口诀组横幅样式(v7.1):当前组=哪组口诀赚得多用哪组 */
+const DYN_GROUP_META: Record<string, { label: string; className: string }> = {
+  strong: { label: "强市组", className: "border-primary/40 bg-primary/10 text-primary" },
+  weak: { label: "弱市组", className: "border-violet-500/40 bg-violet-500/10 text-violet-500" },
+  both: { label: "双开(样本不足)", className: "border-muted bg-muted/30 text-muted-foreground" },
 };
 
 export function HprLiveView({
@@ -89,7 +110,9 @@ export function HprLiveView({
   const thsConditions = rulesQuery.data?.ths_pool_conditions;
   const playbook = rulesQuery.data?.intraday_playbook ?? [];
   const byPoint = payload.counts.by_point ?? {};
+  const byWeakPoint = payload.counts.by_weak_point ?? {};
   const byStatus = payload.counts.by_status ?? {};
+  const dyn = payload.dyn_group;
 
   return (
     <div className="space-y-4">
@@ -109,7 +132,16 @@ export function HprLiveView({
               {pk} {byPoint[pk] ?? 0}
             </span>
           ))}
-          <span className="font-semibold text-rise">出手 {payload.counts.actionable ?? 0}</span>
+          {WEAK_POINT_KEYS.some((k) => (byWeakPoint[k] ?? 0) > 0) ? (
+            <span className="flex items-center gap-2">
+              {WEAK_POINT_KEYS.filter((k) => (byWeakPoint[k] ?? 0) > 0).map((k) => (
+                <span key={k} className={POINT_COUNT_TONE[k]}>
+                  {k} {byWeakPoint[k] ?? 0}
+                </span>
+              ))}
+            </span>
+          ) : null}
+          <span className="font-semibold text-rise">出手 {payload.counts.active ?? payload.counts.actionable ?? 0}</span>
           <span className="text-rise">已买入 {byStatus.entered ?? 0}</span>
           <span className="text-rise">持有 {byStatus.holding ?? 0}</span>
           <span>已了结 {byStatus.closed ?? 0}</span>
@@ -136,6 +168,21 @@ export function HprLiveView({
               : null}
           </span>
         </div>
+
+        {dyn ? (
+          <div
+            className={cn(
+              "flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-2 text-xs",
+              DYN_GROUP_META[dyn.group]?.className,
+            )}
+          >
+            <span className="font-semibold">当前口诀组:{DYN_GROUP_META[dyn.group]?.label ?? dyn.group}</span>
+            <span className="text-muted-foreground">
+              近一年哪组口诀赚得多就用哪组{dyn.asof ? ` · 数据至 ${dyn.asof}` : ""}
+              {dyn.group !== "both" ? "——另一组命中的票只看不买(灰显)" : ""}
+            </span>
+          </div>
+        ) : null}
 
         <SyncStatusBar
           scan={payload.last_scan}
@@ -205,11 +252,13 @@ export function HprLiveView({
 function LiveRow({ entry }: { entry: HprLiveEntry }) {
   const meta = STATUS_META[entry.status] ?? STATUS_META.watching;
   const badge = POINT_BADGES[entry.point] ?? null;
-  // 雷达票(未命中方案点/静态回避)整体降透明度(只看不做)
-  const dimmed = !entry.actionable;
+  // v7.1 动态口诀组:出手资格=当前启用组命中(active);未启用组命中/雷达降透明度(只看不做)
+  const active = entry.active ?? entry.actionable;
+  const dimmed = !active;
   const auctionBlocked =
     entry.status === "skipped_auction" ||
     (entry.avoid_static != null && entry.avoid_static !== "");
+  const weakHit = entry.weak_point != null && entry.weak_point !== "—";
   return (
     <tr className={cn("border-b last:border-b-0 hover:bg-muted/30", dimmed && "opacity-50")}>
       <td className="px-3 py-2.5">
@@ -228,12 +277,16 @@ function LiveRow({ entry }: { entry: HprLiveEntry }) {
         )}
       </td>
       <td className="px-3 py-2.5 text-xs">
-        {entry.actionable ? (
+        {active ? (
           entry.level === "A" ? (
-            <span className="font-semibold text-rise" title="链式方案命中">✅出手</span>
+            <span className="font-semibold text-rise" title="启用组口诀命中">✅出手</span>
           ) : (
             <span className="font-semibold text-primary" title="候选(今天开窗待盘中确认)">🔵候选</span>
           )
+        ) : entry.paused_label ? (
+          <span className="text-violet-500/80" title={`口诀命中但${entry.paused_label}(动态口诀组:近一年哪组赚得多用哪组)`}>
+            {entry.paused_label}
+          </span>
         ) : entry.avoid_static ? (
           <span className="text-amber-600" title={entry.avoid_static}>回避</span>
         ) : (
@@ -276,6 +329,27 @@ function LiveRow({ entry }: { entry: HprLiveEntry }) {
             需{entry.today_window.map(fmtWindow).join("或")}
             {entry.auction_pct != null
               ? inAnyWindow(entry.today_window, entry.auction_pct) ? " ✓" : " ✗"
+              : ""}
+          </div>
+        ) : null}
+        {weakHit && entry.weak_windows && entry.weak_windows.length > 0 ? (
+          // 弱市组候选窗(v7.1):K系今开窗另列一行;弱市组未启用时灰显(对照不误导)
+          <div
+            className={cn(
+              "text-[10px]",
+              entry.weak_active
+                ? entry.auction_pct == null
+                  ? "text-violet-500"
+                  : inAnyWindow(entry.weak_windows, entry.auction_pct)
+                    ? "text-violet-500"
+                    : "text-amber-600"
+                : "text-muted-foreground/60",
+            )}
+            title={entry.weak_hint ?? undefined}
+          >
+            K窗 需{entry.weak_windows.map(fmtWindow).join("或")}
+            {entry.auction_pct != null
+              ? inAnyWindow(entry.weak_windows, entry.auction_pct) ? " ✓" : " ✗"
               : ""}
           </div>
         ) : null}

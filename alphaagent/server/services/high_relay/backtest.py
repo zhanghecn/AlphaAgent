@@ -33,8 +33,9 @@ from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod, repository
 
-REPLAY_START = pd.Timestamp("2023-01-01")
-BARS_START = "2022-06-01"  # 暖机窗口(前波120/h60/ma30 需要的全部历史深度;与研究一致)
+REPLAY_START = pd.Timestamp("2023-01-01")   # 报告主统计起点(强市组锚点窗口,不变)
+EVENTS_START = pd.Timestamp("2020-01-01")   # 事件回放起点(v7.1 题库扩弱市组:20-22段出K系题)
+BARS_START = "2019-06-01"  # 暖机窗口(前波120/h60/ma30 需要的全部历史深度;与研究一致)
 MAX_K = 15                 # 前向列深度:n1=入场次日 … n15=兜底出口(研究 15 日口径)
 
 
@@ -48,8 +49,13 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     """由事件表组装物化报告(service  rebuild 时与题库构建共用同一次回放)。
 
     只在此处挂「同票持仓重叠」标记(题库构建用原始 E 表,不受影响)。
-    bars 传入时附 pose_cases(地基姿态案例K线窗,规则页四宫格图解用,v6.10)。"""
-    done = E[~E["未完"]].copy()
+    bars 传入时附 pose_cases(地基姿态案例K线窗,规则页四宫格图解用,v6.10)。
+    v7.1:E 含 2020 起事件(题库弱市组段)——主统计仍过滤回 2023+(强市锚点零漂移),
+    弱市组单独出 K 系分口诀 summary(2023+段)+ weak_era(20-22 段合计锚点)。"""
+    done_all = E[~E["未完"]].copy()
+    # 弱市时代段(2020~2022):弱市组定型样本,出 weak_era 锚点;不再进主统计
+    weak_era = done_all[done_all["买入日"] < REPLAY_START]
+    done = done_all[done_all["买入日"] >= REPLAY_START]
     _mark_overlap(done)
 
     keys = list(contracts.POINT_KEYS) + ["all", "miss"]
@@ -64,6 +70,11 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
 
     frames = {k: subset(k) for k in keys}
     summary = {k: _stats(frames[k]) for k in keys}
+    # 弱市组(v7.1):K 系 2023+ 段分口诀 + 合计;弱市时代段(20-22)合计锚点
+    for k in list(contracts.WEAK_POINT_KEYS) + ["weak_all"]:
+        sel = done["弱口诀"] != "—" if k == "weak_all" else done["弱口诀"] == k
+        summary[k] = _stats(done[sel])
+    summary["weak_era"] = _stats(weak_era[weak_era["弱口诀"] != "—"])
     coverage = {
         "from": _date_str(done["买入日"].min()) if len(done) else None,
         "to": _date_str(done["买入日"].max()) if len(done) else None,
@@ -85,7 +96,10 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
                     "双口径(v6.1):点成绩/锚点=全信号研究口径;净值曲线/交割单收益汇总=可执行口径"
                     "(同票持仓未退时的新信号不成交,交割单保留行并标注)。"
                     "C2先手小阳腿(v6.2):首板前日涨1~3%×三板开<7不命中,三开≥7强开链照打。"
-                    "A2前10日腿(v6.3):首板前10个交易日涨幅≥10%(近端透支)不命中,阳组专属。"),
+                    "A2前10日腿(v6.3):首板前10个交易日涨幅≥10%(近端透支)不命中,阳组专属。"
+                    "v7.1:事件回放含2020起(题库弱市组段);主统计2023+;弱市组K系另行"
+                    "summary(K*/weak_all=2023+段,weak_era=2020-22定型段);动态口诀组="
+                    "近12月两组均值高者整组启用。"),
         "group4_labels": contracts.GROUP4_LABELS,
         "point_labels": contracts.POINT_LABELS,
         "point_levels": contracts.POINT_LEVELS,
@@ -103,9 +117,32 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
         "radar": _radar_stats(done),
     }
     payload["ledger_days"] = _ledger_days(frames["all"], repository.load_touch_map())
+    # v7.1:dyn_trades 用全时段(2020 起)——切换历史从暖机后 2021-01 起完整六年
+    payload["dyn_trades"] = _dyn_trades(done_all)
+    payload["weak_point_labels"] = contracts.WEAK_POINT_LABELS
     if bars is not None:
         payload["pose_cases"] = _pose_cases(E, bars)
     return payload
+
+
+def _dyn_trades(done: pd.DataFrame) -> list[dict[str, object]]:
+    """动态口诀组逐笔轻表(v7.0「近一年哪组赚得多就用哪组」的数据底座)。
+
+    每笔 {m:月, g:组(weak/strong), p:口诀编号, r:E3%};组归属——弱市组(K系)优先,
+    双命中的票归弱市组(研究 v5 口径,窄格先拿);强市组=方案点命中且非 K 系。
+    get_current_koujue 按此表滚动汇总近12月两组成绩与切换判断,数字永远动态。"""
+    out: list[dict[str, object]] = []
+    for _, r in done.iterrows():
+        e3 = r.get("E3%")
+        if e3 is None or e3 != e3:
+            continue
+        wk = str(r.get("弱口诀") or "—")
+        pt = str(r.get("方案点") or "—")
+        if wk != "—":
+            out.append({"m": str(r["月"]), "g": "weak", "p": wk, "r": round(float(e3), 2)})
+        elif pt != "—":
+            out.append({"m": str(r["月"]), "g": "strong", "p": pt, "r": round(float(e3), 2)})
+    return out
 
 
 def _pose_cases(E: pd.DataFrame, bars: pd.DataFrame) -> list[dict[str, object]]:
@@ -169,9 +206,10 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
         bars[f"n{k}_low"] = g["low_price"].shift(-k)
         bars[f"n{k}_is_lim"] = g["is_lim"].shift(-k)
 
-    # 事件 = 昨日恰好 2/3 连板 × 当日触板 × 非一字全天(研究 ev_mask 口径)
+    # 事件 = 昨日恰好 2/3 连板 × 当日触板 × 非一字全天(研究 ev_mask 口径);
+    # v7.1 起回放 2020-01(题库弱市组段),报告主统计在 assemble_report 过滤回 2023+
     ev_mask = (bars["streak_prev"].isin([2, 3]) & bars["touch"]
-               & (bars["trade_date"] >= REPLAY_START) & (~bars["one_word"]))
+               & (bars["trade_date"] >= EVENTS_START) & (~bars["one_word"]))
     ev = bars[ev_mask]
     ctx = pool_mod.make_ctx(bars)
 
@@ -200,6 +238,12 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             pre10_pct=rec.get("pre10_pct"),
             foundation_pose=rec.get("foundation_pose"),
             anchor_pos=rec.get("anchor_pos"), anchor_dist=rec.get("anchor_dist"))
+        weak = pool_mod.tag_weak(
+            group4, rec.get("b1_open"), rec.get("b2_open"),
+            rec.get("b3_open"), auction_pct=buy_open, b1_turn=rec.get("b1_turn"),
+            b2_turn=rec.get("b2_turn"), b3_turn=rec.get("b3_turn"),
+            foundation_chg=rec.get("foundation_chg"),
+            prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"))
         avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
                                       rec.get("b2_open"), rec.get("pre3_pct"))
         sealed = bool(cols["is_lim"][i])
@@ -308,6 +352,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "N": n_board,
             "阴阳": "阳" if yang else "阴",
             "方案点": point,
+            "弱口诀": str(weak["no"]) if weak else "—",
             "回避": avoid,
             "买价": buy,
             "买入开盘%": buy_open,
