@@ -494,6 +494,7 @@ describe("quizScore.summarize 月度统计", () => {
 
 const QUIZ_HIT_Q: HprQuizQuestion = {
   seq: 1, vt_symbol: "000797.SZSE", name: "粤桂股份", decision_date: "2024-11-13",
+  dyn_state: "strong",
   n_board: 2, group4: "二接三阴",
   display: {
     board_label: "打3板", b1_open: 8.4, b2_open: 10.0, b3_open: null,
@@ -526,6 +527,7 @@ const QUIZ_HIT_Q: HprQuizQuestion = {
 
 const QUIZ_MISS_Q: HprQuizQuestion = {
   seq: 2, vt_symbol: "600398.SH", name: "齐心集团", decision_date: "2024-11-29",
+  dyn_state: "strong",
   n_board: 3, group4: "三接四阳",
   display: {
     board_label: "打4板", b1_open: 1.3, b2_open: -3.1, b3_open: 10.0,
@@ -550,8 +552,45 @@ const QUIZ_MISS_Q: HprQuizQuestion = {
              fail_fields: ["今开"], scheme_row: null, row_fails: ["today"] },
 };
 
+// v7.2 弱市组题 fixture:2021-xx 弱市时代 K5 命中(该买=K系),讲解=弱市速查表行
+const QUIZ_WEAK_HIT_Q: HprQuizQuestion = {
+  seq: 3, vt_symbol: "301011.SZSE", name: "华骐环保", decision_date: "2021-11-08",
+  dyn_state: "weak",
+  n_board: 3, group4: "三接四阴",
+  display: {
+    board_label: "打4板", b1_open: 1.0, b2_open: 2.0, b3_open: 8.0,
+    b2_turn: 4.0, b3_turn: null, pre20_pct: 6.0, pre10_pct: null,
+    b1_turn: 6.2, prev_wave60: 0, dist_h60: -3.5,
+    foundation_chg: -1.8, foundation_pose: null, foundation_ma20: null, anchor_pos: null, auction_pct: 7.2,
+    prev_close: 12.0, limit_price: 13.2, decision_open: 12.86, day_high_pct: 10.0,
+    chain: "实体→实体→实体",
+  },
+  bars_before: [
+    { d: "2021-11-03", o: 10.5, h: 10.6, l: 10.0, c: 10.2, v: 700 },   // 地基日 阴
+    { d: "2021-11-04", o: 10.2, h: 11.2, l: 10.1, c: 11.2, v: 1300 },  // 一板
+    { d: "2021-11-05", o: 11.2, h: 12.3, l: 11.1, c: 12.3, v: 1100 },  // 二板
+    { d: "2021-11-08", o: 12.0, h: 13.2, l: 11.8, c: 13.2, v: 1600 },  // 三板
+  ],
+  bars_after: [{ d: "2021-11-09", o: 13.5, h: 14.5, l: 13.2, c: 14.5, v: 2600 }],
+  answer: {
+    point: "K5", should_buy: true, ret_pct: 18.6, buy_price: 13.2,
+    sealed: true, hold_days: 4, exit_date: "2021-11-15", exit_price: 15.66,
+    exit_reason: "break_close",
+  },
+  explain: {
+    kind: "hit", scheme_no: "K5", scheme_name: "K5 贴零强开",
+    scheme_row: {
+      no: "K5", name: "K5 贴零强开",
+      yang: "阴·打4板", b1: "不看", b2: "平开0~3", b3: "不看",
+      today: "强开6~9.5", ground: "前波=0(60日没炒过)", stat: "13笔·胜85%·均+5.2",
+    },
+    matched_line: "阴地基 × 二板开+2.0 贴零 × 今开+7.2 强开 × 前波=0",
+  },
+};
+
 function renderRunner(props?: {
   showName?: boolean;
+  dynGroup?: string | null;
   answers?: Record<string, { choice: "buy" | "reject"; score: number }>;
   questions?: HprQuizQuestion[];
 }) {
@@ -562,6 +601,7 @@ function renderRunner(props?: {
         questions={props?.questions ?? [QUIZ_HIT_Q, QUIZ_MISS_Q]}
         rulesVersion="hpr-v4.0·q1"
         showName={props?.showName ?? false}
+        dynGroup={props?.dynGroup}
         answers={props?.answers ?? {}}
         onAnswersChange={() => undefined}
         onBack={() => undefined}
@@ -661,6 +701,58 @@ describe("quizScore.isWrongAnswer 错题判定(重练入选条件)", () => {
     expect(isWrongAnswer(QUIZ_HIT_Q, { choice: "reject", score: -5 })).toBe(true);  // bad 踏空
     expect(isWrongAnswer(QUIZ_HIT_Q, { choice: "buy", score: 10 })).toBe(false);   // great
     expect(isWrongAnswer(QUIZ_HIT_Q, undefined)).toBe(false);                      // 未答
+  });
+});
+
+// ── 动态口诀组联动(v7.2):做题时标注题目所在时代的口诀组当前启用与否(「提取口诀」贯通到做题) ──
+
+describe("QuizRunner 动态口诀组联动(v7.2)", () => {
+  it("弱市时代题(2020-22):era chip=弱市组题,当前组=strong 标「当前未启用」", () => {
+    const html = renderRunner({ questions: [QUIZ_WEAK_HIT_Q], dynGroup: "strong" });
+    expect(html).toContain("2021年11月");
+    expect(html).toContain("弱市组题");
+    expect(html).toContain("当前未启用");
+    // 弱市判定格(v7.1)与 K 系速查表行讲解
+    expect(html).toContain("前波60日");
+    expect(html).toContain("没炒过");
+  });
+
+  it("弱市时代题:当前组=weak 或 both(双开)均标「当前启用中」", () => {
+    expect(renderRunner({ questions: [QUIZ_WEAK_HIT_Q], dynGroup: "weak" }))
+      .toContain("当前启用中");
+    expect(renderRunner({ questions: [QUIZ_WEAK_HIT_Q], dynGroup: "both" }))
+      .toContain("当前启用中");
+  });
+
+  it("强市时代题(2023起):当前组=strong 标「当前启用中」,无未启用徽章", () => {
+    const html = renderRunner({ dynGroup: "strong" });
+    expect(html).toContain("强市组题");
+    expect(html).toContain("当前启用中");
+    expect(html).not.toContain("当前未启用");
+  });
+
+  it("不传当前组(koujue 未返回的兜底)不渲染启用徽章", () => {
+    const html = renderRunner({});
+    expect(html).toContain("强市组题");
+    expect(html).not.toContain("当前启用中");
+    expect(html).not.toContain("当前未启用");
+  });
+
+  // v7.3 逐月动态组:双开月题(暖机期)显示「双开题」chip,当前组无论如何都算启用
+  it("双开月题(2020 暖机期):chip=双开题,当前组=strong 也标启用中", () => {
+    const bothQ: HprQuizQuestion = { ...QUIZ_WEAK_HIT_Q, decision_date: "2020-03-10", dyn_state: "both" };
+    const html = renderRunner({ questions: [bothQ], dynGroup: "strong" });
+    expect(html).toContain("双开题");
+    expect(html).toContain("当前启用中");
+    expect(html).not.toContain("当前未启用");
+  });
+
+  it("旧物化兜底:无 dyn_state 字段按日期粗切(2021 题=弱市组题)", () => {
+    const legacyQ = { ...QUIZ_WEAK_HIT_Q } as HprQuizQuestion;
+    delete (legacyQ as Partial<HprQuizQuestion>).dyn_state;
+    const html = renderRunner({ questions: [legacyQ] });
+    expect(html).toContain("弱市组题");
+    expect(html).not.toContain("双开题");
   });
 });
 

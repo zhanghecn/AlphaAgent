@@ -1,7 +1,12 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchHprQuizMixed, fetchHprQuizOverview, fetchHprQuizQuestions } from "@/api/highRelay";
+import {
+  fetchHprKoujueCurrent,
+  fetchHprQuizMixed,
+  fetchHprQuizOverview,
+  fetchHprQuizQuestions,
+} from "@/api/highRelay";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
@@ -11,10 +16,18 @@ import { QuizRunner } from "./QuizRunner";
 import type { QuizAnswerRec } from "./quizScore";
 import { loadProgress, resetAll } from "./quizProgress";
 
+/** 动态口诀组横幅样式(v7.2 答题页;与 HprLiveView 同色系) */
+const DYN_GROUP_META: Record<string, { label: string; className: string }> = {
+  strong: { label: "强市组(A1~C3 八条)", className: "border-primary/40 bg-primary/10 text-primary" },
+  weak: { label: "弱市组(K 系六条)", className: "border-violet-500/40 bg-violet-500/10 text-violet-500" },
+  both: { label: "双开(样本不足)", className: "border-muted bg-muted/30 text-muted-foreground" },
+};
+
 /**
- * 答题训练页签根:综合挑战卷(七条口诀好票+陷阱票随机混编) + 年份 chip →
+ * 答题训练页签根:综合挑战卷(两组口诀好票+陷阱票随机混编) + 年份 chip →
  * 月份格子(题数/进度/得分) → QuizRunner。
  * 进度存 localStorage(key 含题库版本串);默认匿名,实名开关切题干显示。
+ * v7.2:头部挂「当前口诀组」横幅(自动拉 koujue),年份按时代分色,抽题范围加时代维度。
  */
 export function HprQuizView() {
   const overviewQuery = useQuery({
@@ -24,6 +37,14 @@ export function HprQuizView() {
   });
   const overview = overviewQuery.data;
   const rulesVersion = overview?.rules_version ?? "unknown";
+  // 动态口诀组(v7.2):做题也要知道当前启用哪组——与规则页按钮/实时推荐同一数据源
+  const koujueQuery = useQuery({
+    queryKey: ["hprKoujue"],
+    queryFn: fetchHprKoujueCurrent,
+    staleTime: 300_000,
+  });
+  const dynGroup =
+    koujueQuery.data?.status === "ok" ? koujueQuery.data.current_group : null;
 
   const years = useMemo(
     () => (overview?.status === "ok" ? overview.years ?? [] : []),
@@ -33,8 +54,10 @@ export function HprQuizView() {
   const [month, setMonth] = useState<string | null>(null);
   // 综合挑战卷:nonce=null 未进卷;每点一次「开始挑战」+1 → queryKey 变 →
   // 强制重新随机抽题(禁缓存,主人要每次重抽不重样);mixYear=null 全库,
-  // 指定年=只在该年抽(主人定:按年份练市场环境)
+  // 指定年=只在该年抽(主人定:按年份练市场环境);
+  // mixEra(v7.2)=时代抽题,与年份互斥:weak=2020-22 弱市组段,strong=2023 起强市段
   const [mixYear, setMixYear] = useState<string | null>(null);
+  const [mixEra, setMixEra] = useState<"weak" | "strong" | null>(null);
   const [mixedNonce, setMixedNonce] = useState<number | null>(null);
   const [showName, setShowName] = useState(false);
   const [answers, setAnswers] = useState<Record<string, QuizAnswerRec>>({});
@@ -57,8 +80,10 @@ export function HprQuizView() {
   });
 
   const mixedQuery = useQuery({
-    queryKey: ["hprQuizMixed", mixedNonce, mixYear],
-    queryFn: () => fetchHprQuizMixed(mixYear ?? undefined),
+    queryKey: ["hprQuizMixed", mixedNonce, mixYear, mixEra],
+    queryFn: () => fetchHprQuizMixed(
+      mixEra ? { era: mixEra } : mixYear ? { year: mixYear } : undefined,
+    ),
     enabled: mixedNonce != null,
     staleTime: 0,
     gcTime: 0,
@@ -91,6 +116,7 @@ export function HprQuizView() {
             questions={questions}
             rulesVersion={rulesVersion}
             showName={showName}
+            dynGroup={dynGroup}
             answers={answers}
             onAnswersChange={setAnswers}
             onBack={() => setMixedNonce(null)}
@@ -114,6 +140,7 @@ export function HprQuizView() {
             questions={questions}
             rulesVersion={rulesVersion}
             showName={showName}
+            dynGroup={dynGroup}
             answers={answers}
             onAnswersChange={setAnswers}
             onBack={() => setMonth(null)}
@@ -152,22 +179,62 @@ export function HprQuizView() {
             </button>
           </span>
         </div>
-        <div className="mt-2 flex flex-wrap gap-2">
-          {years.map((y) => (
-            <button
-              key={y.year}
-              type="button"
+        {dynGroup ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span
               className={cn(
-                "rounded-md border px-3 py-2 text-xs md:py-1",
-                y.year === activeYear
-                  ? "border-primary bg-primary/10 font-semibold text-primary"
-                  : "text-muted-foreground hover:bg-muted/40",
+                "rounded-md border px-2 py-1 text-xs font-semibold",
+                DYN_GROUP_META[dynGroup]?.className,
               )}
-              onClick={() => setYear(y.year)}
             >
-              {y.year}年
-            </button>
-          ))}
+              当前口诀组:{DYN_GROUP_META[dynGroup]?.label ?? dynGroup}
+            </span>
+            <span className="text-[11px] text-muted-foreground">
+              近一年哪组口诀赚得多就用哪组（实时推荐/盘中扫描按它出手）——做题按题目所在时代的口诀组判断，两组口诀条件见「规则说明」
+            </span>
+          </div>
+        ) : null}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] text-muted-foreground">
+            紫色年份=弱市组题(K 系) · 蓝色年份=强市组题 · 渐变=当年切组(做题时看每题的组标签)
+          </span>
+        </div>
+        <div className="mt-1 flex flex-wrap gap-2">
+          {years.map((y) => {
+            // v7.3 年份按该年月组状态分色(后端逐月聚合):纯弱市年紫/纯强市年蓝/
+            // 切组年(如 2023:1~6月弱市·7月起强市)蓝紫渐变;旧数据兜底按日期切
+            const states = y.dyn_states?.length
+              ? y.dyn_states
+              : y.year <= "2022" ? ["weak"] : ["strong"];
+            const hasWeak = states.includes("weak");
+            const hasStrong = states.includes("strong");
+            const mixed = hasWeak && hasStrong;
+            const weakYear = hasWeak && !hasStrong;
+            const toneCls = y.year === activeYear
+              ? mixed
+                ? "border-violet-500/50 bg-gradient-to-r from-violet-500/15 to-primary/15 font-semibold text-foreground"
+                : weakYear
+                  ? "border-violet-500 bg-violet-500/10 font-semibold text-violet-500"
+                  : "border-primary bg-primary/10 font-semibold text-primary"
+              : weakYear || mixed
+                ? "text-violet-500/80 hover:bg-violet-500/10"
+                : "text-muted-foreground hover:bg-muted/40";
+            return (
+              <button
+                key={y.year}
+                type="button"
+                title={mixed
+                  ? "切组年:该年内动态口诀组发生切换(既有弱市组月也有强市组月)——做题时看每题的组标签"
+                  : weakYear
+                    ? "弱市组题:该年每月动态组=弱市组,按K系六条口诀判断"
+                    : "强市组题:该年每月动态组=强市组,按A1~C3八条口诀判断"}
+                className={cn("rounded-md border px-3 py-2 text-xs md:py-1", toneCls)}
+                onClick={() => setYear(y.year)}
+              >
+                {y.year}年
+              </button>
+            );
+          })}
         </div>
       </section>
 
@@ -187,16 +254,32 @@ export function HprQuizView() {
             开始挑战
           </button>
         </div>
-        {/* 年份筛选(主人定):选年=只在该年抽题练该年市场环境;单年某口诀不足2道有多少抽多少 */}
+        {/* 年份筛选(主人定):选年=只在该年抽题练该年市场环境;单年某口诀不足2道有多少抽多少;
+            v7.2 时代筛选(与年份互斥):弱市时代=2020-22 只出K系好票+当时代陷阱,强市时代=2023起 */}
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span className="text-[11px] text-muted-foreground">抽题范围</span>
-          <MixYearChip label="全部年份" active={mixYear == null} onClick={() => setMixYear(null)} />
+          <MixYearChip
+            label="全部年份"
+            active={mixYear == null && mixEra == null}
+            onClick={() => { setMixYear(null); setMixEra(null); }}
+          />
+          <MixYearChip
+            label="弱市时代(20-22)"
+            tone="violet"
+            active={mixEra === "weak"}
+            onClick={() => { setMixEra("weak"); setMixYear(null); }}
+          />
+          <MixYearChip
+            label="强市时代(23起)"
+            active={mixEra === "strong"}
+            onClick={() => { setMixEra("strong"); setMixYear(null); }}
+          />
           {years.map((y) => (
             <MixYearChip
               key={y.year}
               label={`${y.year}年`}
-              active={mixYear === y.year}
-              onClick={() => setMixYear(y.year)}
+              active={mixEra == null && mixYear === y.year}
+              onClick={() => { setMixYear(y.year); setMixEra(null); }}
             />
           ))}
         </div>
@@ -232,10 +315,12 @@ export function HprQuizView() {
 function MixYearChip({
   label,
   active,
+  tone = "primary",
   onClick,
 }: {
   label: string;
   active: boolean;
+  tone?: "primary" | "violet";   // violet=弱市时代 chip(v7.2)
   onClick: () => void;
 }) {
   return (
@@ -244,7 +329,9 @@ function MixYearChip({
       className={cn(
         "rounded-md border px-2.5 py-2 text-[11px] md:py-0.5",
         active
-          ? "border-primary bg-primary/10 font-semibold text-primary"
+          ? tone === "violet"
+            ? "border-violet-500 bg-violet-500/10 font-semibold text-violet-500"
+            : "border-primary bg-primary/10 font-semibold text-primary"
           : "text-muted-foreground hover:bg-muted/40",
       )}
       onClick={onClick}

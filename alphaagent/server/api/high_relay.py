@@ -133,11 +133,13 @@ def quiz_questions(month: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
 
 
 @router.get("/quiz/mixed", response_model=None)
-def quiz_mixed(year: str | None = Query(None, pattern=r"^\d{4}$")):
+def quiz_mixed(year: str | None = Query(None, pattern=r"^\d{4}$"),
+               era: str | None = Query(None, pattern=r"^(weak|strong)$")):
     """综合挑战卷:六条口诀每条随机2道好票+21道陷阱差票(阴阳反串/形态接近/
-    毒段三等分),每次调用重抽不重样,全卷乱序;year 指定=只在该年抽。"""
+    毒段三等分),每次调用重抽不重样,全卷乱序;year 指定=只在该年抽;
+    era(v7.2 时代抽题,优先于 year):weak=2020-22 弱市组段,strong=2023 起强市段。"""
     try:
-        return ok(service.get_quiz_mixed(year))
+        return ok(service.get_quiz_mixed(year, era))
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=503, content=fail(
             "HPR_QUIZ_UNAVAILABLE", "高位接力答题题库暂时不可用",

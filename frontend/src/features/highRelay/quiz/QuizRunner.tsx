@@ -60,11 +60,13 @@ type Phase = "quiz" | "boardSummary" | "monthSummary";
 interface QuizRunnerProps {
   /** month 模式必填(显示用);mixed(综合挑战卷)跨月,标题改用各题 decision_date */
   month?: string;
-  /** month=按月刷题(默认);mixed=综合挑战卷(七条口诀好票+陷阱票混编) */
+  /** month=按月刷题(默认);mixed=综合挑战卷(两组口诀好票+陷阱票混编) */
   variant?: "month" | "mixed";
   questions: HprQuizQuestion[];
   rulesVersion: string;
   showName: boolean;
+  /** 当前动态口诀组(weak/strong/both;v7.2 答题页自动拉,题头标注该时代口诀当前启用与否) */
+  dynGroup?: string | null;
   answers: Record<string, QuizAnswerRec>;
   onAnswersChange: (next: Record<string, QuizAnswerRec>) => void;
   onBack: () => void;
@@ -76,6 +78,7 @@ export function QuizRunner({
   questions,
   rulesVersion,
   showName,
+  dynGroup,
   answers,
   onAnswersChange,
   onBack,
@@ -238,8 +241,10 @@ export function QuizRunner({
       : [],
   );
   const dd = question.decision_date;
-  // v7.1 动态口诀组时代标签:2020-22=弱市组题(该买=K系),2023+=强市组题
+  // v7.3 逐月动态组标签:后端下发 dyn_state(该月启用哪组——月度滚动复现,无未来函数;
+  // 2023 年 1~6 月=弱市组题/7 月起=强市组题;旧物化兜底按日期粗切)
   const weakEra = dd < "2023-01-01";
+  const qState = question.dyn_state ?? (weakEra ? "weak" : "strong");
   const title = showName
     ? `${question.name} ${question.vt_symbol.split(".")[0]}`
     : `${Number(dd.slice(0, 4))}年${Number(dd.slice(5, 7))}月 · ${d.board_label}`;
@@ -307,16 +312,43 @@ export function QuizRunner({
           <span
             className={cn(
               "rounded px-1.5 py-0.5 text-[10px] font-medium",
-              weakEra
+              qState === "weak"
                 ? "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40"
-                : "bg-primary/10 text-primary",
+                : qState === "both"
+                  ? "bg-muted text-muted-foreground ring-1 ring-muted-foreground/30"
+                  : "bg-primary/10 text-primary",
             )}
-            title={weakEra
-              ? "弱市时代(2020-22)题:按弱市组K系口诀判断(强市八条该时代不启用)"
-              : "强市时代(2023起)题:按强市组A1~C3口诀判断"}
+            title={qState === "weak"
+              ? "该月动态口诀组=弱市组:该买=K系命中(八条命中只是雷达)"
+              : qState === "both"
+                ? "该月双开(近12月样本不足的暖机期):两组任一命中即该买"
+                : "该月动态口诀组=强市组:该买=A1~C3八条命中"}
           >
-            {weakEra ? "弱市组题" : "强市组题"}
+            {qState === "weak" ? "弱市组题" : qState === "both" ? "双开题" : "强市组题"}
           </span>
+          {dynGroup ? (
+            // v7.2/v7.3 联动「提取口诀」:这题所在月的口诀组,当前是否启用(实时推荐按它出手)
+            (() => {
+              const eraActive = qState === "both"
+                ? true
+                : qState === "weak"
+                  ? dynGroup === "weak" || dynGroup === "both"
+                  : dynGroup === "strong" || dynGroup === "both";
+              return (
+                <span
+                  className={cn(
+                    "rounded px-1.5 py-0.5 text-[10px] font-medium",
+                    eraActive
+                      ? "bg-muted text-foreground"
+                      : "bg-muted/50 text-muted-foreground",
+                  )}
+                  title="「近一年哪组口诀赚得多就用哪组」的当前判定——未启用≠口诀错了,是现在轮到另一组"
+                >
+                  {eraActive ? "当前启用中" : "当前未启用"}
+                </span>
+              );
+            })()
+          ) : null}
           {!showName ? (
             <span className="ml-auto text-[11px] text-muted-foreground">
               匿名模式（答完揭示票名）

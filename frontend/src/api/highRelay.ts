@@ -183,6 +183,16 @@ export interface HprBacktestReport {
   case_gates: HprCaseGate[];
   avoid_stats: Record<string, { hit_n: number; avoid_n: number }>;
   radar: Record<string, { trigger_n: number; hit_n: number }>;
+  /** v7.2 弱市时代段(2020-22)K系分条成绩,含 all 合计——回测卡主数字 */
+  weak_era_by_point?: Record<string, HprStats>;
+  /** v7.2 弱市时代段(2020-22)分年成绩 */
+  weak_era_yearly?: ({ year: string } & HprStats)[];
+  /** v7.3 动态组实盘口径(按月自动切换启用组)分年成绩 */
+  dyn_sim_yearly?: ({ year: string } & HprStats)[];
+  /** v7.4 动态组实盘口径的一年的成绩(2020起七年,含复利/相加列) */
+  dyn_sim_totals?: HprYearlyTotal[];
+  /** v7.3 两组全开对照(14条都打,全时段)分年成绩 */
+  dyn_open_yearly?: ({ year: string } & HprStats)[];
   built_at?: string | null;
 }
 
@@ -212,7 +222,8 @@ export interface HprBacktestPayload {
 export interface HprLedgerTrade {
   vt_symbol: string;
   name: string;
-  point: HprPoint;
+  /** v7.3 动态组交割单含 K 系出手点(当月弱市组启用的成交笔) */
+  point: HprPoint | HprWeakPoint;
   level: "A" | "B" | "—";
   group4: HprGroup4;
   entry_price: number | null;
@@ -261,7 +272,7 @@ export interface HprLedgerPayload {
 }
 
 export interface HprRuleItem {
-  no: number;
+  no: number | string;   // 机制组=数字序号;口诀卡组=方案点编号(A1/C2…)
   rule: string;
   evidence: string;
 }
@@ -298,6 +309,8 @@ export interface HprRulesPayload {
   point_boards: Record<string, string>;  // A1→"打3板"板位归属
   rules: HprRuleGroup[];
   cheat_rows: HprCheatRow[];             // 速查表(规则页主表;答题讲解卡取命中行)
+  weak_cheat_rows: HprCheatRow[];        // 弱市组K系速查表(v7.2 起规则页并列渲染)
+  weak_point_boards: Record<string, string>;  // K2→打4板(K系板位归属)
   falsified_rules: string[];
   risk_notes: string[];
   ths_pool_conditions: Record<string, string>;
@@ -389,7 +402,7 @@ export interface HprQuizOverviewPayload {
   status: "ok" | "unavailable";
   rules_version?: string;
   total?: number;
-  years?: { year: string; months: HprQuizMonthSummary[] }[];
+  years?: { year: string; months: HprQuizMonthSummary[]; dyn_states?: string[] }[];
 }
 
 export interface HprQuizDisplay {
@@ -454,6 +467,9 @@ export interface HprQuizQuestion {
   vt_symbol: string;
   name: string;
   decision_date: string;
+  /** v7.3 该题所属月的动态组状态(weak/strong/both):判组按月滚动无未来函数;
+   *  旧物化缺省时前端按日期兜底切分 */
+  dyn_state?: "weak" | "strong" | "both";
   n_board: number;
   group4: HprGroup4;
   display: HprQuizDisplay;
@@ -485,7 +501,10 @@ export function fetchHprQuizQuestions(month: string) {
 // (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序;
 // year 指定=只在该年抽(按年份练市场环境,单年池不足的口诀有多少抽多少);
 // 结构与月题一致(month 缺省),进度与月题共享(同一题 key)。
-export function fetchHprQuizMixed(year?: string) {
-  const query = year ? `?year=${encodeURIComponent(year)}` : "";
+export function fetchHprQuizMixed(scope?: { year?: string; era?: "weak" | "strong" }) {
+  const params = new URLSearchParams();
+  if (scope?.year) params.set("year", scope.year);
+  if (scope?.era) params.set("era", scope.era);
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   return apiClient.get<HprQuizQuestionsPayload>(`/high-relay/quiz/mixed${query}`);
 }

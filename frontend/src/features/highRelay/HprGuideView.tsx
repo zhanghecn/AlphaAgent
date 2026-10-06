@@ -21,6 +21,7 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
   C: { badge: "bg-emerald-500/15 text-emerald-500", label: "中性·阴阳都打" },
   C1: { badge: "bg-emerald-500/15 text-emerald-500", label: "C1" },
   C2: { badge: "bg-primary/15 text-primary", label: "C2" },
+  C3: { badge: "bg-primary/15 text-primary", label: "C3" },
   avoid: { badge: "bg-fall/15 text-fall", label: "回避" },
   time: { badge: "bg-primary/15 text-primary", label: "时间" },
   buy: { badge: "bg-rise/15 text-rise", label: "买" },
@@ -28,7 +29,8 @@ const GROUP_STYLES: Record<string, { badge: string; label: string }> = {
 };
 
 // 口诀卡顺序(主人定):阴阳分组,组内按二板开盘从低到高;与后端 RULES A/B/E 组序一致
-const POINT_ORDER = ["A1", "A2", "A3", "B2", "B1", "B3", "C1", "C2"] as const;
+// v7.2 补 C3:v6.11 拆C3后 RULES 口诀卡组增至 9 项,原 8 键导致第 9 张卡徽章错显示"8"
+const POINT_ORDER = ["A1", "A2", "A3", "B2", "B1", "B3", "C1", "C2", "C3"] as const;
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本;
  * 速查表也随后端 cheat_rows 下发,答题讲解卡取同一份命中行)。 */
@@ -64,7 +66,8 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            打板口诀卡七条(hpr-v6.10:A=阳B=阴C=中性,字母语义跨板位统一)全市场验证(2023-01 ~ 2026-09);见 量化因子研究/高位接力/打板口诀卡.md
+            两组口诀：强市组八条(A1~C3,2023-26 定型验证)+ 弱市组六条(K 系,2020-22 定型)——
+            近一年哪组赚得多就用哪组(见「动态口诀组」);研究文档见 量化因子研究/高位接力/打板口诀卡.md 与 弱市口诀卡v5.md
           </span>
         </div>
         <div className="mt-2 border-t pt-2 text-xs leading-5 text-muted-foreground">
@@ -166,7 +169,7 @@ export function HprGuideView() {
 
       <section className="rounded-lg border p-4">
         <div className="mb-1 text-sm font-semibold">
-          一句话：昨天恰好 2/3 连板的票，今天冲下一板——只对这七句口诀出手
+          一句话：昨天恰好 2/3 连板的票，今天冲下一板——强市组只对这八句口诀出手
           <span className="ml-2 font-mono text-xs font-normal text-primary">
             合计 150笔·E3胜77%·均+10.6·月均3.3笔
           </span>
@@ -216,6 +219,59 @@ export function HprGuideView() {
         </p>
       </section>
 
+      {/* v7.2 弱市组常驻速查表:weak_cheat_rows 随 get_rules 下发,此前前端从未渲染——
+          K系六条条件在全 UI 无常驻位置(主人 2026-10-06「弱市口诀基本看不到」) */}
+      <section className="rounded-lg border border-violet-500/30 p-4" aria-label="弱市组速查表">
+        <div className="mb-1 text-sm font-semibold">
+          弱市组 · K 系六条（定型于 2020-22 弱市时代）
+          <span className="ml-2 font-mono text-xs font-normal text-violet-500">
+            合计 53笔·E3胜72%·均+10.28·分年三年全正
+          </span>
+        </div>
+        <div className="mb-2 text-xs text-muted-foreground">
+          同一套「昨天恰好 2/3 连板、今天冲下一板」的池子，弱市时代按这六条判断；
+          近一年哪组赚得多就用哪组——当前启用哪组看上方「获取最新口诀」。
+          2023 起强市时代的参考成绩见回测页弱市组卡片。
+        </div>
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b text-left text-xs text-muted-foreground">
+              <th className="py-1.5 pr-3 font-medium">口诀</th>
+              <th className="py-1.5 pr-3 font-medium">组</th>
+              <th className="py-1.5 pr-3 font-medium">一板</th>
+              <th className="py-1.5 pr-3 font-medium">二板</th>
+              <th className="py-1.5 pr-3 font-medium">三板</th>
+              <th className="py-1.5 pr-3 font-medium">今天开</th>
+              <th className="py-1.5 pr-3 font-medium">地基日</th>
+              <th className="py-1.5 font-medium">成绩(E3)</th>
+            </tr>
+          </thead>
+          <tbody className="tabular-nums">
+            {rules.weak_cheat_rows.map((r, i) => (
+              <Fragment key={r.name}>
+                {i === 0 || r.yang.replace(/^.*·/, "") !== rules.weak_cheat_rows[i - 1].yang.replace(/^.*·/, "") ? (
+                  <tr className="border-b-2 border-muted/40">
+                    <td className="py-1 pr-3 text-[11px] font-semibold text-muted-foreground" colSpan={8}>
+                      {r.yang.replace(/^.*·/, "") === "打3板" ? "打3板（二接三）" : "打4板（三接四）"}
+                    </td>
+                  </tr>
+                ) : null}
+                <CheatTableRow row={r} />
+              </Fragment>
+            ))}
+            <tr className="border-t-2 border-muted/60">
+              <td className="py-1.5 pr-3 font-semibold" colSpan={5}>合计(六条)</td>
+              <td className="py-1.5 pr-3" colSpan={2} />
+              <td className="py-1.5 font-mono text-[11px] font-semibold">53笔·胜72%·均+10.28</td>
+            </tr>
+          </tbody>
+        </table>
+        <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
+          弱市时代全池乱买是亏的（同期 1934 笔·胜35%·均-1.34）；月均 1.5 笔——弱市事件密度天然减半，
+          出手频率是时代折价。持有纪律同产品：炸板次日走、封住拿到断板。
+        </p>
+      </section>
+
       <section className="rounded-lg border p-4" aria-label="地基姿态图解">
         <div className="mb-1 text-sm font-semibold">
           地基姿态图解（捡尸 B2 / 贴零温开 B3 的附加腿，v6.10）
@@ -259,8 +315,8 @@ export function HprGuideView() {
         </p>
       </section>
 
-      <section className="rounded-lg border p-4" aria-label="七条口诀卡">
-        <div className="mb-2 text-sm font-semibold">七条口诀(全文 + 成绩 + 主力怎么想)</div>
+      <section className="rounded-lg border p-4" aria-label="强市组口诀卡">
+        <div className="mb-2 text-sm font-semibold">强市组八条口诀(全文 + 成绩 + 主力怎么想)</div>
         <div className="grid gap-3 lg:grid-cols-2">
           {schemeCards.map((it, i) => {
             const pk = POINT_ORDER[i] ?? String(i);

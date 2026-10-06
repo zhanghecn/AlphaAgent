@@ -117,9 +117,57 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
         "radar": _radar_stats(done),
     }
     payload["ledger_days"] = _ledger_days(frames["all"], repository.load_touch_map())
-    # v7.1:dyn_trades 用全时段(2020 起)——切换历史从暖机后 2021-01 起完整六年
-    payload["dyn_trades"] = _dyn_trades(done_all)
+    # v7.1:dyn_trades 用全时段(2020 起)——切换历史完整六年;
+    # v7.3 月状态也由这份轻表派生(单一数据源,构建一次共用)
+    dyn_trades = _dyn_trades(done_all)
+    payload["dyn_trades"] = dyn_trades
     payload["weak_point_labels"] = contracts.WEAK_POINT_LABELS
+    # v7.2 弱市时代段(20-22)分条+分年——回测卡主数字换时代成绩,2023+ 段降为参考小字
+    weak_era_hit = weak_era[weak_era["弱口诀"] != "—"]
+    payload["weak_era_by_point"] = {
+        **{k: _stats(weak_era_hit[weak_era_hit["弱口诀"] == k])
+           for k in contracts.WEAK_POINT_KEYS},
+        "all": summary["weak_era"],
+    }
+    payload["weak_era_yearly"] = _yearly(weak_era_hit)
+
+    # v7.3 动态组模拟(实盘口径):月状态=物化单一事实源(contracts.dyn_month_states,
+    # 题库/交割单/koujue 共用);按月过滤出手笔——weak月=K系/strong月=八条/
+    # both月=两组任一;对照=全开(两组并集全时段)
+    month_states = contracts.dyn_month_states(dyn_trades)
+    payload["dyn_month_states"] = month_states
+
+    def _dyn_take(row) -> str:
+        """该笔按当月组状态是否出手;出手=命中组编号,不出手=''(双命中归K系,与轻表同口径)"""
+        st = contracts.dyn_state_at(month_states, str(row["月"]))
+        wk = str(row["弱口诀"]) if row["弱口诀"] == row["弱口诀"] else "—"
+        pt = str(row["方案点"])
+        if st == "weak":
+            return wk if wk != "—" else ""
+        if st == "strong":
+            return pt if pt != "—" else ""
+        return wk if wk != "—" else (pt if pt != "—" else "")
+
+    take = done_all.apply(_dyn_take, axis=1)
+    dyn_sim = done_all[take != ""].copy()
+    dyn_sim["方案点"] = take[take != ""]      # 出手点=当月启用组命中编号
+    summary["dyn_sim"] = _stats(dyn_sim)
+    # 全开对照=两组任一命中(全时段并集,弱口诀空值口径与轻表一致:notna 且非「—」)
+    dyn_open = done_all[(done_all["弱口诀"].notna() & (done_all["弱口诀"] != "—"))
+                        | (done_all["方案点"] != "—")]
+    summary["dyn_open_all"] = _stats(dyn_open)
+    payload["dyn_sim_yearly"] = _yearly(dyn_sim)
+    payload["dyn_sim_totals"] = _yearly_totals(dyn_sim)   # v7.4 一年的成绩表(七年,复利/相加列)
+    payload["dyn_open_yearly"] = _yearly(dyn_open)
+    # v7.4 K 系全时段分年/月度(2020起)——分年明细表 K 系六行与月度筛选全时段数据
+    for k in contracts.WEAK_POINT_KEYS:
+        kf = done_all[done_all["弱口诀"] == k]
+        payload["yearly"][k] = _yearly(kf)
+        payload["monthly"][k] = _monthly(kf)
+    # v7.3 动态组口径交割单:按月状态过滤的出手笔(实盘纪律=当月启用组才成交),
+    # 重叠标注按出手笔重算(比全量标更贴实盘);旧物化无此键时 API 兜底 ledger_days
+    _mark_overlap(dyn_sim)
+    payload["dyn_ledger_days"] = _ledger_days(dyn_sim, repository.load_touch_map())
     if bars is not None:
         payload["pose_cases"] = _pose_cases(E, bars)
     return payload
@@ -600,7 +648,9 @@ def _ledger_days(trades: pd.DataFrame, touch_map: dict | None = None) -> list[di
             "vt_symbol": str(r["代码"]),
             "name": str(r["名称"]),
             "point": str(r["方案点"]),
-            "level": contracts.POINT_LEVELS.get(str(r["方案点"]), "—"),
+            # v7.3 K系出手点(动态组交割单)归A级(与实时推荐口径一致)
+            "level": "A" if str(r["方案点"]).startswith("K")
+                     else contracts.POINT_LEVELS.get(str(r["方案点"]), "—"),
             "group4": str(r["四组"]),
             "entry_price": _sr(r["买价"], 3),
             "auction_pct": _sr(r["买入开盘%"], 2),

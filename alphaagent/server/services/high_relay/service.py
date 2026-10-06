@@ -321,7 +321,9 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
         E, bars = backtest_mod.build_events()
         payload = backtest_mod.assemble_report(E, bars)
         repository.update_rebuild_run(run_id, status="running", stage="题库构建")
-        questions = quiz_mod.build_questions(E, bars)
+        # v7.3 题库注入同一份物化月状态(单一事实源:回测/交割单/koujue 共用)
+        questions = quiz_mod.build_questions(
+            E, bars, payload.get("dyn_month_states") or None)
     except Exception as exc:  # noqa: BLE001
         logger.warning("hpr backtest rebuild failed: %s", exc, exc_info=True)
         repository.update_rebuild_run(
@@ -347,11 +349,13 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
 # ── 交割单 ──
 
 def get_ledger(month: str | None = None) -> dict[str, object]:
-    """回测模拟交割单(全历史物化;month=YYYY-MM 切片,默认最新月)。"""
+    """回测模拟交割单(全历史物化;month=YYYY-MM 切片,默认最新月)。
+    v7.3 起数据源=动态组口径(dyn_ledger_days:当月启用组才成交——2023-01~06
+    八条命中按纪律不成交/2020 暖期双开两组都出手),旧物化兜底 ledger_days。"""
     payload = get_backtest_report()
     if payload is None:
         return {"status": "unavailable", "ledger_days": [], "months": []}
-    days = list(payload.get("ledger_days") or [])
+    days = list(payload.get("dyn_ledger_days") or payload.get("ledger_days") or [])
     months = _month_summaries(days)
     selected = month or (months[0]["month"] if months else None)
     if selected:
@@ -417,6 +421,7 @@ def get_quiz_overview() -> dict[str, object]:
         return {"status": "unavailable", "rules_version": expect,
                 "stored_versions": versions}
     years: dict[str, list[dict[str, object]]] = {}
+    year_states: dict[str, set[str]] = {}   # v7.3 年→出现过的月组状态(切组年标渐变)
     total = 0
     for row in months:
         y = str(row["year"])
@@ -426,12 +431,16 @@ def get_quiz_overview() -> dict[str, object]:
             "buy_count": int(row["buy_count"]),
             "reject_count": int(row["reject_count"]),
         })
+        if row.get("dyn_state"):
+            year_states.setdefault(y, set()).add(str(row["dyn_state"]))
         total += int(row["total"])
     return {
         "status": "ok",
         "rules_version": expect,
         "total": total,
-        "years": [{"year": y, "months": ms} for y, ms in sorted(years.items())],
+        "years": [{"year": y, "months": ms,
+                   "dyn_states": sorted(year_states.get(y, set()))}
+                  for y, ms in sorted(years.items())],
     }
 
 
@@ -446,67 +455,55 @@ def get_quiz_questions(month: str) -> dict[str, object]:
             "count": len(questions), "questions": questions}
 
 
-def get_quiz_mixed(year: str | None = None) -> dict[str, object]:
+def get_quiz_mixed(year: str | None = None,
+                   era: str | None = None) -> dict[str, object]:
     """综合挑战卷(主人定 2026-09-28):六条口诀每条随机≥2道好票 + 陷阱差票
     (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序。
-    year 非空=只在该年抽(单年池不足的口诀有多少抽多少,不硬凑)。"""
+    year 非空=只在该年抽(单年池不足的口诀有多少抽多少,不硬凑);
+    era 优先于 year(v7.2 时代抽题):weak=2020-22 弱市组段,strong=2023 起强市段。"""
     import random
     expect = quiz_mod.quiz_rules_version()
     status = repository.quiz_bank_status()
     if status.get("rules_versions") != [expect]:
         return {"status": "unavailable", "rules_version": expect}
-    projection = repository.load_quiz_mix_projection(year)
+    projection = repository.load_quiz_mix_projection(year, era)
     keys = quiz_mod.mix_question_keys(projection)
     questions = repository.load_quiz_questions_by_keys(keys)
     random.shuffle(questions)
-    return {"status": "ok", "rules_version": expect, "year": year,
+    return {"status": "ok", "rules_version": expect, "year": year, "era": era,
             "count": len(questions), "questions": questions}
 
 
 # ── 规则契约 ──
 
-def _dyn_group_state(trades: list[dict[str, object]], ms: set[str],
-                     min_n: int = 8) -> str:
-    """按月窗口判当前启用口诀组(weak/strong/both);trades=dyn_trades 轻表。
-    判据=窗口内两组各自每笔 E3 均值,高者整组启用;样本不足/均非正=双开
-    (组级样本门槛 n5/8/12 等价,取研究定版值 8)。"""
-    def agg(g: str) -> tuple[int, float | None]:
-        rs = [float(t["r"]) for t in trades if str(t["m"]) in ms and t["g"] == g]
-        return len(rs), (sum(rs) / len(rs) if rs else None)
-    wn, wa = agg("weak")
-    sn, sa = agg("strong")
-    if wn >= min_n and sn >= min_n and wa is not None and sa is not None:
-        return "weak" if wa > sa else "strong"
-    if wn >= min_n and wa is not None and wa > 0:
-        return "weak"
-    if sn >= min_n and sa is not None and sa > 0:
-        return "strong"
-    return "both"
-
-
 _dyn_group_cache: dict[str, object] = {"ts": 0.0, "data": None}
 _DYN_GROUP_TTL = 3600.0  # 进程内缓存(盘中扫描每分钟读,不能每跳打库)
 
 
+def _load_dyn_states() -> tuple[dict[str, str], str | None]:
+    """读最新物化的月→组状态(v7.3 单一事实源=payload["dyn_month_states"],
+    assemble_report 用 contracts.dyn_month_states 统一构建);无物化=空。
+    返回 (states, asof月)。"""
+    try:
+        row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
+    except Exception:  # noqa: BLE001
+        return {}, None
+    states = dict((row or {}).get("dyn_month_states") or {})
+    months = sorted(states)
+    return states, (months[-1] if months else None)
+
+
 def current_dyn_group() -> dict[str, object]:
-    """当前启用口诀组(v7.1 实时推荐/盘中扫描联动):读最新物化 dyn_trades
-    近 DYN_GROUP_WINDOW 个月滚动判定;无物化/无数据 → both(双开兜底=两组都可出手,
-    行为同机制上线前)。缓存 1h(组只在月末切换,读旧一档无风险)。"""
+    """当前启用口诀组(v7.1 实时推荐/盘中扫描联动):物化月状态取最后一月;
+    无物化/无数据 → both(双开兜底=两组都可出手,行为同机制上线前)。
+    缓存 1h(组只在月末切换,读旧一档无风险)。"""
     import time as _time
     now = _time.time()
     cached = _dyn_group_cache["data"]
     if cached is not None and now - float(_dyn_group_cache["ts"]) < _DYN_GROUP_TTL:
         return dict(cached)  # type: ignore[arg-type]
-    try:
-        row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
-        trades = list((row or {}).get("dyn_trades") or [])
-    except Exception:  # noqa: BLE001
-        trades = []
-    group, asof = "both", None
-    if trades:
-        months = sorted({str(t["m"]) for t in trades})
-        group = _dyn_group_state(trades, set(months[-contracts.DYN_GROUP_WINDOW:]))
-        asof = months[-1]
+    states, asof = _load_dyn_states()
+    group = str(states[asof]) if asof and asof in states else "both"
     out = {"group": group, "asof": asof}
     _dyn_group_cache.update(ts=now, data=out)
     return dict(out)
@@ -520,7 +517,9 @@ def get_current_koujue() -> dict[str, object]:
     同时下发当前组的速查表行(静态研究锚定+近12月动态成绩双列)与切换历史。"""
     row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
     trades = list((row or {}).get("dyn_trades") or [])
-    if not trades:
+    # v7.3 单一事实源:月状态读物化 dyn_month_states(与题库/回测/交割单同一份)
+    states = dict((row or {}).get("dyn_month_states") or {})
+    if not trades or not states:
         return {"status": "unavailable", "rules_version": contracts.HPR_RULES_VERSION,
                 "reason": "回测物化未生成动态口诀组数据,请等待 rebuild 完成"}
     win = contracts.DYN_GROUP_WINDOW
@@ -535,7 +534,8 @@ def get_current_koujue() -> dict[str, object]:
                 "win": round(sum(1 for x in rs if x > 0) / len(rs), 3) if rs else None}
 
     wk, st = agg("weak"), agg("strong")
-    current = _dyn_group_state(trades, recent)
+    # v7.3 当前组=物化月状态最后一月(单一事实源,与题库/交割单同口径)
+    current = str(states.get(months[-1], "both"))
 
     # 组内口诀逐条近12月动态成绩
     def point_dyn(prefix_keys: list[str]) -> dict[str, dict[str, object]]:
@@ -568,15 +568,14 @@ def get_current_koujue() -> dict[str, object]:
     weak_rows = rows_with_dyn(contracts.WEAK_CHEAT_ROWS)
     strong_rows = rows_with_dyn(contracts.CHEAT_ROWS)
 
-    # 切换历史:物化起点逐月滚动(前 win 月暖机,样本不足=双开)
+    # 切换历史(v7.3):直接读物化月状态序列的变化点——每年真实判定口径
+    # (从 2020-01 起步数据滚动:暖机期 both→2020-07 weak→2023-07 strong)
     history: list[dict[str, str]] = []
     state = "both"
-    for i in range(win, len(months) + 1):
-        ms = set(months[max(0, i - win):i])
-        s = _dyn_group_state(trades, ms)
+    for m in sorted(states):
+        s = str(states[m])
         if s != state:
-            tag_m = months[i - 1] if i - 1 < len(months) else months[-1]
-            history.append({"month": tag_m, "from": state, "to": s})
+            history.append({"month": m, "from": state, "to": s})
             state = s
 
     return {

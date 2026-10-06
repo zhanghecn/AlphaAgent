@@ -312,17 +312,23 @@ def save_quiz_questions(rules_version: str, rows: list[Mapping[str, object]]) ->
 
 
 def load_quiz_overview() -> dict[str, object]:
-    """题库标量聚合:year→month→{total,buy_count,reject_count}+全库合计+版本。"""
+    """题库标量聚合:year→month→{total,buy_count,reject_count,dyn_state}+版本。
+    dyn_state=v7.3 该月动态组状态(月内唯一,从 payload 抽)——前端年份 chip 分色用。"""
     schema.ensure_schema_once(get_engine())
     t = schema.hpr_quiz_questions
     with session_scope() as session:
+        # JSON 路径表达式必须复用同一 clause 对象:select 与 group_by 各写一份会
+        # 生成不同绑定参数,PG 视为两列 → GroupingError(容器内实测)
+        dyn_col = t.c.payload["dyn_state"].astext
         rows = session.execute(
             select(
                 t.c.year, t.c.month,
                 func.count().label("total"),
                 func.count().filter(t.c.point != "—").label("buy_count"),
                 func.count().filter(t.c.point == "—").label("reject_count"),
-            ).group_by(t.c.year, t.c.month).order_by(t.c.year, t.c.month)
+                dyn_col.label("dyn_state"),
+            ).group_by(t.c.year, t.c.month, dyn_col
+            ).order_by(t.c.year, t.c.month)
         ).mappings().all()
         versions = session.execute(
             select(t.c.rules_version).distinct()
@@ -352,15 +358,22 @@ def quiz_bank_status() -> dict[str, object]:
     return {"rules_versions": [str(v) for v in versions], "count": int(count)}
 
 
-def load_quiz_mix_projection(year: str | None = None) -> list[dict[str, object]]:
+def load_quiz_mix_projection(year: str | None = None,
+                             era: str | None = None) -> list[dict[str, object]]:
     """综合挑战卷抽题投影:[{decision_date, vt_symbol, point, trap_kind}](轻量,
     trap_kind 从 payload.explain JSON 抽取,命中题为 NULL→None;不读K线大字段)。
-    year 非空时只抽该年(主人定:按年份练市场环境,2023熊尾/2024牛市/2025-26结构牛)。"""
+    year 非空时只抽该年(主人定:按年份练市场环境,2023熊尾/2024牛市/2025-26结构牛);
+    era 优先于 year(v7.3 起按月度动态组过滤,与题库判定同源):weak=弱市组启用的月
+    (weak+both,含 2023 上半年),strong=强市组启用的月(strong+both)。"""
     schema.ensure_schema_once(get_engine())
     t = schema.hpr_quiz_questions
     stmt = select(t.c.decision_date, t.c.vt_symbol, t.c.point,
                   t.c.payload["explain"]["trap_kind"].astext.label("trap_kind"))
-    if year:
+    if era == "weak":
+        stmt = stmt.where(t.c.payload["dyn_state"].astext.in_(("weak", "both")))
+    elif era == "strong":
+        stmt = stmt.where(t.c.payload["dyn_state"].astext.in_(("strong", "both")))
+    elif year:
         stmt = stmt.where(t.c.year == year)
     with session_scope() as session:
         rows = session.execute(stmt).mappings().all()

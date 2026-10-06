@@ -71,8 +71,6 @@ export function HprBacktestView({
       </div>
     );
   }
-  const exec = report.execution;
-  const exeRow = exec?.subsets?.find((s) => s.name.includes("E3") && s.name.includes("可执行"));
   return (
     <div className="space-y-4">
       <RebuildBar rebuild={rebuild} building={building} canRebuild={canRebuild}
@@ -81,7 +79,7 @@ export function HprBacktestView({
       <section className="rounded-lg border p-4 text-xs text-muted-foreground">
         <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1">
           <span className="text-sm font-semibold text-foreground">高位接力回测</span>
-          <span>区间 {report.coverage.from} ~ {report.coverage.to}({report.coverage.months} 个月)</span>
+          <span>区间 {report.coverage.from} ~ {report.coverage.to}({report.coverage.months} 个月,强市组研究口径;动态组实盘口径 2020 起见下方)</span>
           <span>规则版本 {report.rules_version}</span>
           <span>生成于 {formatGeneratedAt(report.generated_at)}</span>
         </div>
@@ -99,6 +97,7 @@ export function HprBacktestView({
           return (
             <>
               <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+                <div className="text-sm font-semibold">强市组八条 · 研究口径(2023起)</div>
                 <div>
                   <span className={cn("text-3xl font-bold font-mono tabular-nums", tone(s.e3_pct))}>
                     {formatPct(s.e3_pct ?? 0)}
@@ -116,6 +115,10 @@ export function HprBacktestView({
                 四年每笔平均 {report.yearly_totals.map((y) =>
                   `${y.year}:${y.avg_pct == null ? "--" : formatPct(y.avg_pct)}`).join(" · ")} —— 每年都是正的
                 {report.radar?.all ? ` · 候选 ${report.radar.all.trigger_n} 个,口诀命中 ${report.radar.all.hit_n} 次` : ""}
+                <span className="mt-1 block">
+                  实盘按动态口诀组出手(每月自动切换启用组)——实盘口径成绩见下方蓝卡与「一年的成绩」;
+                  弱市组 K 系六条的成绩见下方紫卡。
+                </span>
               </div>
             </>
           );
@@ -123,7 +126,9 @@ export function HprBacktestView({
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">一年的成绩</div>
+        <div className="mb-2 text-sm font-semibold">
+          动态组实盘 · 一年的成绩(2020起,按月自动切换启用组)
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[560px] text-sm">
             <thead className="border-b text-xs text-muted-foreground">
@@ -136,35 +141,33 @@ export function HprBacktestView({
               </tr>
             </thead>
             <tbody>
-              {(report.yearly_totals ?? []).map((y) => (
-                <tr key={y.year} className="border-b last:border-b-0">
-                  <td className="py-1.5 font-mono tabular-nums">{y.year}</td>
-                  <td className="py-1.5 text-right font-mono tabular-nums">{y.n}</td>
-                  <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(y.avg_pct))}>
-                    {y.avg_pct == null ? "--" : formatPct(y.avg_pct)}
-                  </td>
-                  <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(y.compound_pct))}>
-                    {y.compound_pct == null ? "--" : formatPct(y.compound_pct)}
-                  </td>
-                  <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(y.sum_pct))}>
-                    {formatPct(y.sum_pct)}
-                  </td>
-                </tr>
-              ))}
+              {(() => {
+                // v7.4 一年的成绩=动态组实盘口径七年(2020-2026);旧物化兜底强市组四年
+                const totals = report.dyn_sim_totals ?? report.yearly_totals ?? [];
+                return totals.map((y) => (
+                  <tr key={y.year} className="border-b last:border-b-0">
+                    <td className="py-1.5 font-mono tabular-nums">{y.year}</td>
+                    <td className="py-1.5 text-right font-mono tabular-nums">{y.n}</td>
+                    <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(y.avg_pct))}>
+                      {y.avg_pct == null ? "--" : formatPct(y.avg_pct)}
+                    </td>
+                    <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(y.compound_pct))}>
+                      {y.compound_pct == null ? "--" : formatPct(y.compound_pct)}
+                    </td>
+                    <td className={cn("py-1.5 text-right font-mono tabular-nums", tone(y.sum_pct))}>
+                      {formatPct(y.sum_pct)}
+                    </td>
+                  </tr>
+                ));
+              })()}
             </tbody>
           </table>
         </div>
-        {exeRow ? (
-          <p className="mt-2 text-xs text-muted-foreground">
-            「1万本金滚动」=赚了不取走滚进下一笔(复利,1万×1.05×…连乘)——但要求每笔全仓押一票,
-            同月多票并行时实际介于两列之间;「每次固定1万」=每笔赚的落袋,下次还是1万。
-            同一只票拿着没卖出时不会重复买:可成交 {exeRow.n} 笔 · 平均{" "}
-            <span className={cn("font-mono tabular-nums", tone(exeRow.e3_pct))}>
-              {formatPct(exeRow.e3_pct ?? 0)}
-            </span>
-            。
-          </p>
-        ) : null}
+        <p className="mt-2 text-xs text-muted-foreground">
+          「1万本金滚动」=赚了不取走滚进下一笔(复利,1万×1.05×…连乘)——但要求每笔全仓押一票,
+          同月多票并行时实际介于两列之间;「每次固定1万」=每笔赚的落袋,下次还是1万。
+          同一只票拿着没卖出时不会重复买(交割单「持仓中」行);逐笔明细见「历史交割单」页。
+        </p>
       </section>
 
       <section className="grid gap-3 md:grid-cols-3">
@@ -177,28 +180,92 @@ export function HprBacktestView({
         ))}
       </section>
 
-      {report.summary["weak_era"]?.n ? (
-        <section className="rounded-lg border border-violet-500/30 p-4">
-          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-sm font-semibold text-violet-500">弱市组 · K 系六条</span>
-            <span className="text-xs text-muted-foreground">
-              定型于 2020-22(时代段 {report.summary["weak_era"]?.n ?? 0} 笔 ·
-              均 {formatPct(report.summary["weak_era"]?.e3_pct ?? 0)} ·
-              胜 {formatPct((report.summary["weak_era"]?.e3_win ?? 0) * 100)});
-              下排为 2023 起强市时代的参考成绩——哪组启用看「获取最新口诀」
-            </span>
-          </div>
-          <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-6">
-            {WEAK_POINTS.map((pk) => (
-              <GroupStatCard
-                key={pk}
-                title={WEAK_POINT_SHORT[pk]}
-                stats={report.summary[pk] ?? { n: 0 }}
-              />
-            ))}
-          </div>
-        </section>
-      ) : null}
+      {report.summary["dyn_sim"]?.n ? (() => {
+        // v7.3 动态组模拟(实盘口径):按月自动切换启用组过滤的逐笔——题库/交割单同款判定;
+        // 对照=两组全开(14条都打)。这是「近一年哪组赚得多就用哪组」机制的实战成绩
+        const ds = report.summary["dyn_sim"];
+        const dop = report.summary["dyn_open_all"];
+        const yearly = report.dyn_sim_yearly ?? [];
+        return (
+          <section className="rounded-lg border border-primary/40 p-4">
+            <div className="mb-2 flex flex-wrap items-baseline gap-x-6 gap-y-2">
+              <div>
+                <span className="text-sm font-semibold text-primary">动态口诀组 · 实盘口径成绩</span>
+                <span className="ml-2 text-xs text-muted-foreground">每月自动切换启用组(题库/交割单同款判定)</span>
+              </div>
+              <div>
+                <span className={cn("text-3xl font-bold font-mono tabular-nums", tone(ds.e3_pct))}>
+                  {formatPct(ds.e3_pct ?? 0)}
+                </span>
+                <span className="ml-1 text-sm text-muted-foreground">平均每笔</span>
+              </div>
+              <div className="text-sm text-muted-foreground">
+                共 <span className="font-mono tabular-nums text-foreground">{ds.n}</span> 次出手 ·
+                胜率 <span className="font-mono tabular-nums text-foreground">{formatPct((ds.e3_win ?? 0) * 100)}</span>
+                {dop?.n ? (
+                  <> · 对照两组全开 <span className="font-mono tabular-nums">{dop.n}笔·均{formatPct(dop.e3_pct ?? 0)}</span>
+                  <span className="text-muted-foreground">(不挑组少赚近一半)</span></>
+                ) : null}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                分年 {yearly.map((y) =>
+                  `${y.year}:${y.e3_pct == null ? "--" : formatPct(y.e3_pct)}(${y.n}笔)`).join(" · ")}
+                {" "}—— 每年都是正的
+              </div>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              2020 上半年双开(暖机)两组都出手 · 2020-07~2023-06 弱市组 K 系 · 2023-08 起强市组八条(2023-07 无出手月,仍属弱市组)——
+              切组历史与判定口径见规则页「获取最新口诀」;交割单页即此口径的逐笔明细。
+            </div>
+          </section>
+        );
+      })() : null}
+
+      {report.summary["weak_era"]?.n ? (() => {
+        // v7.2 弱市卡主数字=弱市时代段(2020-22,定型样本)成绩;2023+ 段降为参考小字
+        const era = report.summary["weak_era"];
+        const eraByPoint = report.weak_era_by_point ?? {};
+        const eraYearly = report.weak_era_yearly ?? [];
+        return (
+          <section className="rounded-lg border border-violet-500/30 p-4">
+            <div className="mb-2 flex flex-wrap items-baseline gap-x-6 gap-y-2">
+              <div>
+                <span className="text-sm font-semibold text-violet-500">弱市组 · K 系六条</span>
+                <span className="ml-2 text-xs text-muted-foreground">定型于 2020-22 弱市时代</span>
+              </div>
+              <div>
+                <span className={cn("text-3xl font-bold font-mono tabular-nums", tone(era.e3_pct))}>
+                  {formatPct(era.e3_pct ?? 0)}
+                </span>
+                <span className="ml-1 text-sm text-muted-foreground">平均每笔</span>
+              </div>
+              <div className="text-sm text-muted-foreground">
+                共 <span className="font-mono tabular-nums text-foreground">{era.n}</span> 次出手 ·
+                胜率 <span className="font-mono tabular-nums text-foreground">{formatPct((era.e3_win ?? 0) * 100)}</span>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                分年 {eraYearly.map((y) =>
+                  `${y.year}:${y.e3_pct == null ? "--" : formatPct(y.e3_pct)}(${y.n}笔)`).join(" · ")}
+                {" "}—— 每年都是正的
+              </div>
+            </div>
+            <div className="mb-2 text-xs text-muted-foreground">
+              六条成绩为 2020-22 时代段,小字为 2023 起强市时代的参考成绩(整组失效正是
+              「近一年哪组赚得多就用哪组」的依据)——当前启用哪组看规则页「获取最新口诀」
+            </div>
+            <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-6">
+              {WEAK_POINTS.map((pk) => (
+                <WeakEraStatCard
+                  key={pk}
+                  title={WEAK_POINT_SHORT[pk]}
+                  eraStats={eraByPoint[pk]}
+                  refStats={report.summary[pk]}
+                />
+              ))}
+            </div>
+          </section>
+        );
+      })() : null}
 
       <section className="rounded-lg border p-4">
         <div className="mb-2 text-sm font-semibold">累计收益(每笔固定1份,不复利)</div>
@@ -215,61 +282,88 @@ export function HprBacktestView({
 
       <section className="rounded-lg border p-4">
         <div className="mb-2 text-sm font-semibold">分年明细(格 = 平均每笔 · 小字 = 笔数·胜率)</div>
+        <div className="mb-2 text-[11px] text-muted-foreground">
+          年份 2020 起全时段:强市八条(A1~C3)与「方案合计」为 2023+ 研究口径;
+          K 系六行 2020-22=弱市时代定型段,2023 起为强市时代参考(该组不启用);
+          末行=动态组实盘合计(按月自动切换,七年)。
+        </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-sm">
+          <table className="w-full min-w-[840px] text-sm">
             <thead className="border-b text-xs text-muted-foreground">
               <tr>
                 <th className="py-2 text-left font-medium">口诀</th>
-                {(report.yearly["all"] ?? []).map((y) => (
-                  <th key={y.year} className="py-2 text-right font-medium">{y.year}</th>
-                ))}
+                {(() => {
+                  // v7.4 年份列=全时段(2020起,动态组分年);旧物化兜底强市组年份
+                  const cols = report.dyn_sim_yearly ?? report.yearly["all"] ?? [];
+                  return cols.map((y) => (
+                    <th key={y.year} className="py-2 text-right font-medium">{y.year}</th>
+                  ));
+                })()}
                 <th className="py-2 text-right font-medium">全部</th>
               </tr>
             </thead>
             <tbody>
-              {[...POINTS, "all"].map((pk) => {
-                const byYear = new Map(
-                  (report.yearly[pk] ?? []).map((y) => [y.year, y]));
-                const total = report.summary[pk];
-                return (
-                  <tr key={pk} className={cn("border-b last:border-b-0", pk === "all" && "bg-muted/40")}>
-                    <td className="py-1.5 text-xs">{POINT_SHORT[pk]}</td>
-                    {(report.yearly["all"] ?? []).map((yy) => {
-                      const y = byYear.get(yy.year);
-                      return (
-                        <td key={yy.year} className="py-1.5 text-right align-top">
-                          {y && y.n ? (
-                            <>
-                              <div className={cn("font-mono tabular-nums", tone(y.e3_pct))}>
-                                {y.e3_pct == null ? "--" : formatPct(y.e3_pct)}
-                              </div>
-                              <div className="text-[10px] text-muted-foreground">
-                                {y.n}笔 · {y.e3_win == null ? "--" : formatPct(y.e3_win * 100)}
-                              </div>
-                            </>
-                          ) : (
-                            <span className="text-muted-foreground/50">--</span>
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className="py-1.5 text-right align-top">
-                      {total && total.n ? (
-                        <>
-                          <div className={cn("font-mono tabular-nums", tone(total.e3_pct))}>
-                            {total.e3_pct == null ? "--" : formatPct(total.e3_pct)}
-                          </div>
-                          <div className="text-[10px] text-muted-foreground">
-                            {total.n}笔 · {total.e3_win == null ? "--" : formatPct(total.e3_win * 100)}
-                          </div>
-                        </>
-                      ) : (
-                        <span className="text-muted-foreground/50">--</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
+              {(() => {
+                const cols = report.dyn_sim_yearly ?? report.yearly["all"] ?? [];
+                // 行序:强市八条 → K 系六条(全时段) → 方案合计(强市2023+) → 动态组实盘合计(七年)
+                const rowKeys: string[] = [...POINTS, ...WEAK_POINTS, "all", "dyn"];
+                const nameOf = (pk: string) =>
+                  pk === "dyn" ? "动态组实盘合计(按月切换)" :
+                  pk === "all" ? POINT_SHORT.all :
+                  POINT_SHORT[pk] ?? WEAK_POINT_SHORT[pk] ?? pk;
+                return rowKeys.map((pk) => {
+                  const src = pk === "dyn"
+                    ? (report.dyn_sim_yearly ?? [])
+                    : (report.yearly[pk] ?? []);
+                  const byYear = new Map(src.map((y) => [y.year, y]));
+                  const total = pk === "dyn" ? report.summary["dyn_sim"] : report.summary[pk];
+                  const isK = pk.startsWith("K");
+                  return (
+                    <tr key={pk} className={cn(
+                      "border-b last:border-b-0",
+                      pk === "all" && "bg-muted/40",
+                      pk === "dyn" && "bg-primary/10",
+                    )}>
+                      <td className={cn("py-1.5 text-xs whitespace-nowrap", isK && "text-violet-500")}>
+                        {nameOf(pk)}
+                      </td>
+                      {cols.map((yy) => {
+                        const y = byYear.get(yy.year);
+                        return (
+                          <td key={yy.year} className="py-1.5 text-right align-top">
+                            {y && y.n ? (
+                              <>
+                                <div className={cn("font-mono tabular-nums", tone(y.e3_pct))}>
+                                  {y.e3_pct == null ? "--" : formatPct(y.e3_pct)}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground">
+                                  {y.n}笔 · {y.e3_win == null ? "--" : formatPct(y.e3_win * 100)}
+                                </div>
+                              </>
+                            ) : (
+                              <span className="text-muted-foreground/50">--</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td className="py-1.5 text-right align-top">
+                        {total && total.n ? (
+                          <>
+                            <div className={cn("font-mono tabular-nums", tone(total.e3_pct))}>
+                              {total.e3_pct == null ? "--" : formatPct(total.e3_pct)}
+                            </div>
+                            <div className="text-[10px] text-muted-foreground">
+                              {total.n}笔 · {total.e3_win == null ? "--" : formatPct(total.e3_win * 100)}
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground/50">--</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                });
+              })()}
             </tbody>
           </table>
         </div>
@@ -279,21 +373,28 @@ export function HprBacktestView({
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">月度明细</span>
           <span className="flex flex-wrap gap-1">
-            {[...POINTS, "all"].map((pk) => (
-              <button
-                key={pk}
-                type="button"
-                onClick={() => setMonthlyPoint(pk)}
-                className={cn(
-                  "rounded-md border px-2 py-1 text-xs",
-                  monthlyPoint === pk
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {POINT_SHORT[pk]}
-              </button>
-            ))}
+            {[...POINTS, ...WEAK_POINTS, "all"].map((pk) => {
+              const isK = pk.startsWith("K");
+              return (
+                <button
+                  key={pk}
+                  type="button"
+                  onClick={() => setMonthlyPoint(pk)}
+                  className={cn(
+                    "rounded-md border px-2 py-1 text-xs",
+                    monthlyPoint === pk
+                      ? isK
+                        ? "border-violet-500 bg-violet-500/10 text-violet-500"
+                        : "border-primary bg-primary/10 text-primary"
+                      : isK
+                        ? "text-violet-500/80 hover:text-violet-500"
+                        : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {POINT_SHORT[pk] ?? WEAK_POINT_SHORT[pk] ?? pk}
+                </button>
+              );
+            })}
           </span>
         </div>
         <div className="max-h-[420px] overflow-auto">
@@ -376,6 +477,34 @@ function GroupStatCard({
       </div>
       <div className="mt-1 text-xs text-muted-foreground">
         {stats.n} 笔 · 胜率 {stats.e3_win == null ? "--" : formatPct(stats.e3_win * 100)}
+      </div>
+    </div>
+  );
+}
+
+/** v7.2 弱市组小卡:主数字=2020-22 时代段(定型样本),小字=2023 起强市时代参考 */
+function WeakEraStatCard({
+  title,
+  eraStats,
+  refStats,
+}: {
+  title: string;
+  eraStats?: HprStats;
+  refStats?: HprStats;
+}) {
+  return (
+    <div className="rounded-lg border border-violet-500/20 p-4">
+      <div className="text-xs text-muted-foreground">{title}</div>
+      <div className={cn("mt-1 text-xl font-semibold font-mono tabular-nums", tone(eraStats?.e3_pct))}>
+        {eraStats?.e3_pct == null ? "--" : formatPct(eraStats.e3_pct)}
+        <span className="ml-1 text-[11px] font-normal text-muted-foreground">平均每笔</span>
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        {eraStats?.n ?? 0} 笔 · 胜率 {eraStats?.e3_win == null ? "--" : formatPct(eraStats.e3_win * 100)}
+      </div>
+      <div className="mt-1 text-[10px] text-muted-foreground/70">
+        2023起参考:{refStats?.n ?? 0}笔 · 均{" "}
+        {refStats?.e3_pct == null ? "--" : formatPct(refStats.e3_pct)}
       </div>
     </div>
   );
