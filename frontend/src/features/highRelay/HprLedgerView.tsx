@@ -13,7 +13,7 @@ const EXIT_REASON_LABELS: Record<string, string> = {
 };
 
 // v7.3 交割单切动态组口径:含 K 系出手点(当月弱市组启用的成交笔,紫色系)
-const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3", "K2", "K4", "K5", "K7", "K9", "K3"] as const;
+const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3", "K2", "K4", "K5", "K9", "K3"] as const;
 
 const POINT_BADGES: Record<string, { label: string; className: string }> = {
   A1: { label: "A1", className: "bg-rise/15 text-rise" },
@@ -28,7 +28,6 @@ const POINT_BADGES: Record<string, { label: string; className: string }> = {
   K2: { label: "K2", className: "bg-violet-500/15 text-violet-500" },
   K4: { label: "K4", className: "bg-violet-500/15 text-violet-500" },
   K5: { label: "K5", className: "bg-violet-500/15 text-violet-500" },
-  K7: { label: "K7", className: "bg-violet-500/15 text-violet-500" },
   K9: { label: "K9", className: "bg-violet-500/15 text-violet-500" },
   K3: { label: "K3", className: "bg-violet-500/15 text-violet-500" },
 };
@@ -75,7 +74,7 @@ export function HprLedgerView({
   return (
     <section aria-label="高位接力历史交割单" className="rounded-lg border">
       <div className="border-b px-4 py-2 text-xs text-muted-foreground">
-        回测模拟口径(非实盘):<span className="text-foreground">动态口诀组纪律——每月自动切换启用组(近一年哪组赚得多用哪组),当月未启用组的命中不成交</span>(2020 上半年双开期两组都出手/2020-07~2023-06 弱市组 K 系/2023-08 起强市组八条)
+        回测模拟口径(非实盘):<span className="text-foreground">动态口诀组纪律——每月自动切换启用组(近一年哪组赚得多用哪组),当月未启用组的命中不成交</span>(2020-01~07 双开期两组都出手/2020-08~2023-08 弱市组 K 系/2023-09 起强市组八条)
         ;成交笔触板买涨停价,炸板次日走(T+1)/封住→断板日卖(15日兜底,E3口径);收益列=E3,对照列E0=持有到断板;不限仓位。同票持仓未退时的新信号标「持仓中」——真实买不进(T+1+一票一份),显示但不进收益汇总。实时前推成交随产品上线逐日沉淀。
       </div>
 

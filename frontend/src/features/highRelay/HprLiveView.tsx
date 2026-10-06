@@ -54,16 +54,15 @@ const POINT_BADGES: Record<string, { label: string; full: string; className: str
   C2: { label: "C2", full: "C2 四板换手(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
   C3: { label: "C3", full: "C3 一字换手(三接四,不分阴阳)", className: "bg-primary/15 text-primary ring-1 ring-primary/40" },
   // 弱市组(v7.0,定型于2020-22;紫系与强市组区分)
-  K2: { label: "K2", full: "K2 三板换手强开(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
-  K4: { label: "K4", full: "K4 换足弱开捡(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
-  K5: { label: "K5", full: "K5 贴零强开(弱市组,前波=0)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
-  K7: { label: "K7", full: "K7 贴零弱开捡(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
-  K9: { label: "K9", full: "K9 洗后温推(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
-  K3: { label: "K3", full: "K3 双洗温推贴顶(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K2: { label: "K2", full: "C2·弱市版 四板换手(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K4: { label: "K4", full: "K4 一三换手弱开(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K5: { label: "K5", full: "K5 二板贴零强开(弱市组,前波=0)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K9: { label: "K9", full: "K9 一平二低温开(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K3: { label: "K3", full: "K3 双低温开贴顶(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
 };
 
 const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"] as const;
-const WEAK_POINT_KEYS = ["K2", "K4", "K5", "K7", "K9", "K3"] as const;
+const WEAK_POINT_KEYS = ["K2", "K4", "K5", "K9", "K3"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
@@ -77,7 +76,6 @@ const POINT_COUNT_TONE: Record<string, string> = {
   K2: "text-violet-500",
   K4: "text-violet-500",
   K5: "text-violet-500",
-  K7: "text-violet-500",
   K9: "text-violet-500",
   K3: "text-violet-500",
 };

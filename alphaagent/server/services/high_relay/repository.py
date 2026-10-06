@@ -358,23 +358,26 @@ def quiz_bank_status() -> dict[str, object]:
     return {"rules_versions": [str(v) for v in versions], "count": int(count)}
 
 
-def load_quiz_mix_projection(year: str | None = None,
+def load_quiz_mix_projection(years: list[str] | None = None,
                              era: str | None = None) -> list[dict[str, object]]:
     """综合挑战卷抽题投影:[{decision_date, vt_symbol, point, trap_kind}](轻量,
     trap_kind 从 payload.explain JSON 抽取,命中题为 NULL→None;不读K线大字段)。
-    year 非空时只抽该年(主人定:按年份练市场环境,2023熊尾/2024牛市/2025-26结构牛);
-    era 优先于 year(v7.3 起按月度动态组过滤,与题库判定同源):weak=弱市组启用的月
-    (weak+both,含 2023 上半年),strong=强市组启用的月(strong+both)。"""
+    years 非空时只抽这些年(主人定:按年份练市场环境,2023熊尾/2024牛市/2025-26
+    结构牛;v7.5 起支持多选年份一起综合答题);
+    era 优先于 years,按年份段过滤(与抽题范围 chip 文案一致;v7.2 旧实现按月状态
+    in_(strong,both) 会把 2020-01~06 暖机双开段混进「强市时代 23 起」——主人做题
+    撞 2020-02 双开题报障):weak=2020-22,strong=2023 起(该段内的弱市组题照抽,
+    题上组别 chip 会如实标注)。"""
     schema.ensure_schema_once(get_engine())
     t = schema.hpr_quiz_questions
     stmt = select(t.c.decision_date, t.c.vt_symbol, t.c.point,
                   t.c.payload["explain"]["trap_kind"].astext.label("trap_kind"))
     if era == "weak":
-        stmt = stmt.where(t.c.payload["dyn_state"].astext.in_(("weak", "both")))
+        stmt = stmt.where(t.c.year.in_(("2020", "2021", "2022")))
     elif era == "strong":
-        stmt = stmt.where(t.c.payload["dyn_state"].astext.in_(("strong", "both")))
-    elif year:
-        stmt = stmt.where(t.c.year == year)
+        stmt = stmt.where(t.c.year >= "2023")
+    elif years:
+        stmt = stmt.where(t.c.year.in_(years))
     with session_scope() as session:
         rows = session.execute(stmt).mappings().all()
     return [dict(r) for r in rows]

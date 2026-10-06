@@ -127,7 +127,7 @@ const LIVE_PAYLOAD: HprLivePayload = {
       action_hint: null,
       today_window: [],
       weak_point: "K5",
-      weak_label: "K5 贴零强开",
+      weak_label: "K5 二板贴零强开",
       weak_hint: "今天开6~9.5,盘中触涨停价打",
       weak_windows: [[6.0, 9.5]],
       b3_turn: null,
@@ -578,9 +578,9 @@ const QUIZ_WEAK_HIT_Q: HprQuizQuestion = {
     exit_reason: "break_close",
   },
   explain: {
-    kind: "hit", scheme_no: "K5", scheme_name: "K5 贴零强开",
+    kind: "hit", scheme_no: "K5", scheme_name: "K5 二板贴零强开",
     scheme_row: {
-      no: "K5", name: "K5 贴零强开",
+      no: "K5", name: "K5 二板贴零强开",
       yang: "阴·打4板", b1: "不看", b2: "平开0~3", b3: "不看",
       today: "强开6~9.5", ground: "前波=0(60日没炒过)", stat: "13笔·胜85%·均+5.2",
     },
@@ -738,11 +738,11 @@ describe("QuizRunner 动态口诀组联动(v7.2)", () => {
     expect(html).not.toContain("当前未启用");
   });
 
-  // v7.3 逐月动态组:双开月题(暖机期)显示「双开题」chip,当前组无论如何都算启用
-  it("双开月题(2020 暖机期):chip=双开题,当前组=strong 也标启用中", () => {
+  // v7.3 逐月动态组:双开月题(暖机期)显示「双开月·两组都启用」chip,当前组无论如何都算启用
+  it("双开月题(2020 暖机期):chip=双开月·两组都启用,当前组=strong 也标启用中", () => {
     const bothQ: HprQuizQuestion = { ...QUIZ_WEAK_HIT_Q, decision_date: "2020-03-10", dyn_state: "both" };
     const html = renderRunner({ questions: [bothQ], dynGroup: "strong" });
-    expect(html).toContain("双开题");
+    expect(html).toContain("双开月·两组都启用");
     expect(html).toContain("当前启用中");
     expect(html).not.toContain("当前未启用");
   });
@@ -752,7 +752,7 @@ describe("QuizRunner 动态口诀组联动(v7.2)", () => {
     delete (legacyQ as Partial<HprQuizQuestion>).dyn_state;
     const html = renderRunner({ questions: [legacyQ] });
     expect(html).toContain("弱市组题");
-    expect(html).not.toContain("双开题");
+    expect(html).not.toContain("双开月·两组都启用");
   });
 });
 
@@ -876,5 +876,31 @@ describe("QuizRunner 综合挑战卷(mixed)", () => {
     expect(html).toContain("阳·打3板");
     // 组列标红(阴阳反了=组不符):红样式与题面判分红格同款
     expect(html).toContain("bg-fall/10");
+  });
+
+  // v7.7 双开月跨组答案说明(主人做弱市卷撞 2020-02 B2 答案困惑
+  // 「为什么弱市题目答案是强势口诀」——双开月两组都启用,解析点明)
+  it("双开月 hit 题:揭示解析注明「两组都启用,该口诀本月同样出手」", () => {
+    const BOTH_HIT_Q: HprQuizQuestion = {
+      ...QUIZ_HIT_Q,
+      decision_date: "2020-02-25",
+      dyn_state: "both",
+    };
+    const html = renderToStaticMarkup(
+      withProviders(
+        <QuizRunner
+          variant="mixed"
+          questions={[BOTH_HIT_Q]}
+          rulesVersion="hpr-v4.4·q10"
+          showName={false}
+          answers={{ [quizQuestionId(BOTH_HIT_Q)]: { choice: "buy", score: 10 } }}
+          onAnswersChange={() => undefined}
+          onBack={() => undefined}
+        />,
+      ),
+    );
+    expect(html).toContain("本月双开（暖机期");
+    expect(html).toContain("强市组的这条口诀本月同样出手");
+    expect(html).toContain("双开月·两组都启用");
   });
 });

@@ -159,11 +159,20 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     payload["dyn_sim_yearly"] = _yearly(dyn_sim)
     payload["dyn_sim_totals"] = _yearly_totals(dyn_sim)   # v7.4 一年的成绩表(七年,复利/相加列)
     payload["dyn_open_yearly"] = _yearly(dyn_open)
-    # v7.4 K 系全时段分年/月度(2020起)——分年明细表 K 系六行与月度筛选全时段数据
-    for k in contracts.WEAK_POINT_KEYS:
-        kf = done_all[done_all["弱口诀"] == k]
-        payload["yearly"][k] = _yearly(kf)
-        payload["monthly"][k] = _monthly(kf)
+    # v7.5 分年/月度明细=动态组实盘口径(按出手编号分组,当月启用组才成交)——
+    # 分年明细表整表统一实盘口径,不再混研究口径全量行(K 系 2024 起/八条 2021-22
+    # 无成交即 --);口诀体检数字留合计卡(强市 2023+ 研究)与弱市卡(时代段);
+    # all=全部出手(与 dyn_sim 同源),供月度筛选「全部」键
+    payload["dyn_point_yearly"] = {pk: _yearly(g_) for pk, g_ in dyn_sim.groupby("方案点")}
+    payload["dyn_point_monthly"] = {pk: _monthly(g_) for pk, g_ in dyn_sim.groupby("方案点")}
+    payload["dyn_point_totals"] = {pk: _stats(g_) for pk, g_ in dyn_sim.groupby("方案点")}
+    payload["dyn_point_monthly"]["all"] = _monthly(dyn_sim)
+    # 未启用时代的参考层(全量命中,灰字显示):八条 2020-22/K 系 2023+ 实盘无成交的格
+    # 子给「若硬做会怎样」的体检数字——v7.4 丢的是这层,实盘口径(正常色)优先不混
+    payload["ref_point_yearly"] = {
+        **{pk: _yearly(done_all[done_all["方案点"] == pk]) for pk in contracts.POINT_KEYS},
+        **{k: _yearly(done_all[done_all["弱口诀"] == k]) for k in contracts.WEAK_POINT_KEYS},
+    }
     # v7.3 动态组口径交割单:按月状态过滤的出手笔(实盘纪律=当月启用组才成交),
     # 重叠标注按出手笔重算(比全量标更贴实盘);旧物化无此键时 API 兜底 ledger_days
     _mark_overlap(dyn_sim)

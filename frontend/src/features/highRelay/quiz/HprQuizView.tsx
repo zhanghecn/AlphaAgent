@@ -53,10 +53,10 @@ export function HprQuizView() {
   const [year, setYear] = useState<string | null>(null);
   const [month, setMonth] = useState<string | null>(null);
   // 综合挑战卷:nonce=null 未进卷;每点一次「开始挑战」+1 → queryKey 变 →
-  // 强制重新随机抽题(禁缓存,主人要每次重抽不重样);mixYear=null 全库,
-  // 指定年=只在该年抽(主人定:按年份练市场环境);
-  // mixEra(v7.2)=时代抽题,与年份互斥:weak=2020-22 弱市组段,strong=2023 起强市段
-  const [mixYear, setMixYear] = useState<string | null>(null);
+  // 强制重新随机抽题(禁缓存,主人要每次重抽不重样);mixYears=[] 全库,
+  // 多选=所选年份并集一起抽(v7.5;点 chip toggle 选/取消);
+  // mixEra(v7.2)=时代抽题,与年份互斥:weak=2020-22,strong=2023 起
+  const [mixYears, setMixYears] = useState<string[]>([]);
   const [mixEra, setMixEra] = useState<"weak" | "strong" | null>(null);
   const [mixedNonce, setMixedNonce] = useState<number | null>(null);
   const [showName, setShowName] = useState(false);
@@ -80,9 +80,9 @@ export function HprQuizView() {
   });
 
   const mixedQuery = useQuery({
-    queryKey: ["hprQuizMixed", mixedNonce, mixYear, mixEra],
+    queryKey: ["hprQuizMixed", mixedNonce, mixYears, mixEra],
     queryFn: () => fetchHprQuizMixed(
-      mixEra ? { era: mixEra } : mixYear ? { year: mixYear } : undefined,
+      mixEra ? { era: mixEra } : mixYears.length ? { years: mixYears } : undefined,
     ),
     enabled: mixedNonce != null,
     staleTime: 0,
@@ -255,31 +255,37 @@ export function HprQuizView() {
           </button>
         </div>
         {/* 年份筛选(主人定):选年=只在该年抽题练该年市场环境;单年某口诀不足2道有多少抽多少;
-            v7.2 时代筛选(与年份互斥):弱市时代=2020-22 只出K系好票+当时代陷阱,强市时代=2023起 */}
+            v7.5 多选年份=所选年份并集一起综合;v7.2 时代筛选(与年份互斥,按年份段):
+            弱市时代=2020-22,强市时代=2023起 */}
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span className="text-[11px] text-muted-foreground">抽题范围</span>
           <MixYearChip
             label="全部年份"
-            active={mixYear == null && mixEra == null}
-            onClick={() => { setMixYear(null); setMixEra(null); }}
+            active={mixYears.length === 0 && mixEra == null}
+            onClick={() => { setMixYears([]); setMixEra(null); }}
           />
           <MixYearChip
             label="弱市时代(20-22)"
             tone="violet"
             active={mixEra === "weak"}
-            onClick={() => { setMixEra("weak"); setMixYear(null); }}
+            onClick={() => { setMixEra("weak"); setMixYears([]); }}
           />
           <MixYearChip
             label="强市时代(23起)"
             active={mixEra === "strong"}
-            onClick={() => { setMixEra("strong"); setMixYear(null); }}
+            onClick={() => { setMixEra("strong"); setMixYears([]); }}
           />
           {years.map((y) => (
             <MixYearChip
               key={y.year}
               label={`${y.year}年`}
-              active={mixEra == null && mixYear === y.year}
-              onClick={() => { setMixYear(y.year); setMixEra(null); }}
+              active={mixEra == null && mixYears.includes(y.year)}
+              onClick={() => {
+                setMixEra(null);
+                setMixYears((prev) => prev.includes(y.year)
+                  ? prev.filter((x) => x !== y.year)
+                  : [...prev, y.year]);
+              }}
             />
           ))}
         </div>

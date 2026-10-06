@@ -36,14 +36,13 @@ const POINT_TONE: Record<string, string> = {
   C3: "stroke-primary",
 };
 // 弱市组 K 系(v7.1):成绩卡片区展示(summary 有 2023+ 段锚定数字)
-const WEAK_POINTS = ["K2", "K4", "K5", "K7", "K9", "K3"] as const;
+const WEAK_POINTS = ["K2", "K4", "K5", "K9", "K3"] as const;
 const WEAK_POINT_SHORT: Record<string, string> = {
-  K2: "K2 三板换手强开",
-  K4: "K4 换足弱开捡",
-  K5: "K5 贴零强开",
-  K7: "K7 贴零弱开捡",
-  K9: "K9 洗后温推",
-  K3: "K3 双洗温推贴顶",
+  K2: "C2·弱市版 四板换手",
+  K4: "K4 一三换手弱开",
+  K5: "K5 二板贴零强开",
+  K9: "K9 一平二低温开",
+  K3: "K3 双低温开贴顶",
 };
 
 export function HprBacktestView({
@@ -214,7 +213,7 @@ export function HprBacktestView({
               </div>
             </div>
             <div className="text-xs text-muted-foreground">
-              2020 上半年双开(暖机)两组都出手 · 2020-07~2023-06 弱市组 K 系 · 2023-08 起强市组八条(2023-07 无出手月,仍属弱市组)——
+              2020-01~07 双开(暖机)两组都出手 · 2020-08~2023-08 弱市组 K 系 · 2023-09 起强市组八条——
               切组历史与判定口径见规则页「获取最新口诀」;交割单页即此口径的逐笔明细。
             </div>
           </section>
@@ -281,11 +280,10 @@ export function HprBacktestView({
       </section>
 
       <section className="rounded-lg border p-4">
-        <div className="mb-2 text-sm font-semibold">分年明细(格 = 平均每笔 · 小字 = 笔数·胜率)</div>
+        <div className="mb-2 text-sm font-semibold">分年明细 · 动态组实盘口径(格 = 平均每笔 · 小字 = 笔数·胜率)</div>
         <div className="mb-2 text-[11px] text-muted-foreground">
-          年份 2020 起全时段:强市八条(A1~C3)与「方案合计」为 2023+ 研究口径;
-          K 系六行 2020-22=弱市时代定型段,2023 起为强市时代参考(该组不启用);
-          末行=动态组实盘合计(按月自动切换,七年)。
+          正常色=实盘成交(上月末状态管本月):2020-01~07 双开暖机 → 2020-08~2023-08 弱市组 → 2023-09 起强市组;
+          <span className="text-muted-foreground/70"> 灰字=该时代未启用组的参考(只体检不出手,如八条在 2021-22、K 系在 2024 起)</span>。
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[840px] text-sm">
@@ -305,18 +303,22 @@ export function HprBacktestView({
             <tbody>
               {(() => {
                 const cols = report.dyn_sim_yearly ?? report.yearly["all"] ?? [];
-                // 行序:强市八条 → K 系六条(全时段) → 方案合计(强市2023+) → 动态组实盘合计(七年)
-                const rowKeys: string[] = [...POINTS, ...WEAK_POINTS, "all", "dyn"];
+                // v7.5 行序:强市八条 → K 系六条 → 动态组合计(整表实盘口径;旧物化兜底研究口径行)
+                const rowKeys: string[] = [...POINTS, ...WEAK_POINTS, "dyn"];
                 const nameOf = (pk: string) =>
                   pk === "dyn" ? "动态组实盘合计(按月切换)" :
-                  pk === "all" ? POINT_SHORT.all :
                   POINT_SHORT[pk] ?? WEAK_POINT_SHORT[pk] ?? pk;
                 return rowKeys.map((pk) => {
                   const src = pk === "dyn"
                     ? (report.dyn_sim_yearly ?? [])
-                    : (report.yearly[pk] ?? []);
+                    : (report.dyn_point_yearly?.[pk] ?? report.yearly[pk] ?? []);
                   const byYear = new Map(src.map((y) => [y.year, y]));
-                  const total = pk === "dyn" ? report.summary["dyn_sim"] : report.summary[pk];
+                  // 未启用时代参考层(全量命中):实盘无成交的格子灰字显示体检数字
+                  const refByYear = new Map(
+                    (report.ref_point_yearly?.[pk] ?? []).map((y) => [y.year, y]));
+                  const total = pk === "dyn"
+                    ? report.summary["dyn_sim"]
+                    : report.dyn_point_totals?.[pk] ?? report.summary[pk];
                   const isK = pk.startsWith("K");
                   return (
                     <tr key={pk} className={cn(
@@ -329,6 +331,7 @@ export function HprBacktestView({
                       </td>
                       {cols.map((yy) => {
                         const y = byYear.get(yy.year);
+                        const ref = pk === "dyn" ? undefined : refByYear.get(yy.year);
                         return (
                           <td key={yy.year} className="py-1.5 text-right align-top">
                             {y && y.n ? (
@@ -340,6 +343,15 @@ export function HprBacktestView({
                                   {y.n}笔 · {y.e3_win == null ? "--" : formatPct(y.e3_win * 100)}
                                 </div>
                               </>
+                            ) : ref && ref.n ? (
+                              <div className="text-muted-foreground/60">
+                                <div className="font-mono text-xs tabular-nums">
+                                  {ref.e3_pct == null ? "--" : formatPct(ref.e3_pct)}
+                                </div>
+                                <div className="text-[10px]">
+                                  参考 {ref.n}笔 · {ref.e3_win == null ? "--" : formatPct(ref.e3_win * 100)}
+                                </div>
+                              </div>
                             ) : (
                               <span className="text-muted-foreground/50">--</span>
                             )}
@@ -371,7 +383,7 @@ export function HprBacktestView({
 
       <section className="rounded-lg border p-4">
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold">月度明细</span>
+          <span className="text-sm font-semibold">月度明细 · 实盘口径</span>
           <span className="flex flex-wrap gap-1">
             {[...POINTS, ...WEAK_POINTS, "all"].map((pk) => {
               const isK = pk.startsWith("K");
@@ -391,7 +403,7 @@ export function HprBacktestView({
                         : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {POINT_SHORT[pk] ?? WEAK_POINT_SHORT[pk] ?? pk}
+                  {pk === "all" ? "全部出手" : POINT_SHORT[pk] ?? WEAK_POINT_SHORT[pk] ?? pk}
                 </button>
               );
             })}
@@ -408,7 +420,7 @@ export function HprBacktestView({
               </tr>
             </thead>
             <tbody>
-              {[...(report.monthly[monthlyPoint] ?? [])].reverse().map((m) => (
+              {[...(report.dyn_point_monthly?.[monthlyPoint] ?? report.monthly[monthlyPoint] ?? [])].reverse().map((m) => (
                 <tr key={m.month} className="border-b last:border-b-0">
                   <td className="py-1.5 font-mono tabular-nums">{m.month}</td>
                   <td className="py-1.5 text-right font-mono tabular-nums">{m.n}</td>

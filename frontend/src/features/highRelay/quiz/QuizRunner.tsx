@@ -35,7 +35,6 @@ const POINT_BADGES: Record<string, string> = {
   K2: "bg-violet-500/15 text-violet-500",
   K4: "bg-violet-500/15 text-violet-500",
   K5: "bg-violet-500/15 text-violet-500",
-  K7: "bg-violet-500/15 text-violet-500",
   K9: "bg-violet-500/15 text-violet-500",
   K3: "bg-violet-500/15 text-violet-500",
 };
@@ -309,46 +308,6 @@ export function QuizRunner({
       <section className="rounded-lg border">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-3">
           <span className="text-sm font-semibold">{title}</span>
-          <span
-            className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] font-medium",
-              qState === "weak"
-                ? "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40"
-                : qState === "both"
-                  ? "bg-muted text-muted-foreground ring-1 ring-muted-foreground/30"
-                  : "bg-primary/10 text-primary",
-            )}
-            title={qState === "weak"
-              ? "该月动态口诀组=弱市组:该买=K系命中(八条命中只是雷达)"
-              : qState === "both"
-                ? "该月双开(近12月样本不足的暖机期):两组任一命中即该买"
-                : "该月动态口诀组=强市组:该买=A1~C3八条命中"}
-          >
-            {qState === "weak" ? "弱市组题" : qState === "both" ? "双开题" : "强市组题"}
-          </span>
-          {dynGroup ? (
-            // v7.2/v7.3 联动「提取口诀」:这题所在月的口诀组,当前是否启用(实时推荐按它出手)
-            (() => {
-              const eraActive = qState === "both"
-                ? true
-                : qState === "weak"
-                  ? dynGroup === "weak" || dynGroup === "both"
-                  : dynGroup === "strong" || dynGroup === "both";
-              return (
-                <span
-                  className={cn(
-                    "rounded px-1.5 py-0.5 text-[10px] font-medium",
-                    eraActive
-                      ? "bg-muted text-foreground"
-                      : "bg-muted/50 text-muted-foreground",
-                  )}
-                  title="「近一年哪组口诀赚得多就用哪组」的当前判定——未启用≠口诀错了,是现在轮到另一组"
-                >
-                  {eraActive ? "当前启用中" : "当前未启用"}
-                </span>
-              );
-            })()
-          ) : null}
           {!showName ? (
             <span className="ml-auto text-[11px] text-muted-foreground">
               匿名模式（答完揭示票名）
@@ -369,6 +328,51 @@ export function QuizRunner({
             exitPrice={a.exit_price}
             retPct={a.ret_pct}
           />
+        </div>
+
+        {/* v7.7b 组状态行(主人 2026-10-06「弱市组题等放在下面,方便用户直接看到」):
+            从题头小字行挪到 K 线下/判定格上——做题视线正落处,字号提一档 */}
+        <div className="flex flex-wrap items-center gap-2 border-t px-4 py-2">
+          <span
+            className={cn(
+              "rounded px-2 py-0.5 text-xs font-semibold",
+              qState === "weak"
+                ? "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40"
+                : qState === "both"
+                  ? "bg-muted text-muted-foreground ring-1 ring-muted-foreground/30"
+                  : "bg-primary/10 text-primary",
+            )}
+            title={qState === "weak"
+              ? "该月动态口诀组=弱市组:该买=K系命中(八条命中只是雷达)"
+              : qState === "both"
+                ? "该月双开(近12月样本不足的暖机期):两组任一命中即该买"
+                : "该月动态口诀组=强市组:该买=A1~C3八条命中"}
+          >
+            {qState === "weak" ? "弱市组题" : qState === "both" ? "双开月·两组都启用" : "强市组题"}
+          </span>
+          {dynGroup ? (
+            // v7.2/v7.3 联动「提取口诀」:这题所在月的口诀组,当前是否启用(实时推荐按它出手)
+            (() => {
+              const eraActive = qState === "both"
+                ? true
+                : qState === "weak"
+                  ? dynGroup === "weak" || dynGroup === "both"
+                  : dynGroup === "strong" || dynGroup === "both";
+              return (
+                <span
+                  className={cn(
+                    "rounded px-2 py-0.5 text-xs font-medium",
+                    eraActive
+                      ? "bg-muted text-foreground"
+                      : "bg-muted/50 text-muted-foreground",
+                  )}
+                  title="「近一年哪组口诀赚得多就用哪组」的当前判定——未启用≠口诀错了,是现在轮到另一组"
+                >
+                  {eraActive ? "当前启用中" : "当前未启用"}
+                </span>
+              );
+            })()
+          ) : null}
         </div>
 
         <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t px-4 py-3 text-xs sm:grid-cols-5 sm:gap-x-6 lg:grid-cols-11">
@@ -433,7 +437,7 @@ export function QuizRunner({
           <InfoCell label="首板前20日" value={fmtSigned(d.pre20_pct)} fail={failSet.has("首板前20日")} />
           <InfoCell label="首板前10日" value={fmtSigned(d.pre10_pct)} fail={failSet.has("首板前10日")} />
           {d.b1_turn != null ? (
-            // v7.1 弱市组判定格(仅2020-22题下发):K4/K7 一板放量实体板腿(换手≥5)
+            // v7.1 弱市组判定格(仅2020-22题下发):K4 一板放量实体板腿(换手≥5)
             <InfoCell label="一板换手" value={`${d.b1_turn.toFixed(1)}`} fail={failSet.has("一板换手")} />
           ) : null}
           {d.prev_wave60 != null ? (
@@ -768,6 +772,14 @@ function RevealSection({
               {ex.matched_line}
             </span>
           </div>
+          {/* v7.7 双开月的跨组答案说明(主人 2026-10-06 做弱市卷撞 B2 答案困惑
+              「为什么弱市题目答案是强势口诀」——双开月两组都启用,解析点明防冲突感) */}
+          {question.dyn_state === "both" ? (
+            <p className="mb-1.5 text-[11px] leading-4 text-muted-foreground">
+              本月双开（暖机期，近12月样本不足）——两组口诀都启用：
+              {ex.scheme_no.startsWith("K") ? "弱市组" : "强市组"}的这条口诀本月同样出手
+            </p>
+          ) : null}
           <SchemeRowTable row={ex.scheme_row} />
         </div>
       ) : (

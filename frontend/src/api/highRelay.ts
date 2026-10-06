@@ -11,7 +11,7 @@ import { apiClient } from "./client";
 export type HprPoint =
   | "A1" | "A2" | "B1" | "B2" | "C1"
   | "A3" | "B3" | "C2" | "C3" | "—";   // v6.0:A=阳/B=阴/C=中性(字母跨板位统一,E退休);v6.11:C3一字换手拆自C2
-export type HprWeakPoint = "K2" | "K4" | "K5" | "K7" | "K9" | "K3";   // 弱市组(v7.0,定型于2020-22)
+export type HprWeakPoint = "K2" | "K4" | "K5" | "K9" | "K3";   // 弱市组(v7.0;v7.7 K7退役)
 export type HprAnyPoint = HprPoint | HprWeakPoint;   // 动态口诀组:点位可能是两组任一编号
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
 export type HprDynGroup = "weak" | "strong" | "both";
@@ -193,6 +193,12 @@ export interface HprBacktestReport {
   dyn_sim_totals?: HprYearlyTotal[];
   /** v7.3 两组全开对照(14条都打,全时段)分年成绩 */
   dyn_open_yearly?: ({ year: string } & HprStats)[];
+  /** v7.5 动态组实盘口径分条分年(key=出手编号;月度另含 all=全部出手) */
+  dyn_point_yearly?: Record<string, ({ year: string } & HprStats)[]>;
+  dyn_point_monthly?: Record<string, ({ month: string } & HprStats)[]>;
+  dyn_point_totals?: Record<string, HprStats>;
+  /** v7.5 未启用时代参考层(全量命中)——实盘无成交的格子灰字显示 */
+  ref_point_yearly?: Record<string, ({ year: string } & HprStats)[]>;
   built_at?: string | null;
 }
 
@@ -424,7 +430,7 @@ export interface HprQuizDisplay {
   decision_open: number;        // 决策日开盘价(今开十字bar用)
   day_high_pct: number;         // 决策日盘中最高涨幅%(第二决策信息:冲到9%快触板才决定打不打)
   chain: string | null;         // 板型链 实体→一字
-  // 弱市组题判定格(v7.1,仅2020-22题下发;题面可判原则):K4/K7一板换手腿/
+  // 弱市组题判定格(v7.1,仅2020-22题下发;题面可判原则):K4一板换手腿/
   // K5前波命根/K3距新高贴顶腿
   b1_turn?: number | null;
   prev_wave60?: number | null;
@@ -501,9 +507,10 @@ export function fetchHprQuizQuestions(month: string) {
 // (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序;
 // year 指定=只在该年抽(按年份练市场环境,单年池不足的口诀有多少抽多少);
 // 结构与月题一致(month 缺省),进度与月题共享(同一题 key)。
-export function fetchHprQuizMixed(scope?: { year?: string; era?: "weak" | "strong" }) {
+export function fetchHprQuizMixed(scope?: { year?: string; years?: string[]; era?: "weak" | "strong" }) {
   const params = new URLSearchParams();
-  if (scope?.year) params.set("year", scope.year);
+  const yearParam = scope?.years?.length ? scope.years.join(",") : scope?.year;
+  if (yearParam) params.set("year", yearParam);
   if (scope?.era) params.set("era", scope.era);
   const query = params.size > 0 ? `?${params.toString()}` : "";
   return apiClient.get<HprQuizQuestionsPayload>(`/high-relay/quiz/mixed${query}`);
