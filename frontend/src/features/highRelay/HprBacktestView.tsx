@@ -22,6 +22,8 @@ const POINT_SHORT: Record<string, string> = {
   C3: "C3 一字换手",
   all: "方案合计",
 };
+// C3 曲线色 v6.11 拆分时漏配(POINTS 有 C3、TONE 没有),曲线图例 .replace 直接崩页——
+// 2026-10-06 主人开回测页暴露,补上(与 C2 同蓝)
 const POINT_TONE: Record<string, string> = {
   A1: "stroke-rise",
   A2: "stroke-teal-500",
@@ -31,6 +33,17 @@ const POINT_TONE: Record<string, string> = {
   A3: "stroke-rose-500",
   B3: "stroke-orange-500",
   C2: "stroke-primary",
+  C3: "stroke-primary",
+};
+// 弱市组 K 系(v7.1):成绩卡片区展示(summary 有 2023+ 段锚定数字)
+const WEAK_POINTS = ["K2", "K4", "K5", "K7", "K9", "K3"] as const;
+const WEAK_POINT_SHORT: Record<string, string> = {
+  K2: "K2 三板换手强开",
+  K4: "K4 换足弱开捡",
+  K5: "K5 贴零强开",
+  K7: "K7 贴零弱开捡",
+  K9: "K9 洗后温推",
+  K3: "K3 双洗温推贴顶",
 };
 
 export function HprBacktestView({
@@ -163,6 +176,29 @@ export function HprBacktestView({
           />
         ))}
       </section>
+
+      {report.summary["weak_era"]?.n ? (
+        <section className="rounded-lg border border-violet-500/30 p-4">
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-sm font-semibold text-violet-500">弱市组 · K 系六条</span>
+            <span className="text-xs text-muted-foreground">
+              定型于 2020-22(时代段 {report.summary["weak_era"]?.n ?? 0} 笔 ·
+              均 {formatPct(report.summary["weak_era"]?.e3_pct ?? 0)} ·
+              胜 {formatPct((report.summary["weak_era"]?.e3_win ?? 0) * 100)});
+              下排为 2023 起强市时代的参考成绩——哪组启用看「获取最新口诀」
+            </span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-6">
+            {WEAK_POINTS.map((pk) => (
+              <GroupStatCard
+                key={pk}
+                title={WEAK_POINT_SHORT[pk]}
+                stats={report.summary[pk] ?? { n: 0 }}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="rounded-lg border p-4">
         <div className="mb-2 text-sm font-semibold">累计收益(每笔固定1份,不复利)</div>
