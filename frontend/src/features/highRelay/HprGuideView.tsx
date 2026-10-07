@@ -116,7 +116,7 @@ export function HprGuideView() {
                     : "bg-muted text-foreground"
               }`}>
                 {koujue.data.current_group === "strong" ? "强市组（A1~C3 八条）"
-                  : koujue.data.current_group === "weak" ? "弱市组（K系六条）" : "双开"}
+                  : koujue.data.current_group === "weak" ? "弱市组（K系五条）" : "双开"}
               </span>
               {koujue.data.switch_history.length > 0 ? (
                 <span className="font-mono text-[11px] text-muted-foreground">
@@ -270,9 +270,9 @@ export function HprGuideView() {
               </Fragment>
             ))}
             <tr className="border-t-2 border-muted/60">
-              <td className="py-1.5 pr-3 font-semibold" colSpan={5}>合计(六条)</td>
+              <td className="py-1.5 pr-3 font-semibold" colSpan={5}>合计(五条)</td>
               <td className="py-1.5 pr-3" colSpan={2} />
-              <td className="py-1.5 font-mono text-[11px] font-semibold">53笔·胜72%·均+10.28</td>
+              <td className="py-1.5 font-mono text-[11px] font-semibold">40笔·胜78%·均+13.20</td>
             </tr>
           </tbody>
         </table>

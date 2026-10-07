@@ -156,12 +156,12 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     rec["foundation_chg"] = round(float(cols["chg"][f]) * 100, 2) \
         if cols["chg"][f] == cols["chg"][f] else None
     h60 = cols["h60"][f]
-    rec["dist_h60"] = round((fc / h60 - 1) * 100, 1) if h60 == h60 and h60 > 0 else None
+    rec["dist_h60"] = round((fc / h60 - 1) * 100, 2) if h60 == h60 and h60 > 0 else None
     ma = [cols[m][f] for m in ("ma5", "ma10", "ma20", "ma30")]
     rec["ma_state"] = "".join("+" if a >= b else "-" for a, b in zip(ma, ma[1:], strict=False)) \
         if all(x == x for x in ma) else ""
     ma10 = cols["ma10"][f]
-    rec["dist_ma10"] = round((fc / ma10 - 1) * 100, 1) if ma10 == ma10 and ma10 > 0 else None
+    rec["dist_ma10"] = round((fc / ma10 - 1) * 100, 2) if ma10 == ma10 and ma10 > 0 else None
     ma20f = cols["ma20"][f]
     rec["foundation_ma20_gap"] = round((fc / ma20f - 1) * 100, 2) \
         if ma20f == ma20f and ma20f > 0 else None
@@ -207,24 +207,24 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
         og = (float(cols["open_price"][j]) / float(cols["prev_close"][j]) - 1) * 100
         turn = cols["turnover_rate"][j]
         rec[f"b{k}_type"] = bt
-        rec[f"b{k}_open"] = round(og, 1)
-        rec[f"b{k}_turn"] = round(float(turn), 1) if turn == turn else None
+        rec[f"b{k}_open"] = round(og, 2)
+        rec[f"b{k}_turn"] = round(float(turn), 2) if turn == turn else None
         types.append(bt)
     rec["chain"] = "→".join(types)
     b1t = rec.get("b1_turn")
     b2t = rec.get("b2_turn")
-    rec["turn_grad"] = round(b2t - b1t, 1) if b1t is not None and b2t is not None else None
+    rec["turn_grad"] = round(b2t - b1t, 2) if b1t is not None and b2t is not None else None
     # 首3日累计涨幅(含地基日): 地基日收盘 / 3个交易日前收盘 - 1(回避「追高透支」用)
     if f - 3 >= 0 and int(sid[f - 3]) == s:
         c3 = float(cols["close_price"][f - 3])
-        rec["pre3_pct"] = round((fc / c3 - 1) * 100, 1) if c3 > 0 else None
+        rec["pre3_pct"] = round((fc / c3 - 1) * 100, 2) if c3 > 0 else None
     else:
         rec["pre3_pct"] = None
     # 首板前20日涨幅(阳组半山腰毒档5~15%判定/答题信息面板用;与 relay_research 同口径)
     c20 = cols["c20"][f]
-    rec["pre20_pct"] = round((fc / c20 - 1) * 100, 1) if c20 == c20 and c20 > 0 else None
+    rec["pre20_pct"] = round((fc / c20 - 1) * 100, 2) if c20 == c20 and c20 > 0 else None
     c10 = cols["c10"][f]
-    rec["pre10_pct"] = round((fc / c10 - 1) * 100, 1) if c10 == c10 and c10 > 0 else None
+    rec["pre10_pct"] = round((fc / c10 - 1) * 100, 2) if c10 == c10 and c10 > 0 else None
     # 锚点(v6.8 C2腿): 地基日收盘 vs 地基前20日内最近涨停日最高价
     # (主人2026-10-04人眼判据: 贴着断板高点不涨=没能量 / 超前期涨停高点5%=妖顶透支)
     anchor_pos = anchor_dist = None

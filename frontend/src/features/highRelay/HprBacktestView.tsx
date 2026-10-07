@@ -116,7 +116,7 @@ export function HprBacktestView({
                 {report.radar?.all ? ` · 候选 ${report.radar.all.trigger_n} 个,口诀命中 ${report.radar.all.hit_n} 次` : ""}
                 <span className="mt-1 block">
                   实盘按动态口诀组出手(每月自动切换启用组)——实盘口径成绩见下方蓝卡与「一年的成绩」;
-                  弱市组 K 系六条的成绩见下方紫卡。
+                  弱市组 K 系五条的成绩见下方紫卡。
                 </span>
               </div>
             </>
@@ -229,7 +229,7 @@ export function HprBacktestView({
           <section className="rounded-lg border border-violet-500/30 p-4">
             <div className="mb-2 flex flex-wrap items-baseline gap-x-6 gap-y-2">
               <div>
-                <span className="text-sm font-semibold text-violet-500">弱市组 · K 系六条</span>
+                <span className="text-sm font-semibold text-violet-500">弱市组 · K 系五条</span>
                 <span className="ml-2 text-xs text-muted-foreground">定型于 2020-22 弱市时代</span>
               </div>
               <div>
@@ -249,7 +249,7 @@ export function HprBacktestView({
               </div>
             </div>
             <div className="mb-2 text-xs text-muted-foreground">
-              六条成绩为 2020-22 时代段,小字为 2023 起强市时代的参考成绩(整组失效正是
+              五条成绩为 2020-22 时代段,小字为 2023 起强市时代的参考成绩(整组失效正是
               「近一年哪组赚得多就用哪组」的依据)——当前启用哪组看规则页「获取最新口诀」
             </div>
             <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-6">

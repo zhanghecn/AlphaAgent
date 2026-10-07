@@ -19,7 +19,7 @@ import { loadProgress, resetAll } from "./quizProgress";
 /** 动态口诀组横幅样式(v7.2 答题页;与 HprLiveView 同色系) */
 const DYN_GROUP_META: Record<string, { label: string; className: string }> = {
   strong: { label: "强市组(A1~C3 八条)", className: "border-primary/40 bg-primary/10 text-primary" },
-  weak: { label: "弱市组(K 系六条)", className: "border-violet-500/40 bg-violet-500/10 text-violet-500" },
+  weak: { label: "弱市组(K 系五条)", className: "border-violet-500/40 bg-violet-500/10 text-violet-500" },
   both: { label: "双开(样本不足)", className: "border-muted bg-muted/30 text-muted-foreground" },
 };
 
@@ -226,7 +226,7 @@ export function HprQuizView() {
                 title={mixed
                   ? "切组年:该年内动态口诀组发生切换(既有弱市组月也有强市组月)——做题时看每题的组标签"
                   : weakYear
-                    ? "弱市组题:该年每月动态组=弱市组,按K系六条口诀判断"
+                    ? "弱市组题:该年每月动态组=弱市组,按K系五条口诀判断"
                     : "强市组题:该年每月动态组=强市组,按A1~C3八条口诀判断"}
                 className={cn("rounded-md border px-3 py-2 text-xs md:py-1", toneCls)}
                 onClick={() => setYear(y.year)}
@@ -242,7 +242,7 @@ export function HprQuizView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold text-primary">综合挑战卷</span>
           <span className="text-xs text-muted-foreground">
-            两组口诀各抽 2 道好票（强市组八条 + 弱市组六条）+ 28~35 道陷阱票
+            两组口诀各抽 2 道好票（强市组八条 + 弱市组五条）+ 28~35 道陷阱票
             （阴阳反串／形态接近／毒段，每卷随机）——
             每卷练全所有口诀，认熟「看着像但不能打」的票；每次进入重新随机抽题。
           </span>
