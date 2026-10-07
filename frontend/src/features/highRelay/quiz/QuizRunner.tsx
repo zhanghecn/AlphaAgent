@@ -345,10 +345,10 @@ export function QuizRunner({
             title={qState === "weak"
               ? "该月动态口诀组=弱市组:该买=K系命中(八条命中只是雷达)"
               : qState === "both"
-                ? "该月双开(近12月样本不足的暖机期):两组任一命中即该买"
+                ? "暖机期:历史数据不够,判不出哪组口诀好——两组都开。实测这段(仅2020-01~07)八条胜率仅38%/K系73%,两组并不都靠谱;未来12个月窗口永远满,不会再出现"
                 : "该月动态口诀组=强市组:该买=A1~C3八条命中"}
           >
-            {qState === "weak" ? "弱市组题" : qState === "both" ? "双开月·两组都启用" : "强市组题"}
+            {qState === "weak" ? "弱市组题" : qState === "both" ? "暖机期·历史数据不足" : "强市组题"}
           </span>
           {dynGroup ? (
             // v7.2/v7.3 联动「提取口诀」:这题所在月的口诀组,当前是否启用(实时推荐按它出手)
@@ -776,8 +776,8 @@ function RevealSection({
               「为什么弱市题目答案是强势口诀」——双开月两组都启用,解析点明防冲突感) */}
           {question.dyn_state === "both" ? (
             <p className="mb-1.5 text-[11px] leading-4 text-muted-foreground">
-              本月双开（暖机期，近12月样本不足）——两组口诀都启用：
-              {ex.scheme_no.startsWith("K") ? "弱市组" : "强市组"}的这条口诀本月同样出手
+              暖机期：历史数据不够，判不出哪组口诀好——两组都开（实测这段八条胜率仅38%、K系73%，两组并不都靠谱；
+              仅2020-01~07存在，未来不会再有）。{ex.scheme_no.startsWith("K") ? "弱市组" : "强市组"}的这条口诀当时按纪律出手
             </p>
           ) : null}
           <SchemeRowTable row={ex.scheme_row} />

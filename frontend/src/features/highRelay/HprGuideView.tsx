@@ -66,7 +66,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            两组口诀：强市组八条(A1~C3,2023-26 定型验证)+ 弱市组六条(K 系,2020-22 定型)——
+            两组口诀：强市组八条(A1~C3,2023-26 定型验证)+ 弱市组五条(K 系,2020-22 定型)——
             近一年哪组赚得多就用哪组(见「动态口诀组」);研究文档见 量化因子研究/高位接力/打板口诀卡.md 与 弱市口诀卡v5.md
           </span>
         </div>
@@ -223,15 +223,25 @@ export function HprGuideView() {
           K系六条条件在全 UI 无常驻位置(主人 2026-10-06「弱市口诀基本看不到」) */}
       <section className="rounded-lg border border-violet-500/30 p-4" aria-label="弱市组速查表">
         <div className="mb-1 text-sm font-semibold">
-          弱市组 · K 系六条（定型于 2020-22 弱市时代）
+          弱市组 · K 系五条（定型于 2020-22 弱市时代）
           <span className="ml-2 font-mono text-xs font-normal text-violet-500">
-            合计 53笔·E3胜72%·均+10.28·分年三年全正
+            合计 40笔·E3胜78%·均+13.20·分年三年全正
           </span>
         </div>
         <div className="mb-2 text-xs text-muted-foreground">
-          同一套「昨天恰好 2/3 连板、今天冲下一板」的池子，弱市时代按这六条判断；
+          同一套「昨天恰好 2/3 连板、今天冲下一板」的池子，弱市时代按这五条判断；
           近一年哪组赚得多就用哪组——当前启用哪组看上方「获取最新口诀」。
           2023 起强市时代的参考成绩见回测页弱市组卡片。
+        </div>
+        {/* v7.10 三板换手池分流总纲(阴阳分流版):第一判据=地基K线阴体阳体(K2/K5 要阴、
+            K4 要阳——地基阴阳是三接四最强分组变量),第二判据=今天开;换手数字 12~15
+            两条共用不再打架,阴阳各走各路(主人 2026-10-07 撞金种子酒:地基+8%大阳K、
+            三换14.9 误按 K2 窗判不买,实际是 K4 的票) */}
+        <div className="mb-2 rounded-md bg-violet-500/5 px-3 py-2 text-xs leading-5 text-violet-500/90 ring-1 ring-violet-500/20">
+          三板换手池的票，<span className="font-semibold">第一眼看地基K线阴阳</span>——
+          阴K走 K2/K5，阳K走 K4，一票只落一条路：
+          阴地基：今开 <span className="font-mono">6~9.5</span> 强开查 K2(三换10~15 × 地基要干净)或 K5(二板贴零 × 前波=0)；
+          阳地基：今开 <span className="font-mono">0~3</span> 弱开查 K4(三换12~20 × 一板要放量)，今开 <span className="font-mono">3~6</span> 温开不碰(毒)。
         </div>
         <table className="w-full border-collapse text-sm">
           <thead>

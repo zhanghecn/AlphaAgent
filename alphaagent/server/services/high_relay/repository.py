@@ -313,7 +313,9 @@ def save_quiz_questions(rules_version: str, rows: list[Mapping[str, object]]) ->
 
 def load_quiz_overview() -> dict[str, object]:
     """题库标量聚合:year→month→{total,buy_count,reject_count,dyn_state}+版本。
-    dyn_state=v7.3 该月动态组状态(月内唯一,从 payload 抽)——前端年份 chip 分色用。"""
+    dyn_state=v7.3 该月动态组状态(月内唯一,从 payload 抽)——前端年份 chip 分色用。
+    v7.8c 暖机月(dyn_state=both,2020-01~07)整月不返回——主人「这种不用出题了,
+    月份选择处直接不显示」:历史数据不足判不出哪组好,做题入口全关。"""
     schema.ensure_schema_once(get_engine())
     t = schema.hpr_quiz_questions
     with session_scope() as session:
@@ -328,7 +330,7 @@ def load_quiz_overview() -> dict[str, object]:
                 func.count().filter(t.c.point == "—").label("reject_count"),
                 dyn_col.label("dyn_state"),
             ).group_by(t.c.year, t.c.month, dyn_col
-            ).order_by(t.c.year, t.c.month)
+            ).where(dyn_col != 'both').order_by(t.c.year, t.c.month)
         ).mappings().all()
         versions = session.execute(
             select(t.c.rules_version).distinct()
@@ -338,12 +340,15 @@ def load_quiz_overview() -> dict[str, object]:
 
 
 def load_quiz_questions(month: str) -> list[dict[str, object]]:
-    """该月全部题目 payload,按 seq 升序。"""
+    """该月全部题目 payload,按 seq 升序。v7.8c 暖机月(dyn_state=both)不出题。"""
     schema.ensure_schema_once(get_engine())
     t = schema.hpr_quiz_questions
     with session_scope() as session:
         rows = session.execute(
-            select(t.c.payload).where(t.c.month == month).order_by(t.c.seq)
+            select(t.c.payload).where(
+                t.c.month == month,
+                t.c.payload["dyn_state"].astext != "both",
+            ).order_by(t.c.seq)
         ).scalars().all()
     return [dict(r) for r in rows if isinstance(r, Mapping)]
 
@@ -372,6 +377,11 @@ def load_quiz_mix_projection(years: list[str] | None = None,
     t = schema.hpr_quiz_questions
     stmt = select(t.c.decision_date, t.c.vt_symbol, t.c.point,
                   t.c.payload["explain"]["trap_kind"].astext.label("trap_kind"))
+    # v7.8c 暖机月(dyn_state=both,2020-01~07)全部题不出卷——主人「这种不用出题了:
+    # 历史数据不够判不出哪组好,两组都开失败率陡升(八条16笔38%/-3.88,K系虽有73%但
+    # 暖机月判定本身不可靠);未来12月窗口永远满不会再双开,练这些题没有价值」。
+    # 月度题/overview 同步过滤(月度入口整月不显示)
+    stmt = stmt.where(t.c.payload["dyn_state"].astext != "both")
     if era == "weak":
         stmt = stmt.where(t.c.year.in_(("2020", "2021", "2022")))
     elif era == "strong":

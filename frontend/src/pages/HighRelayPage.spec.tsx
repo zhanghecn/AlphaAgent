@@ -738,11 +738,11 @@ describe("QuizRunner 动态口诀组联动(v7.2)", () => {
     expect(html).not.toContain("当前未启用");
   });
 
-  // v7.3 逐月动态组:双开月题(暖机期)显示「双开月·两组都启用」chip,当前组无论如何都算启用
-  it("双开月题(2020 暖机期):chip=双开月·两组都启用,当前组=strong 也标启用中", () => {
+  // v7.3 逐月动态组:双开月题(暖机期)显示「暖机期·历史数据不足」chip,当前组无论如何都算启用
+  it("双开月题(2020 暖机期):chip=暖机期·历史数据不足,当前组=strong 也标启用中", () => {
     const bothQ: HprQuizQuestion = { ...QUIZ_WEAK_HIT_Q, decision_date: "2020-03-10", dyn_state: "both" };
     const html = renderRunner({ questions: [bothQ], dynGroup: "strong" });
-    expect(html).toContain("双开月·两组都启用");
+    expect(html).toContain("暖机期·历史数据不足");
     expect(html).toContain("当前启用中");
     expect(html).not.toContain("当前未启用");
   });
@@ -752,7 +752,7 @@ describe("QuizRunner 动态口诀组联动(v7.2)", () => {
     delete (legacyQ as Partial<HprQuizQuestion>).dyn_state;
     const html = renderRunner({ questions: [legacyQ] });
     expect(html).toContain("弱市组题");
-    expect(html).not.toContain("双开月·两组都启用");
+    expect(html).not.toContain("暖机期·历史数据不足");
   });
 });
 
@@ -899,8 +899,8 @@ describe("QuizRunner 综合挑战卷(mixed)", () => {
         />,
       ),
     );
-    expect(html).toContain("本月双开（暖机期");
-    expect(html).toContain("强市组的这条口诀本月同样出手");
-    expect(html).toContain("双开月·两组都启用");
+    expect(html).toContain("暖机期：历史数据不够");
+    expect(html).toContain("当时按纪律出手");
+    expect(html).toContain("暖机期·历史数据不足");
   });
 });
