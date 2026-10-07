@@ -57,6 +57,7 @@ const JOB_LABELS: Record<string, string> = {
   qianlong_eod_finalize: "潜龙池定版",
   w2s_eod_finalize: "N型池定版",
   fbb_eod_finalize: "反包池定版",
+  j12_eod_finalize: "一接二盘后池",
   hpr_eod_finalize: "高位接力池定版",
 };
 

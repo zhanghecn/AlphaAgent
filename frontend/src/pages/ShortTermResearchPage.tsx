@@ -1,22 +1,25 @@
-import { LayoutGrid, Swords, Undo2 } from "lucide-react";
+import { LayoutGrid, Swords, Undo2, Zap } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
 import { FanbaoPage } from "@/pages/FanbaoPage";
+import { FirstRelayPage } from "@/pages/FirstRelayPage";
 import { HighRelayPage } from "@/pages/HighRelayPage";
 import { ShortTermOverview } from "@/pages/ShortTermOverview";
 
-type ResearchTab = "overview" | "high-relay" | "fanbao";
+type ResearchTab = "overview" | "high-relay" | "j12" | "fanbao";
 
 const RESEARCH_TABS = [
   { value: "overview", label: "主线总览", icon: LayoutGrid },
   { value: "high-relay", label: "高位接力", icon: Swords },
+  { value: "j12", label: "一接二", icon: Zap },
   { value: "fanbao", label: "断板反包", icon: Undo2 },
 ] as const;
 
 // 主线三线的子页签深链值(?view=quiz 总览答题按钮直达)
 const LINE_VIEWS: Partial<Record<ResearchTab, string[]>> = {
   "high-relay": ["live", "quiz", "backtest", "ledger", "guide"],
+  j12: ["live", "backtest", "guide"],
   fanbao: ["live", "quiz", "backtest", "ledger", "guide"],
 };
 
@@ -26,7 +29,7 @@ export function ShortTermResearchPage() {
   // 精华化(2026-10-02 终版):只留 hpr+fbb 双主线;其余旧书签一律回落总览
   // 一律回落主线总览,不 404。
   const activeTab: ResearchTab =
-    raw === "high-relay" || raw === "fanbao" ? (raw as ResearchTab) : "overview";
+    raw === "high-relay" || raw === "fanbao" || raw === "j12" ? (raw as ResearchTab) : "overview";
 
   const applyParams = (tab: ResearchTab, nextView?: string) => {
     const next = new URLSearchParams(searchParams);
@@ -43,6 +46,8 @@ export function ShortTermResearchPage() {
       <ShortTermOverview onSelect={(research, view) => applyParams(research as ResearchTab, view)} />
     ) : activeTab === "high-relay" ? (
       <HighRelayPage />
+    ) : activeTab === "j12" ? (
+      <FirstRelayPage />
     ) : (
       <FanbaoPage />
     );

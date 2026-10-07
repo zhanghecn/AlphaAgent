@@ -326,6 +326,14 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
         default_params={},
     ),
     JobDefinition(
+        id="j12_eod_finalize",
+        name="一接二盘后定版",
+        description="一接二(首板次日打二板)次日盘前池计算:首板池×G1/S1两分支候选标(竞价门7.5~9.5/7.5~8.5)+贴顶回避;口径见 first_relay.contracts(j12-v1.1)。",
+        source_id="alphaagent_local",
+        target_table="j12_pool_entries",
+        default_params={},
+    ),
+    JobDefinition(
         id="hpr_live_scan_tick",
         name="高位接力盘中扫描",
         description="每分钟现货扫描2/3连板盘前池:竞价门(A2 0~9.5/B2 4~7)、T字观察、首刻09:30~09:45触板买(仅方案点命中票)。",
@@ -614,6 +622,7 @@ JOB_CADENCES: dict[str, JobCadence] = {
     "w2s_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "w2s_signals", "updated_at"),
     "w2s_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "w2s_signals", "updated_at"),
     "hpr_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "hpr_signals", "updated_at"),
+    "j12_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "j12_pool_entries", "updated_at"),
     "hpr_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "hpr_signals", "updated_at"),
     "fbb_eod_finalize": JobCadence(CADENCE_EOD_DAILY, CATEGORY_MARKET_BARS, 1, "fbb_signals", "updated_at"),
     "fbb_live_scan_tick": JobCadence(CADENCE_INTRADAY, CATEGORY_MARKET_REALTIME, 1, "fbb_signals", "updated_at"),
@@ -654,6 +663,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
     "sync_supply_chain_edges",
     "sync_stock_daily_bars", "rebuild_stock_limit_up_daily", "sync_limit_up_pool_snapshots", ADJUSTED_DAILY_SYNC_JOB_ID, "sync_index_daily_bars", "sync_mainline_sentiment_history", "sync_sector_daily_bars",
     "hpr_eod_finalize",
+    "j12_eod_finalize",
     "fbb_eod_finalize",
     "sync_stock_minute_bars",
     "sync_stock_auction_snapshots",
@@ -787,6 +797,7 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
             "sync_stock_daily_bars",
             "rebuild_stock_limit_up_daily",
             "hpr_eod_finalize",
+            "j12_eod_finalize",
             "fbb_eod_finalize",
             "erbo_eod_finalize",
             # ── 慢段:研究增强数据(不挡池) ──
@@ -1616,6 +1627,21 @@ class DataSyncRunner:
             "rows_written": int(result.get("writes") or 0),
             "message": str(result.get("message") or "趋势弱转强盘中扫描"),
         }
+
+    def _run_j12_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """一接二盘后定版:次日首板池计算(G1/S1两分支候选标)。"""
+        del params
+        from alphaagent.server.services.first_relay import service as j12_service
+
+        self._report_progress("一接二盘后定版", current=0, total=1)
+        result = j12_service.run_eod_finalize()
+        self._report_progress(
+            "一接二盘后定版", current=1, total=1,
+            current_label=str(result.get("message") or ""),
+            rows_read=int(result.get("pool") or 0),
+            rows_written=int(result.get("pool") or 0),
+        )
+        return result
 
     def _run_hpr_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
         """高位接力盘后定版:信号推进(E3卖出) + 次日五方案点盘前池计算。"""
@@ -2748,6 +2774,7 @@ JOB_RUNNERS: dict[str, str] = {
     "w2s_eod_finalize": "_run_w2s_eod_finalize",
     "w2s_live_scan_tick": "_run_w2s_live_scan_tick",
     "hpr_eod_finalize": "_run_hpr_eod_finalize",
+        "j12_eod_finalize": "_run_j12_eod_finalize",
     "hpr_live_scan_tick": "_run_hpr_live_scan_tick",
     "fbb_eod_finalize": "_run_fbb_eod_finalize",
     "fbb_live_scan_tick": "_run_fbb_live_scan_tick",
