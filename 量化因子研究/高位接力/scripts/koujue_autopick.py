@@ -171,14 +171,24 @@ def compare_manual(E, picked, lo, hi, label):
 
 
 def main() -> None:
+    import sys
+    roll_only = "--roll" in sys.argv
     E = forge_mod.load_events()
-    # 演练1: 只给弱市段 → 机器自动立诀 → 对照真K系 + 强市段样本外(真换代场景)
-    p1 = autopick(E, "2020-01", "2023-08", "演练1·只给弱市段(2020-01~2023-08)")
-    compare_manual(E, p1, "2020-01", "2023-08", "演练1")
-    replay(E, p1, "2023-09", None, "演练1口诀 → 强市段(2023-09~今)样本外回放")
-    # 演练2: 只给强市段 → 对照八条
-    p2 = autopick(E, "2023-09", None, "演练2·只给强市段(2023-09~今)")
-    compare_manual(E, p2, "2023-09", None, "演练2")
+    if not roll_only:
+        # 演练1: 只给弱市段 → 机器自动立诀 → 对照真K系 + 强市段样本外(真换代场景)
+        p1 = autopick(E, "2020-01", "2023-08", "演练1·只给弱市段(2020-01~2023-08)")
+        compare_manual(E, p1, "2020-01", "2023-08", "演练1")
+        replay(E, p1, "2023-09", None, "演练1口诀 → 强市段(2023-09~今)样本外回放")
+        # 演练2: 只给强市段 → 对照八条
+        p2 = autopick(E, "2023-09", None, "演练2·只给强市段(2023-09~今)")
+        compare_manual(E, p2, "2023-09", None, "演练2")
+    # 演练3: 滚动逐年终审——站在每年末只用之前数据自动选诀, 下一年回放
+    print(f"\n{'=' * 22} 演练3·滚动逐年终审(柔性年门槛规则) {'=' * 22}")
+    for y_end in (2021, 2022, 2023, 2024, 2025):
+        hi = f"{y_end}-12"
+        lo_next, hi_next = f"{y_end + 1}-01", (f"{y_end + 1}-12" if y_end < 2025 else None)
+        pk = autopick(E, None, hi, f"滚动{y_end}末(数据截至{hi})")
+        replay(E, pk, lo_next, hi_next, f"滚动{y_end}末口诀 → {y_end + 1}年回放")
 
 
 main()

@@ -14,6 +14,7 @@
 """
 import itertools
 import math
+import os
 
 import numpy as np
 import pandas as pd
@@ -23,7 +24,7 @@ from alphaagent.server.services.high_relay.pool import tag_scheme, tag_weak
 pd.set_option("display.width", 250)
 
 PKL = "/tmp/relay23_tagged.pkl"
-CSV = "量化因子研究/高位接力/四进五全量明细.csv"
+CSV = os.environ.get("KOUJUE_CSV", "量化因子研究/高位接力/四进五全量明细.csv")
 
 # ---- 词汇表: 档位=现有口诀窗格语言 + 关系腿(K系精髓) ----
 CHAIN_AXES = {

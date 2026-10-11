@@ -342,6 +342,17 @@ export interface HprKoujueGroupStats {
   rows: (HprCheatRow & { dyn_stat: string })[];   // 速查表行+近12月动态成绩(多分支仅首行)
 }
 
+export interface HprKoujueHealth {
+  no: string;
+  name: string;
+  group: "weak" | "strong";
+  n24: number;                        // 近24月笔数(0=形态未出现)
+  win24: number | null;
+  avg24: number | null;
+  avg_all: number | null;             // 全时段均值(衰退对照基准)
+  status: "green" | "amber" | "red" | "idle";
+}
+
 export interface HprKoujueCurrent {
   status: "ok" | "unavailable";
   rules_version: string;
@@ -351,6 +362,7 @@ export interface HprKoujueCurrent {
   groups: { weak: HprKoujueGroupStats; strong: HprKoujueGroupStats };
   current_rows: (HprCheatRow & { dyn_stat: string })[];
   switch_history: { month: string; from: string; to: string }[];
+  health: HprKoujueHealth[];         // v7.13 口诀近况(红黄绿体检, 异常优先展示)
   caliber: string;
   reason?: string;
 }

@@ -579,6 +579,37 @@ def get_current_koujue() -> dict[str, object]:
             history.append({"month": m, "from": state, "to": s})
             state = s
 
+    # 口诀近况(v7.13 主人「精简美观」): 13条红黄绿体检——红=近24月均值<全时段25%
+    # 且近12月为负, 黄=近24月<全时段一半, 绿=其余; 无票=灰。数字与 koujue_monitor 同口径。
+    all_months = set(months)
+    m24, m12 = set(months[-24:]), set(months[-12:])
+    point_names = {**{str(s["no"]): str(s["name"]) for s in contracts.SCHEMES},
+                   **{str(s["no"]): str(s["name"]) for s in contracts.WEAK_SCHEMES}}
+    health: list[dict[str, object]] = []
+    for no in (*contracts.POINT_KEYS, *contracts.WEAK_POINT_KEYS):
+        rs_all = [float(t["r"]) for t in trades if t["p"] == no]
+        rs24 = [float(t["r"]) for t in trades if t["p"] == no and str(t["m"]) in m24]
+        rs12 = [float(t["r"]) for t in trades if t["p"] == no and str(t["m"]) in m12]
+        a_all = sum(rs_all) / len(rs_all) if rs_all else None
+        a24 = sum(rs24) / len(rs24) if rs24 else None
+        a12 = sum(rs12) / len(rs12) if rs12 else None
+        if not rs24:
+            stt = "idle"
+        elif a_all and a24 is not None and a24 < 0.25 * a_all and (a12 or 0) < 0:
+            stt = "red"
+        elif a_all and a24 is not None and a24 < 0.5 * a_all:
+            stt = "amber"
+        else:
+            stt = "green"
+        health.append({
+            "no": no, "name": point_names.get(no, no),
+            "group": "weak" if no in contracts.WEAK_POINT_KEYS else "strong",
+            "n24": len(rs24), "win24": round(sum(1 for x in rs24 if x > 0) / len(rs24), 3) if rs24 else None,
+            "avg24": round(a24, 2) if a24 is not None else None,
+            "avg_all": round(a_all, 2) if a_all is not None else None,
+            "status": stt,
+        })
+
     return {
         "status": "ok",
         "rules_version": contracts.HPR_RULES_VERSION,
@@ -590,6 +621,7 @@ def get_current_koujue() -> dict[str, object]:
         "current_rows": weak_rows if current == "weak" else
                         strong_rows if current == "strong" else weak_rows + strong_rows,
         "switch_history": history,
+        "health": health,
         "caliber": ("近12个月两组各自命中的每笔平均收益(E3,产品卖出纪律),"
                     "高的一组整组启用;月末滚动,样本不足时双开;数字动态计算"),
     }

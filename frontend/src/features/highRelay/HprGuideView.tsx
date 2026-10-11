@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchHprKoujueCurrent, fetchHprRules } from "@/api/highRelay";
+import { fetchHprKoujueCurrent, fetchHprRules, type HprKoujueHealth } from "@/api/highRelay";
 import { CheatTableRow } from "@/features/highRelay/CheatTableRow";
 import { PoseCaseChart } from "@/features/highRelay/PoseCaseChart";
 import { LoadingState } from "@/components/LoadingState";
@@ -143,6 +143,7 @@ export function HprGuideView() {
                 );
               })}
             </div>
+            <KoujueHealthList health={koujue.data.health} />
             <table className="w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b text-left text-xs text-muted-foreground">
@@ -477,6 +478,96 @@ export function HprGuideView() {
           </div>
         </div>
       </section>
+    </div>
+  );
+}
+
+// ── v7.13 口诀近况: 13条红黄绿体检——异常优先展示, 健康项折叠(主人: 精简美观,
+//    不做标签墙)。红=近24月均值<全时段25%且近12月为负 / 黄=近24月<全时段一半。 ──
+const HEALTH_NOTE: Record<string, string> = {
+  amber: "走弱",
+  red: "衰退",
+  idle: "近两年形态未出现",
+};
+
+function healthAvg(v: number | null) {
+  return v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
+}
+
+function KoujueHealthList({ health }: { health: HprKoujueHealth[] }) {
+  const [showOk, setShowOk] = useState(false);
+  const bad = health.filter((h) => h.status !== "green");
+  const ok = health.filter((h) => h.status === "green");
+  const nRed = health.filter((h) => h.status === "red").length;
+  const nAmber = health.filter((h) => h.status === "amber").length;
+  return (
+    <div className="rounded-md border border-muted px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span className="font-semibold">口诀近况</span>
+        <span className="flex items-center gap-1.5 font-mono tabular-nums text-muted-foreground">
+          <i className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          {ok.length} 绿
+          {nAmber > 0 ? (
+            <>
+              <i className="ml-1 h-1.5 w-1.5 rounded-full bg-amber-500" />
+              {nAmber} 黄
+            </>
+          ) : null}
+          {nRed > 0 ? (
+            <>
+              <i className="ml-1 h-1.5 w-1.5 rounded-full bg-rose-500" />
+              {nRed} 红
+            </>
+          ) : null}
+          <span className="text-[10px]">（近24月 vs 全时段）</span>
+        </span>
+      </div>
+      {bad.length > 0 ? (
+        <ul className="mt-1.5 space-y-1">
+          {bad.map((h) => (
+            <li key={h.no} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+              <i className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                h.status === "red" ? "bg-rose-500" : h.status === "amber" ? "bg-amber-500" : "bg-muted-foreground/40"
+              }`} />
+              <span className="font-medium">{h.no} {h.name}</span>
+              <span className="font-mono tabular-nums text-muted-foreground">
+                {h.n24 > 0
+                  ? `近2年 ${h.n24}笔·胜${Math.round((h.win24 ?? 0) * 100)}%·均${healthAvg(h.avg24)}`
+                  : "近2年无出手"}
+              </span>
+              <span className={h.status === "red" ? "text-rose-500" : "text-amber-500"}>
+                {HEALTH_NOTE[h.status]}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-1 text-xs text-muted-foreground">全部健康，无走弱条目</p>
+      )}
+      {ok.length > 0 ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowOk(!showOk)}
+            className="mt-1 text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            其余 {ok.length} 条健康 {showOk ? "▴" : "▾"}
+          </button>
+          {showOk ? (
+            <ul className="mt-1 grid gap-x-6 gap-y-0.5 md:grid-cols-2">
+              {ok.map((h) => (
+                <li key={h.no} className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <i className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+                  <span>{h.no} {h.name}</span>
+                  <span className="ml-auto font-mono tabular-nums">
+                    近2年 {h.n24}笔·均{healthAvg(h.avg24)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      ) : null}
     </div>
   );
 }
