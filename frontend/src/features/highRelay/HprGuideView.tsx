@@ -530,13 +530,13 @@ function KoujueHealthList({ health }: { health: HprKoujueHealth[] }) {
                 h.status === "red" ? "bg-rose-500" : h.status === "amber" ? "bg-amber-500" : "bg-muted-foreground/40"
               }`} />
               <span className="font-medium">{h.no} {h.name}</span>
-              <span className="font-mono tabular-nums text-muted-foreground">
+              <span className={h.status === "red" ? "text-rose-500" : "text-amber-500"}>
+                {HEALTH_NOTE[h.status]}
+              </span>
+              <span className="ml-auto font-mono tabular-nums text-muted-foreground">
                 {h.n24 > 0
                   ? `近2年 ${h.n24}笔·胜${Math.round((h.win24 ?? 0) * 100)}%·均${healthAvg(h.avg24)}`
                   : "近2年无出手"}
-              </span>
-              <span className={h.status === "red" ? "text-rose-500" : "text-amber-500"}>
-                {HEALTH_NOTE[h.status]}
               </span>
             </li>
           ))}
