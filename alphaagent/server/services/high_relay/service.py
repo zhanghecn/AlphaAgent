@@ -622,8 +622,7 @@ def get_current_koujue() -> dict[str, object]:
                         strong_rows if current == "strong" else weak_rows + strong_rows,
         "switch_history": history,
         "health": health,
-        "caliber": ("近12个月两组各自命中的每笔平均收益(E3,产品卖出纪律),"
-                    "高的一组整组启用;月末滚动,样本不足时双开;数字动态计算"),
+        "caliber": "近12月两组每笔平均收益(E3)高者整组启用;月末滚动,样本不足双开",
     }
 
 

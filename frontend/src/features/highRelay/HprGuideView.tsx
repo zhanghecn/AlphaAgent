@@ -66,8 +66,7 @@ export function HprGuideView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-sm font-semibold">高位接力 · 规则定稿 {rules.rules_version}</span>
           <span className="text-xs text-muted-foreground">
-            两组口诀：强市组八条(A1~C3,2023-26 定型验证)+ 弱市组五条(K 系,2020-22 定型)——
-            近一年哪组赚得多就用哪组(见「动态口诀组」);研究文档见 量化因子研究/高位接力/打板口诀卡.md 与 弱市口诀卡v5.md
+            强市组八条(A1~C3)+ 弱市组五条(K 系)——按行情自动切换,当前启用见下方「动态口诀组」
           </span>
         </div>
         <div className="mt-2 border-t pt-2 text-xs leading-5 text-muted-foreground">
@@ -212,8 +211,9 @@ export function HprGuideView() {
           地基姿态图解（捡尸 B2 / 贴零温开 B3 的附加腿，v6.10）
         </div>
         <div className="mb-2 text-xs text-muted-foreground">
-          看首板前一天那根K线（箭头「地基日」）和 20日线（蓝线）的位置——
-          站线上、骑线的，接；贴线的、掉线下的，不接。四张图=真实特征票K线（地基日前12根~买入日）。
+          看首板前一天那根K线（箭头「地基日」）与 20 日线的位置——
+          站线上（最低价离线≥2%）、骑线（线穿过K线）的接；贴线（在线上&lt;2%）、掉线下（最高价也在线下）的不接。
+          四张图＝真实特征票K线（地基日前12根~买入日）。
         </div>
         {rules.pose_cases && rules.pose_cases.length > 0 ? (
           <div className="grid gap-3 md:grid-cols-2">
@@ -244,10 +244,7 @@ export function HprGuideView() {
  最低价离线≥2%        线拦腰穿过K线      最低价贴线<2%      最高价也在线下
       ✅接                ✅接              ❌不接             ❌不接`}</pre>
         )}
-        <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
-          数字口径：最低价距20日线≥2%＝站线上；最低价在线下且最高价在线上＝骑线；
-          最低价在线上但离线&lt;2%＝贴线；最高价也在线下＝掉线下。
-        </p>
+
       </section>
 
       {/* v7.13 低频区折叠(主人「精简」指令): 口诀卡全文/机制逐条/留档/锚点默认收起,
