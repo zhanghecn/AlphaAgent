@@ -75,8 +75,11 @@ def autopick(E, lo, hi, label, max_koujue=8):
             return None
         t3 = np.sort(v)[:-3].mean() if n > 3 else v.mean()
         yrs = pd.Series(v).groupby(yr[mv])
+        per_year = {int(y): (int(len(g)), float((g > 0).mean()), float(g.mean()))
+                    for y, g in yrs}
         return dict(n=n, avg=v.mean(), win=(v > 0).mean(), t3=t3,
-                    worst_yr=yrs.mean().min(), idx=set(E.index[mv]))
+                    worst_yr=yrs.mean().min(), idx=set(E.index[mv]),
+                    per_year=per_year)
 
     picked, used_idx = [], set()
     cand = []
@@ -84,9 +87,17 @@ def autopick(E, lo, hi, label, max_koujue=8):
         stt = stats(t[5])
         if stt is None:
             continue
-        # 硬过滤(八门六门: n/胜/剔3/最差年/R6/边界扰动比≥0.5)
+        # 硬过滤 v3(主人2026-10-11柔性年门槛: 年笔数3/9/0都正常=行情差异, 不硬卡):
+        # ①n≥3的年份胜率须≥60%(1~2笔小年样本不够不检验) ②最大年份占比≤60%(防一年撑格)
+        # ③有票年份数≥2 + 原五门(n/总胜/剔3/最差年/R6)
+        years = stt["per_year"]
+        testable = [wy for ny, wy, _a in years.values() if ny >= 3]
+        ok_years = bool(testable) and all(wy >= 0.60 for wy in testable)
+        max_share = max(ny for ny, _w, _a in years.values()) / stt["n"]
+        ok_spread = len(years) >= 2 and max_share <= 0.60
         if (stt["n"] < 10 or stt["win"] < 0.60 or stt["t3"] <= 0
-                or stt["worst_yr"] <= -10 or stt["avg"] > 13 or bp < 0.5):
+                or stt["worst_yr"] <= -10 or stt["avg"] > 13
+                or not ok_years or not ok_spread):
             continue
         cand.append((stt["t3"] * math.log(stt["n"]), t, stt, bp))
     cand.sort(key=lambda x: -x[0])
@@ -103,8 +114,10 @@ def autopick(E, lo, hi, label, max_koujue=8):
     print(f"候选{len(cards)} → 过滤后{len(cand)} → 自动立诀 {len(picked)} 条:")
     for t, stt, fam, bp in picked:
         desc = forge_mod.describe(t, lambda m: (stt["n"], stt["avg"], stt["win"], stt["t3"]))
-        print(f"  [{fam}] {desc}"
-              f" | 最差年{stt['worst_yr']:+.1f} 扰动比{bp:.2f}")
+        yr_txt = " ".join(f"{y}:{ny}笔胜{wy:.0%}"
+                          for y, (ny, wy, _a) in sorted(stt["per_year"].items()))
+        print(f"  [{fam}] {desc}")
+        print(f"        分年 {yr_txt} | 扰动比{bp:.2f}")
     return picked
 
 
