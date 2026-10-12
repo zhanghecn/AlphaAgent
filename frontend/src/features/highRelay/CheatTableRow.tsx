@@ -17,7 +17,7 @@ export function CheatTableRow({
   row: HprCheatRow;
   showName?: boolean;
   failCols?: string[];
-  statText?: string;   // 成绩列覆盖文本(动态口诀组传近12月动态成绩;缺省=row.stat研究锚定)
+  statText?: string;   // 成绩列覆盖文本(动态口诀组传近窗动态成绩;缺省=row.stat研究锚定)
 }) {
   const fail = (col: string) => (failCols ?? []).includes(col);
   const yangCls = fail("yang")

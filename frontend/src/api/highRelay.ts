@@ -317,6 +317,7 @@ export interface HprRulesPayload {
   cheat_rows: HprCheatRow[];             // 速查表(规则页主表;答题讲解卡取命中行)
   weak_cheat_rows: HprCheatRow[];        // 弱市组K系速查表(v7.2 起规则页并列渲染)
   weak_point_boards: Record<string, string>;  // K2→打4板(K系板位归属)
+  dyn_group_window: number;                   // 动态组滚动窗宽月数(v7.15=9,机制区算法说明用)
   falsified_rules: string[];
   risk_notes: string[];
   ths_pool_conditions: Record<string, string>;

@@ -147,7 +147,7 @@ export function HprGuideView() {
 
       {/* v7.13 速查表合一(主人「精简」指令): 原「强市速查表/弱市速查表/动态组current_rows」
           三张同构表(31行,70%重复)合并为一张 13 条总表——组标题行分区, 板位看「组」列;
-          动态成绩(近12月/近2年)由上方动态口诀组卡片与口诀近况承担, 表内只放定型成绩 */}
+          动态成绩(近窗/近2年)由上方动态口诀组卡片与口诀近况承担, 表内只放定型成绩 */}
       <section className="rounded-lg border p-4" aria-label="口诀速查表">
         <div className="mb-1 text-sm font-semibold">
           口诀速查表 · 全部 13 条
@@ -310,24 +310,65 @@ export function HprGuideView() {
       <section className="rounded-lg border p-4" aria-label="机制逐条">
         <details>
           <summary className="cursor-pointer text-sm font-semibold">
-            机制逐条（池 / 回避 / 买 / 卖，含证据）
+            机制逐条（口诀切换算法 / 池 / 回避 / 买 / 卖）
           </summary>
-        <div className="mt-3 space-y-4">
+
+        {/* ── v7.16 口诀切换算法(主人「把口诀计算的规则算法写上去」): 动态组怎么算 ── */}
+        <div className="mt-3 rounded-md border bg-muted/30 px-4 py-3.5">
+          <div className="text-base font-semibold">口诀怎么算出来的 —— 每月初算一次的切换算法</div>
+          <p className="mt-1.5 text-sm leading-7">
+            全部口诀分两组：<span className="font-medium">强市组八条(A1~C3)</span> 与{" "}
+            <span className="font-medium">弱市组五条(K 系)</span>。每月初用「上月末为止」的数据算一遍，哪组强整组启用：
+          </p>
+          <ol className="mt-2.5 space-y-2 text-sm leading-7">
+            <li>
+              <span className="font-medium">① 收数</span>——两组各自最近 {rules.dyn_group_window} 个交易月里，每一笔口诀出手的收益(E3)。
+            </li>
+            <li>
+              <span className="font-medium">② 剔妖</span>——每组剔掉最猛的 3 笔再算：一笔 +40 的妖票证明不了时代，剔掉才算真水平。
+            </li>
+            <li>
+              <span className="font-medium">③ 求平均</span>——剩下的收益求每笔平均。
+            </li>
+            <li>
+              <span className="font-medium">④ 定组</span>——平均高的整组启用；不足 3 笔或平均为负的组不启用；两组都不行＝双开。
+            </li>
+            <li>
+              <span className="font-medium">⑤ 管一个月</span>——这个结果管本月整月的出手资格，下月初重算。
+            </li>
+          </ol>
+          <div className="mt-3 border-t pt-2.5 text-sm leading-7">
+            <span className="font-medium">为什么是这套参数：</span>
+            判据(剔 3)、窗宽({rules.dyn_group_window} 月)、门槛(3 笔)共 90 种组合全部实测过——判据怎么选差别很小，
+            真正起作用的是「9 月窗」(切得快又不来回翻)和「低门槛」(数据少的月份也能单选活组，不被迫双开)。
+            七年实测 <span className="font-mono">177 笔 · 胜 76% · 每笔 +11.55</span>，最差年 +139。
+          </div>
+          <div className="mt-1.5 text-sm leading-7">
+            <span className="font-medium">无未来函数：</span>
+            判这个月只用这个月之前的数据，当月成绩不进当月判定。六年半实测只切过两次：
+            2020-03 起用弱市组、2023-06 起用强市组（当前）。
+          </div>
+        </div>
+
+        {/* ── 池/回避/买/卖 机制组(v7.16 字体放大+卡片化, 后端 RULES 单源) ── */}
+        <div className="mt-4 space-y-3">
           {mechanicGroups.map((g) => {
             const style = GROUP_STYLES[g.group] ?? GROUP_STYLES.pool;
             return (
-              <div key={g.title}>
-                <div className="mb-1 flex items-center gap-2">
-                  <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${style.badge}`}>
+              <div key={g.title} className="rounded-md border px-4 py-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className={`rounded px-2 py-0.5 text-xs font-medium ${style.badge}`}>
                     {style.label}
                   </span>
-                  <span className="text-xs font-medium">{g.title}</span>
+                  <span className="text-sm font-medium">{g.title}</span>
                 </div>
-                <ul className="space-y-1.5">
+                <ul className="space-y-2">
                   {g.items.map((it) => (
-                    <li key={it.no} className="whitespace-pre-line text-xs leading-5">
+                    <li key={it.no} className="whitespace-pre-line text-sm leading-6">
                       <span className="font-mono text-muted-foreground">{it.no}.</span> {it.rule}
-                      <span className="block pl-5 text-muted-foreground">依据:{it.evidence}</span>
+                      <span className="mt-0.5 block pl-6 text-[13px] leading-6 text-muted-foreground">
+                        依据:{it.evidence}
+                      </span>
                     </li>
                   ))}
                 </ul>
