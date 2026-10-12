@@ -514,8 +514,9 @@ def get_current_koujue() -> dict[str, object]:
     """获取最新口诀(v7.0 动态口诀组:近一年哪组口诀赚得多就用哪组)。
 
     从最新物化报告的 dyn_trades 逐笔表滚动汇总近 DYN_GROUP_WINDOW 个月两组成绩,
-    数字全部动态计算不写死;当前组=近窗每笔平均E3高的一组(样本不足时双开)。
-    同时下发当前组的速查表行(静态研究锚定+近12月动态成绩双列)与切换历史。"""
+    数字全部动态计算不写死;当前组=物化月状态最后一月(v7.15 判据=近9月剔3均值,
+    详见 contracts.dyn_month_states)。
+    同时下发当前组的速查表行(静态研究锚定+近窗动态成绩双列)与切换历史。"""
     row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
     trades = list((row or {}).get("dyn_trades") or [])
     # v7.3 单一事实源:月状态读物化 dyn_month_states(与题库/回测/交割单同一份)
@@ -570,7 +571,7 @@ def get_current_koujue() -> dict[str, object]:
     strong_rows = rows_with_dyn(contracts.CHEAT_ROWS)
 
     # 切换历史(v7.3):直接读物化月状态序列的变化点——每年真实判定口径
-    # (从 2020-01 起步数据滚动:暖机期 both→2020-08 weak→2023-09 strong,v7.8 上月末口径)
+    # (v7.15 剔3/9月/门槛3:暖机期 both→2020-03 weak→2023-06 strong,上月末口径)
     history: list[dict[str, str]] = []
     state = "both"
     for m in sorted(states):
@@ -622,7 +623,7 @@ def get_current_koujue() -> dict[str, object]:
                         strong_rows if current == "strong" else weak_rows + strong_rows,
         "switch_history": history,
         "health": health,
-        "caliber": "近12月两组每笔平均收益(E3)高者整组启用;月末滚动,样本不足双开",
+        "caliber": "近9月两组剔掉最猛3笔后的每笔平均收益高者整组启用;月末滚动,样本不足双开",
     }
 
 

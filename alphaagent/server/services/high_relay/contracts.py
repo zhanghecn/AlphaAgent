@@ -34,7 +34,12 @@
 
 from __future__ import annotations
 
-HPR_RULES_VERSION = "hpr-v7.14"  # v7.14=规则页口诀近况+全页精简(主人2026-10-11「贯通+界面精简美观」):
+HPR_RULES_VERSION = "hpr-v7.16"  # v7.16=规则页机制逐条重构(主人2026-10-12「机制逐条重构并优化 字体弄大点 把口诀计算的规则算法写上去」):
+# 前端呈现层: ①机制区新增「口诀怎么算出来的」算法块(剔3/9月窗/门槛3逐步人话+90格穷举依据+无未来函数声明+实测切换史,窗宽数字随后端dyn_group_window动态);②池/回避/买/卖机制组字体text-xs→text-sm放大+卡片化,依据行text-[13px];③HprRulesPayload补dyn_group_window字段。判定/锚点/题库标签零漂移纯呈现层,不记KOJUE_CHANGELOG(纯呈现不记档);# v7.15=动态口诀组判据换剔3口径+窗12→9月+门槛8→3笔(主人2026-10-12「切换器需要优化 胜率/收益/笔数/综合是否每个组合都试过」→90格穷举判据6×窗宽5×门槛3全跑):
+# ①判据=每组近9交易月命中笔剔掉最高3笔后的每笔均值(妖票不算时代证据,与肥格剔3纪律同一把尺;判据维度主效应平坦:sum/trim3/mean/meanwin/median/win 七年均值9.7~9.9相差0.2内,真杠杆是窗宽9=+10.49>>12=+10.11与门槛3=+10.76>>8=+9.16);
+# ②冠军配置trim3/9/3七年177笔76%+11.55最差年+139(旧mean/12/8=187笔72%+9.79最差年+57),2023年+96→+218接近完美后见+220,切换仍2次不震荡,当前状态strong不变今日零行为差;
+# ③与旧口径状态路径全史只差8个月:2020-03~07(暖机期不再双开提前单选弱市组,避开2020上半年强组毒票,2020年+58→+150)+2023-06~08(提前3个月切强市组,正好接住2023审计漏掉的肉:中马传动+42/迪生力+12/润达+2/国创+18/我乐+45);
+# ④诚实折扣:六年半只有两次时代切换,90格挑冠军有「对着两次事件调参」成分——但机制结构性(短窗=边界反应快/低门槛=暖机不双开)+6/9/12窗全高原非孤峰+切换次数不增;题库2023-06~08题标签随月状态变(q45),交割单/回测dyn_sim物化随rebuild对齐;# v7.14=规则页口诀近况+全页精简(主人2026-10-11「贯通+界面精简美观」):
 # ①get_current_koujue新增health字段(13条近24月vs全时段红黄绿,口径同koujue_monitor:红=近24月均<全时段25%且近12月负/黄=近24月<全时段一半/无票=idle),前端动态口诀组区新增「口诀近况」块=汇总行+异常直列+健康折叠(主人:精简美观不做标签墙);
 # ②规则页精简重构:三张同构速查表(31行70%重复)合一为13条总表(组标题行分区,动态数字归上方卡片+近况块)+口诀卡全文/机制逐条/留档/锚点四区details折叠,核心可见13700字→3200字;
 # ③内容层去冗余:速查表「不看/不限/—」统一「—」(后端单源含答题讲解)+C2地基日42字→27字(判定语义逐字)+风险声明v4.4旧数字/已退役「四板便捷版」更新为动态切换实盘口径187笔+caliber压缩;
@@ -293,9 +298,9 @@ WEAK_CHEAT_ROWS: list[dict[str, str]] = [
 ]
 
 # ── 动态口诀组(v7.0 机制配置;「近一年哪组口诀赚得多就用哪组」,每月末看一次) ──
-DYN_GROUP_WINDOW = 12   # 滚动窗口月数(参数高原9~15,12为高原中心)
-DYN_GROUP_METRIC = "e3_avg"   # 判据=近窗每笔平均E3收益(胜率判据+10.49 vs 均值+11.32,取均值)
-DYN_GROUP_MIN_N = 8     # 组级样本门槛(研究定版:n5/8/12等价,取8;不足=双开)
+DYN_GROUP_WINDOW = 9    # 滚动窗口月数(v7.15 90格穷举:9月窗=边界反应快且不震荡,6窗十年切/12窗慢3个月/15+更差)
+DYN_GROUP_METRIC = "e3_trim3"   # 判据=剔最高3笔后的每笔均值(v7.15:妖票不算时代证据,与肥格剔3纪律同尺;判据维度主效应平坦)
+DYN_GROUP_MIN_N = 3     # 组级样本门槛(v7.15:低门槛让暖机/稀疏期单选活组而非双开;不足=双开)
 
 # ── 口诀变更日志(主人2026-10-11拍板: 每次立规/退役/扩窗/改判留结构化档案;
 #    判定层变更必记, 纯文案/呈现层不记。详证见 HPR_RULES_VERSION 版本注释,
@@ -336,6 +341,10 @@ KOJUE_CHANGELOG: list[dict[str, str]] = [
     {"ver": "v7.13", "date": "2026-10-11", "koujue": "K4/K9", "action": "检验记录",
      "evidence": "时代矩阵确认弱市专属且强市段衰退(K4近24月5笔20%-6.0/K9近24月10笔10%-0.7);"
                  "动态组2023-09起停用无实盘影响;下次弱市时代来临前弱市组需重挖补货(锻造炉+八门流程)"},
+    {"ver": "v7.15", "date": "2026-10-12", "koujue": "切换器", "action": "改判据",
+     "evidence": "90格穷举(判据6×窗宽5×门槛3):剔3/9月/门槛3 七年177笔76%+11.55最差年+139"
+                 "(旧每笔均值/12月/门槛8:187笔72%+9.79最差年+57);2023年+96→+218;"
+                 "全史状态只差8个月=暖机期2020-03~07+切换边界2023-06~08;切换仍2次,当前strong不变"},
 ]
 
 
@@ -347,10 +356,15 @@ def dyn_month_states(trades: list[dict[str, object]],
 
     trades = dyn_trades 轻表逐笔 [{m:月,g:组(weak/strong),p:口诀,r:E3%}];
     判据=上月末为止近 window 个交易月(不含当月——月初开盘前只有这些数据,
-    与实时推荐「最后一月状态管现在」同语义),两组各自命中笔的 E3 均值高者
-    整组启用,样本不足 min_n 笔/均非正=双开(both)。
-    实测(v7.8 不含当月口径):2020-01~07 both(暖机)/2020-08~2023-08 weak/
-    2023-09 起 strong。"""
+    与实时推荐「最后一月状态管现在」同语义),两组各自命中笔剔掉最高3笔后的
+    E3 均值(v7.15 剔3口径:妖票不算时代证据)高者整组启用,
+    样本不足 min_n 笔/均非正=双开(both)。
+    实测(v7.15 剔3/9月/门槛3):2020-01~02 both(暖机)/2020-03~2023-05 weak/
+    2023-06 起 strong。"""
+    def _trim3_avg(rs: list[float]) -> float:
+        core = sorted(rs)[:-3] if len(rs) > 3 else rs
+        return sum(core) / len(core)
+
     w = int(window or DYN_GROUP_WINDOW)
     n_min = int(min_n or DYN_GROUP_MIN_N)
     tm = sorted({str(t["m"]) for t in trades})
@@ -359,8 +373,8 @@ def dyn_month_states(trades: list[dict[str, object]],
         ms = set(tm[max(0, i - w):i])
         wk_rs = [float(t["r"]) for t in trades if str(t["m"]) in ms and t["g"] == "weak"]
         st_rs = [float(t["r"]) for t in trades if str(t["m"]) in ms and t["g"] == "strong"]
-        wa = sum(wk_rs) / len(wk_rs) if wk_rs else None
-        sa = sum(st_rs) / len(st_rs) if st_rs else None
+        wa = _trim3_avg(wk_rs) if wk_rs else None
+        sa = _trim3_avg(st_rs) if st_rs else None
         if len(wk_rs) >= n_min and len(st_rs) >= n_min and wa is not None and sa is not None:
             out[m] = "weak" if wa > sa else "strong"
         elif len(wk_rs) >= n_min and wa is not None and wa > 0:

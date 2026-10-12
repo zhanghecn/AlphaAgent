@@ -99,7 +99,7 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
                     "A2前10日腿(v6.3):首板前10个交易日涨幅≥10%(近端透支)不命中,阳组专属。"
                     "v7.1:事件回放含2020起(题库弱市组段);主统计2023+;弱市组K系另行"
                     "summary(K*/weak_all=2023+段,weak_era=2020-22定型段);动态口诀组="
-                    "近12月两组均值高者整组启用。"),
+                    "近9月两组剔3均值高者整组启用(v7.15)。"),
         "group4_labels": contracts.GROUP4_LABELS,
         "point_labels": contracts.POINT_LABELS,
         "point_levels": contracts.POINT_LEVELS,
@@ -187,7 +187,7 @@ def _dyn_trades(done: pd.DataFrame) -> list[dict[str, object]]:
 
     每笔 {m:月, g:组(weak/strong), p:口诀编号, r:E3%};组归属——弱市组(K系)优先,
     双命中的票归弱市组(研究 v5 口径,窄格先拿);强市组=方案点命中且非 K 系。
-    get_current_koujue 按此表滚动汇总近12月两组成绩与切换判断,数字永远动态。"""
+    get_current_koujue 按此表滚动汇总近窗两组成绩与切换判断,数字永远动态。"""
     out: list[dict[str, object]] = []
     for _, r in done.iterrows():
         e3 = r.get("E3%")
