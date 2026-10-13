@@ -581,22 +581,6 @@ class TestServiceImports:
         assert callable(compute_sector_period_scores)
         assert callable(persist_scores)
 
-    def test_research_sector_graph_importable(self):
-        from alphaagent.server.services.research_sector_graph import (
-            compute_sector_relation_edges,
-            persist_edges,
-        )
-        assert callable(compute_sector_relation_edges)
-        assert callable(persist_edges)
-
-    def test_research_chain_graph_importable(self):
-        from alphaagent.server.services.research_chain_graph import (
-            compute_industry_chain_graph,
-            persist_chain_graph,
-        )
-        assert callable(compute_industry_chain_graph)
-        assert callable(persist_chain_graph)
-
     def test_research_stock_profile_importable(self):
         from alphaagent.server.services.research_stock_profile import (
             get_stock_workbench,

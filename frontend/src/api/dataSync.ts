@@ -186,7 +186,7 @@ export interface BatchSchedule {
   id: string;
   name: string;
   cron: string;
-  action?: "sync" | "low_suction_live_scan" | string;
+  action?: "sync" | string;
   job_ids: string[];
   enabled: boolean;
   concurrency: number;

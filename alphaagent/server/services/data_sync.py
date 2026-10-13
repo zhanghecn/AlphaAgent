@@ -54,13 +54,6 @@ from alphaagent.server.services.low_suction import (
     forward_security_repository,
 )
 from alphaagent.server.services.a_share_universe import is_eligible_main_board
-from alphaagent.server.services.low_suction.daily_picks_service import (
-    LIVE_SCAN_INTERVAL_SECONDS as LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS,
-    LiveScanAlreadyRunningError,
-    TAIL_FINAL_RETRY_END as LOW_SUCTION_TAIL_FINAL_RETRY_END,
-    TAIL_FINAL_TIME as LOW_SUCTION_TAIL_FINAL_TIME,
-    refresh_live_recommendations,
-)
 
 logger = logging.getLogger(__name__)
 INTERRUPTED_SYNC_JOB_MESSAGE = "API process restarted before this sync job finished."
@@ -695,7 +688,6 @@ RETIRED_DEFAULT_JOB_IDS = {
     "erbo_eod_finalize",
     "erbo_live_scan_tick",
 }
-LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID = "low_suction_live_snapshot_refresh"
 
 DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     {
@@ -706,15 +698,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "enabled": True,
         "concurrency": 1,
         "job_ids": ["sync_stock_auction_snapshots"],
-    },
-    {
-        "id": "low_suction_live_scan",
-        "name": "实时低吸扫描（每分钟）",
-        "cron": "* 9-15 * * 1-5",
-        "action": "low_suction_live_scan",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": [],
     },
     {
         "id": "intraday_market_snapshot",
@@ -816,20 +799,11 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
 ]
 
-LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID = "low_suction_daily_backtest_rerun"
-QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID = "qianlong_backtest_rerun"
-W2S_BACKTEST_RERUN_BATCH_JOB_ID = "w2s_backtest_rerun"
 HPR_BACKTEST_RERUN_BATCH_JOB_ID = "hpr_backtest_rerun"
 FBB_BACKTEST_RERUN_BATCH_JOB_ID = "fbb_backtest_rerun"
-ERBO_BACKTEST_RERUN_BATCH_JOB_ID = "erbo_backtest_rerun"
 INTERNAL_BATCH_JOB_IDS = {
-    LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID,
-    LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID,
-    QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID,
-    W2S_BACKTEST_RERUN_BATCH_JOB_ID,
     HPR_BACKTEST_RERUN_BATCH_JOB_ID,
     FBB_BACKTEST_RERUN_BATCH_JOB_ID,
-    ERBO_BACKTEST_RERUN_BATCH_JOB_ID,
 }
 STALE_BATCH_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+成功\s*/\s*(\d+)\s+失败\s*$")
 
@@ -1517,61 +1491,9 @@ class DataSyncRunner:
             )
         return result
 
-    def _run_qianlong_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
-        """潜龙首板盘后定版:信号推进 + 次日盘前池计算。"""
-        del params
-        from alphaagent.server.services.qianlong.eod_finalize import run_eod_finalize
 
-        self._report_progress("潜龙首板盘后定版", current=0, total=1)
-        result = run_eod_finalize()
-        self._report_progress(
-            "潜龙首板盘后定版", current=1, total=1,
-            current_label=str(result.get("message") or ""),
-            rows_read=int(result.get("rows_read") or 0),
-            rows_written=int(result.get("rows_written") or 0),
-        )
-        return result
 
-    def _run_qianlong_live_scan_tick(self, params: dict[str, Any]) -> dict[str, Any]:
-        """潜龙首板盘中扫描(每分钟):触及检测/收住确认/模拟买入。"""
-        del params
-        from alphaagent.server.services.qianlong.live_scan import run_live_scan_tick
 
-        result = run_live_scan_tick()
-        return {
-            "status": str(result.get("status") or "ok"),
-            "rows_read": int(result.get("pool") or 0),
-            "rows_written": int(result.get("writes") or 0),
-            "message": str(result.get("message") or "潜龙首板盘中扫描"),
-        }
-
-    def _run_w2s_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
-        """趋势弱转强盘后定版:信号推进 + 次日三组盘前池计算。"""
-        del params
-        from alphaagent.server.services.weak_to_strong.eod_finalize import run_eod_finalize
-
-        self._report_progress("趋势弱转强盘后定版", current=0, total=1)
-        result = run_eod_finalize()
-        self._report_progress(
-            "趋势弱转强盘后定版", current=1, total=1,
-            current_label=str(result.get("message") or ""),
-            rows_read=int(result.get("rows_read") or 0),
-            rows_written=int(result.get("rows_written") or 0),
-        )
-        return result
-
-    def _run_w2s_live_scan_tick(self, params: dict[str, Any]) -> dict[str, Any]:
-        """趋势弱转强盘中扫描(每分钟):竞价过滤/+7% 触发/封板确认。"""
-        del params
-        from alphaagent.server.services.weak_to_strong.live_scan import run_live_scan_tick
-
-        result = run_live_scan_tick()
-        return {
-            "status": str(result.get("status") or "ok"),
-            "rows_read": int(result.get("pool") or 0),
-            "rows_written": int(result.get("writes") or 0),
-            "message": str(result.get("message") or "趋势弱转强盘中扫描"),
-        }
 
     def _run_j12_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
         """一接二盘后定版:次日首板池计算(G1/S1两分支候选标)。"""
@@ -1644,33 +1566,7 @@ class DataSyncRunner:
             "message": str(result.get("message") or "断板反包盘中扫描"),
         }
 
-    def _run_erbo_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
-        """二波反包盘后定版:信号推进 + 次日A/B档盘前池计算。"""
-        del params
-        from alphaagent.server.services.erbo.eod_finalize import run_eod_finalize
 
-        self._report_progress("二波反包盘后定版", current=0, total=1)
-        result = run_eod_finalize()
-        self._report_progress(
-            "二波反包盘后定版", current=1, total=1,
-            current_label=str(result.get("message") or ""),
-            rows_read=int(result.get("rows_read") or 0),
-            rows_written=int(result.get("rows_written") or 0),
-        )
-        return result
-
-    def _run_erbo_live_scan_tick(self, params: dict[str, Any]) -> dict[str, Any]:
-        """二波反包盘中扫描(每分钟):T字观察/触板即买(无首刻窗)。"""
-        del params
-        from alphaagent.server.services.erbo.live_scan import run_live_scan_tick
-
-        result = run_live_scan_tick()
-        return {
-            "status": str(result.get("status") or "ok"),
-            "rows_read": int(result.get("pool") or 0),
-            "rows_written": int(result.get("writes") or 0),
-            "message": str(result.get("message") or "二波反包盘中扫描"),
-        }
 
     def _run_sync_limit_up_pool_snapshots(self, params: dict[str, Any]) -> dict[str, Any]:
         """Archive the five EastMoney limit-up pools for dashboard and review reads."""
@@ -2748,12 +2644,6 @@ JOB_RUNNERS: dict[str, str] = {
 _scheduler_thread: threading.Thread | None = None
 _last_scheduler_pass_at: datetime | None = None
 _scheduler_stop = threading.Event()
-_low_suction_schedule_lock = threading.Lock()
-_low_suction_schedule_running = False
-_low_suction_tail_final_pending_date: date | None = None
-_low_suction_tail_final_attempted_date: date | None = None
-_low_suction_tail_final_retry_after: datetime | None = None
-
 
 # ─── Error class ──────────────────────────────────────────────────────────
 
@@ -3209,7 +3099,7 @@ def _assert_schedule_jobs(action: str, job_ids: list[str]) -> None:
 
 def _schedule_action(payload: dict[str, Any]) -> str:
     action = str(payload.get("action") or "sync").strip()
-    if action not in {"sync", "low_suction_live_scan"}:
+    if action not in {"sync"}:
         raise DataSyncError(f"Unsupported schedule action: {action}")
     return action
 
@@ -3296,63 +3186,9 @@ def run_schedule_now(schedule_id: str) -> dict[str, Any]:
     if not row:
         raise DataSyncError(f"schedule {schedule_id} not found")
     action = str(row.get("action") or "sync")
-    if action == "low_suction_live_scan":
-        snapshot = _run_schedule_action(dict(row), raise_errors=True) or {}
-        return _low_suction_live_scan_schedule_status(schedule_id, snapshot)
     return _start_sync_schedule(dict(row), source="manual")
 
 
-def _low_suction_live_scan_schedule_status(
-    schedule_id: str,
-    snapshot: dict[str, Any],
-) -> dict[str, Any]:
-    """Represent one low-suction scan as a batch-like response."""
-
-    saved = _low_suction_live_snapshot_saved(snapshot)
-    status = "succeeded" if saved else "skipped"
-    trend_count = _low_suction_family_count(snapshot.get("trend"))
-    oversold_count = _low_suction_family_count(snapshot.get("oversold"))
-    rows_read = trend_count + oversold_count
-    created_at = _utc_now_iso()
-    message = _low_suction_live_scan_status_message(snapshot, saved=saved)
-    return {
-        "id": f"low_suction_live_scan_{uuid4().hex}",
-        "profile": "low_suction_live_scan",
-        "source": "manual",
-        "schedule_id": schedule_id,
-        "concurrency": 1,
-        "status": status,
-        "created_at": created_at,
-        "started_at": created_at,
-        "finished_at": created_at,
-        "current_job_id": None,
-        "total_jobs": 1,
-        "completed_jobs": 1,
-        "succeeded_jobs": 1 if saved else 0,
-        "failed_jobs": 0,
-        "skipped_jobs": 0 if saved else 1,
-        "rows_read": rows_read,
-        "rows_written": 1 if saved else 0,
-        "progress_pct": 100.0,
-        "message": message,
-        "jobs": [
-            {
-                "job_id": "low_suction_live_scan",
-                "status": status,
-                "started_at": created_at,
-                "finished_at": created_at,
-                "rows_read": rows_read,
-                "rows_written": 1 if saved else 0,
-                "progress_current": 1,
-                "progress_total": 1,
-                "progress_pct": 100.0,
-                "stage": str(snapshot.get("status") or ""),
-                "current_label": "",
-                "sample_items": [],
-                "message": message,
-            }
-        ],
-    }
 
 
 def _start_sync_schedule(row: dict[str, Any], *, source: str) -> dict[str, Any]:
@@ -3591,20 +3427,10 @@ def _run_sync_batch(
         )
         _patch_batch(batch_id, {"current_job_id": job_id, "message": f"正在同步 {job_id}"})
         try:
-            if job_id == LOW_SUCTION_DAILY_BACKTEST_RERUN_BATCH_JOB_ID:
-                result = _run_low_suction_daily_backtest_rerun_batch_job()
-            elif job_id == QIANLONG_BACKTEST_RERUN_BATCH_JOB_ID:
-                result = _run_qianlong_backtest_rerun_batch_job()
-            elif job_id == W2S_BACKTEST_RERUN_BATCH_JOB_ID:
-                result = _run_w2s_backtest_rerun_batch_job()
-            elif job_id == HPR_BACKTEST_RERUN_BATCH_JOB_ID:
+            if job_id == HPR_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_hpr_backtest_rerun_batch_job()
             elif job_id == FBB_BACKTEST_RERUN_BATCH_JOB_ID:
                 result = _run_fbb_backtest_rerun_batch_job()
-            elif job_id == ERBO_BACKTEST_RERUN_BATCH_JOB_ID:
-                result = _run_erbo_backtest_rerun_batch_job()
-            elif job_id == LOW_SUCTION_LIVE_SNAPSHOT_REFRESH_BATCH_JOB_ID:
-                result = _run_low_suction_live_snapshot_refresh_batch_job()
             else:
                 result = run_job(
                     job_id,
@@ -3721,139 +3547,12 @@ def _latest_complete_daily_date_for_research() -> date | None:
         return _latest_complete_daily_date(session)
 
 
-def _run_low_suction_live_snapshot_refresh_batch_job() -> dict[str, Any]:
-    """Replace the intraday low-suction snapshot after today's daily bars settle."""
-
-    today = _now_china().date()
-    latest_complete = _latest_complete_daily_date_for_research()
-    if latest_complete != today:
-        latest_label = latest_complete.isoformat() if latest_complete else "无"
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": (
-                f"当天确认日线未就绪（最近完整日线 {latest_label}），"
-                "保留现有低吸实时快照"
-            ),
-        }
-    try:
-        snapshot = refresh_live_recommendations()
-    except LiveScanAlreadyRunningError:
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": "低吸实时扫描已有服务器任务在执行，跳过确认快照刷新",
-        }
-
-    trend_count = _low_suction_family_count(snapshot.get("trend"))
-    oversold_count = _low_suction_family_count(snapshot.get("oversold"))
-    trade_date = str(snapshot.get("trade_date") or today.isoformat())
-    return {
-        "status": "succeeded",
-        "rows_read": trend_count + oversold_count,
-        "rows_written": 1,
-        "message": (
-            f"已用 {trade_date} 确认日线刷新低吸实时快照，"
-            f"趋势 {trend_count} 只，超跌 {oversold_count} 只"
-        ),
-    }
 
 
-def _run_low_suction_daily_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 22:30 全量重算低吸日线回测（v3/v4 因子）并写库，供前端回测/交割单读取。"""
-
-    from alphaagent.server.services.low_suction.daily_picks_service import (
-        DailyBacktestAlreadyRunningError,
-        run_daily_backtest_sync,
-    )
-
-    if _latest_complete_daily_date_for_research() is None:
-        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
-    try:
-        payload = run_daily_backtest_sync()
-    except DailyBacktestAlreadyRunningError:
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": "低吸日线回测已有服务器任务在执行，跳过本次重复触发",
-        }
-    coverage = payload.get("coverage") or {}
-    combined = (payload.get("position_sim") or {}).get("combined") or {}
-    return {
-        "rows_read": int(coverage.get("labeled") or 0),
-        "rows_written": 1,
-        "message": (
-            f"低吸日线回测已刷新：{coverage.get('trade_days')} 个交易日，"
-            f"{int(coverage.get('labeled') or 0)} 个带标签候选，"
-            f"十槽组合复利 {combined.get('compound_pct')}% / 胜率 {combined.get('win_rate_pct')}%"
-        ),
-    }
 
 
-def _run_qianlong_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 22:35 全量重算潜龙首板回测并写库,供前端回测/交割单读取。"""
-
-    from alphaagent.server.services.qianlong.service import (
-        BacktestAlreadyRunningError,
-        run_backtest_sync,
-    )
-
-    if _latest_complete_daily_date_for_research() is None:
-        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
-    try:
-        payload = run_backtest_sync()
-    except BacktestAlreadyRunningError:
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": "潜龙首板回测已有任务在执行,跳过本次重复触发",
-        }
-    summary = payload.get("summary") or {}
-    return {
-        "rows_read": int(summary.get("n") or 0),
-        "rows_written": 1,
-        "message": (
-            f"潜龙首板回测已刷新:{summary.get('n')} 笔,"
-            f"均 {summary.get('avg_pct')}% / 胜率 {summary.get('win')}"
-        ),
-    }
 
 
-def _run_w2s_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 22:50 全量重算趋势弱转强回测并写库,供前端回测/交割单读取。"""
-
-    from alphaagent.server.services.weak_to_strong.service import (
-        BacktestAlreadyRunningError,
-        run_backtest_sync,
-    )
-
-    if _latest_complete_daily_date_for_research() is None:
-        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
-    try:
-        payload = run_backtest_sync()
-    except BacktestAlreadyRunningError:
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": "趋势弱转强回测已有任务在执行,跳过本次重复触发",
-        }
-    summary = payload.get("summary") or {}
-    parts = []
-    total = 0
-    for gk in ("a1", "a2", "b"):
-        s = summary.get(f"{gk}_product") or {}
-        parts.append(f"{gk.upper()} n={s.get('n')} 均 {s.get('avg_pct')}%")
-        total += int(s.get("n") or 0)
-    return {
-        "rows_read": total,
-        "rows_written": 1,
-        "message": "趋势弱转强回测已刷新:" + ";".join(parts),
-    }
 
 
 def _run_hpr_backtest_rerun_batch_job() -> dict[str, Any]:
@@ -3892,38 +3591,6 @@ def _run_hpr_backtest_rerun_batch_job() -> dict[str, Any]:
     }
 
 
-def _run_erbo_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 23:30 全量重算二波反包回测并写库,供前端回测/交割单读取。"""
-
-    from alphaagent.server.services.erbo.service import (
-        BacktestAlreadyRunningError,
-        run_backtest_sync,
-    )
-
-    if _latest_complete_daily_date_for_research() is None:
-        return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
-    try:
-        payload = run_backtest_sync(source="scheduler")
-    except BacktestAlreadyRunningError:
-        return {
-            "status": "skipped",
-            "rows_read": 0,
-            "rows_written": 0,
-            "message": "二波反包回测已有任务在执行,跳过本次重复触发",
-        }
-    summary = payload.get("summary") or {}
-    parts = []
-    total = 0
-    for key in ("A", "B", "all"):
-        st = summary.get(key) or {}
-        parts.append(f"{key}: n={st.get('n')} 均{st.get('bw_pct')}")
-        total += int(st.get("n") or 0)
-    return {
-        "status": "ok",
-        "rows_read": 0,
-        "rows_written": total,
-        "message": "二波反包回测重算完成 " + ";".join(parts),
-    }
 
 
 def _run_fbb_backtest_rerun_batch_job() -> dict[str, Any]:
@@ -4902,10 +4569,6 @@ def start_data_sync_scheduler() -> None:
     _scheduler_thread = threading.Thread(target=_scheduler_loop, name="data-sync-scheduler", daemon=True)
     _scheduler_thread.start()
     start_interrupted_schedule_recovery()
-    try:
-        _start_low_suction_live_scan_warmup()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("low-suction live scan warmup did not start: %s", exc)
     logger.info("Data sync scheduler started")
 
 
@@ -5099,8 +4762,7 @@ def _scheduler_loop() -> None:
 
 
 def _scheduler_tick_seconds(now_china: datetime) -> int:
-    if _low_suction_live_scan_window_open(now_china):
-        return SCHEDULER_TICK_SECONDS
+    del now_china
     return SCHEDULER_IDLE_TICK_SECONDS
 
 
@@ -5130,115 +4792,10 @@ def _recently_started(row: dict[str, Any], within_seconds: int = 1800) -> bool:
     return (datetime.now(timezone.utc) - last_started).total_seconds() < within_seconds
 
 
-def _start_low_suction_live_scan_schedule(
-    row: dict[str, Any],
-    *,
-    force_tail_final: bool = False,
-    tail_final_date: date | None = None,
-) -> bool:
-    """Run the long low-suction scan outside the scheduler tick thread."""
-
-    global _low_suction_schedule_running
-    global _low_suction_tail_final_attempted_date
-    global _low_suction_tail_final_pending_date
-    global _low_suction_tail_final_retry_after
-    now_china = _now_china()
-    requested_tail_date = tail_final_date or now_china.date()
-    with _low_suction_schedule_lock:
-        if force_tail_final:
-            if _low_suction_tail_final_attempted_date == requested_tail_date:
-                return False
-            if (
-                _low_suction_tail_final_retry_after is not None
-                and now_china < _low_suction_tail_final_retry_after
-            ):
-                return False
-            _low_suction_tail_final_pending_date = requested_tail_date
-        if _low_suction_schedule_running:
-            return False
-        if force_tail_final:
-            _low_suction_tail_final_attempted_date = requested_tail_date
-            _low_suction_tail_final_pending_date = None
-            _low_suction_tail_final_retry_after = None
-        _low_suction_schedule_running = True
-
-    thread = threading.Thread(
-        target=_run_low_suction_live_scan_schedule,
-        args=(dict(row), force_tail_final),
-        name="low-suction-live-scan",
-        daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception:
-        with _low_suction_schedule_lock:
-            _low_suction_schedule_running = False
-            if (
-                force_tail_final
-                and _low_suction_tail_final_attempted_date == requested_tail_date
-            ):
-                _low_suction_tail_final_attempted_date = None
-                _low_suction_tail_final_pending_date = requested_tail_date
-                _low_suction_tail_final_retry_after = now_china + timedelta(
-                    seconds=LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS
-                )
-        raise
-    return True
 
 
-def _run_low_suction_live_scan_schedule(
-    row: dict[str, Any],
-    force_tail_final: bool = False,
-) -> None:
-    global _low_suction_schedule_running
-    global _low_suction_tail_final_attempted_date
-    global _low_suction_tail_final_pending_date
-    global _low_suction_tail_final_retry_after
-    tail_final_completed = False
-    try:
-        snapshot = _run_schedule_action(row, force_tail_final=force_tail_final)
-        tail_final_completed = (
-            not force_tail_final
-            or _low_suction_live_snapshot_saved(snapshot or {})
-        )
-    except Exception:
-        # The normal schedule path records its own failure.  Keeping the
-        # tail-final request pending lets the scheduler retry before 15:30.
-        tail_final_completed = False
-        raise
-    finally:
-        with _low_suction_schedule_lock:
-            _low_suction_schedule_running = False
-            now_china = _now_china()
-            if force_tail_final and not tail_final_completed:
-                _low_suction_tail_final_attempted_date = None
-                _low_suction_tail_final_pending_date = now_china.date()
-                _low_suction_tail_final_retry_after = now_china + timedelta(
-                    seconds=LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS
-                )
 
 
-def _start_low_suction_live_scan_warmup() -> bool:
-    """Fill a missing intraday snapshot after a scheduler-worker restart."""
-
-    now_china = _now_china()
-    if _low_suction_tail_final_window_open(now_china):
-        for row in _load_batch_schedules():
-            if str(row.get("action") or "") == "low_suction_live_scan":
-                return _request_low_suction_tail_final_scan(row, now_china)
-        return False
-    if not _low_suction_live_scan_window_open(now_china):
-        return False
-    for row in _load_batch_schedules():
-        if str(row.get("action") or "") != "low_suction_live_scan":
-            continue
-        if _recently_started(
-            row,
-            within_seconds=max(LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
-        ):
-            return False
-        return _start_low_suction_live_scan_schedule(row)
-    return False
 
 
 def _run_scheduled_jobs(window_start: datetime | None = None) -> None:
@@ -5256,28 +4813,12 @@ def _run_scheduled_jobs(window_start: datetime | None = None) -> None:
         cron = row.get("cron")
         if not cron:
             continue
-        action = str(row.get("action") or "sync")
-        if action == "low_suction_live_scan":
-            if _low_suction_tail_final_window_open(now_china):
-                _request_low_suction_tail_final_scan(row, now_china)
-                continue
-            if not _low_suction_live_scan_window_open(now_china):
-                continue
-        if action == "low_suction_live_scan":
-            recently_started = _recently_started(
-                row,
-                within_seconds=max(LOW_SUCTION_LIVE_SCAN_INTERVAL_SECONDS - 1, 1),
-            )
-        else:
-            recently_started = _recently_started(row)
+        recently_started = _recently_started(row)
         if recently_started:
             continue
         try:
             if _cron_due_in_window(str(cron), window_start, now_china):
-                if action == "low_suction_live_scan":
-                    _start_low_suction_live_scan_schedule(row)
-                else:
-                    _run_schedule_action(row)
+                _run_schedule_action(row)
         except Exception:
             pass
 
@@ -5298,19 +4839,6 @@ def _cron_due_in_window(cron_expr: str, window_start: datetime, now: datetime) -
     return False
 
 
-def _request_low_suction_tail_final_scan(
-    row: dict[str, Any],
-    now_china: datetime,
-) -> bool:
-    """Queue one fresh tail scan, even when the previous minute is still running."""
-
-    if not _low_suction_tail_final_window_open(now_china):
-        return False
-    return _start_low_suction_live_scan_schedule(
-        row,
-        force_tail_final=True,
-        tail_final_date=now_china.date(),
-    )
 
 
 def _run_schedule_action(
@@ -5318,33 +4846,10 @@ def _run_schedule_action(
     *,
     raise_errors: bool = False,
     source: str = "schedule",
-    force_tail_final: bool = False,
 ) -> dict[str, Any] | None:
     schedule_id = str(row["id"])
     action = str(row.get("action") or "sync")
     try:
-        if action == "low_suction_live_scan":
-            _touch_schedule(
-                schedule_id,
-                last_started_at=datetime.now(timezone.utc),
-                last_status="running",
-            )
-            try:
-                snapshot = (
-                    refresh_live_recommendations(force_tail_final=True)
-                    if force_tail_final
-                    else refresh_live_recommendations()
-                )
-            except LiveScanAlreadyRunningError as exc:
-                snapshot = {"status": "skipped", "message": str(exc)}
-            saved = _low_suction_live_snapshot_saved(snapshot)
-            _touch_schedule(
-                schedule_id,
-                last_status="succeeded" if saved else "skipped",
-                last_finished_at=datetime.now(timezone.utc),
-                last_message=_low_suction_live_scan_status_message(snapshot, saved=saved),
-            )
-            return snapshot
         if action != "sync":
             raise DataSyncError(f"Unsupported schedule action: {action}")
         _start_sync_schedule(row, source=source)
@@ -5362,52 +4867,14 @@ def _run_schedule_action(
         return None
 
 
-def _low_suction_live_snapshot_saved(snapshot: Mapping[str, object]) -> bool:
-    return str(snapshot.get("status") or "") in {"ok", "unavailable"}
 
 
-def _low_suction_family_count(value: object) -> int:
-    if not isinstance(value, Mapping):
-        return 0
-    try:
-        return max(int(value.get("total") or 0), 0)
-    except (TypeError, ValueError):
-        return 0
 
 
-def _low_suction_live_scan_status_message(
-    snapshot: Mapping[str, object],
-    *,
-    saved: bool,
-) -> str:
-    if not saved:
-        return str(snapshot.get("message") or "低吸实时扫描未生成新快照")[:500]
-    if snapshot.get("status") == "unavailable":
-        return f"已保存低吸不可用快照：{str(snapshot.get('message') or '无可靠日线')[:300]}"
-    return (
-        "已保存低吸实时快照，"
-        f"趋势 {_low_suction_family_count(snapshot.get('trend'))} 只，"
-        f"超跌 {_low_suction_family_count(snapshot.get('oversold'))} 只"
-    )
 
 
-def _low_suction_live_scan_window_open(now_china: datetime) -> bool:
-    if now_china.weekday() >= 5:
-        return False
-    minute = now_china.hour * 60 + now_china.minute
-    return (
-        9 * 60 + 25 <= minute <= 11 * 60 + 30
-        or 13 * 60 <= minute <= 15 * 60 + 1
-    )
 
 
-def _low_suction_tail_final_window_open(now_china: datetime) -> bool:
-    return (
-        now_china.weekday() < 5
-        and LOW_SUCTION_TAIL_FINAL_TIME
-        <= now_china.time()
-        <= LOW_SUCTION_TAIL_FINAL_RETRY_END
-    )
 
 
 def _cron_matches(cron_expr: str, now: datetime) -> bool:

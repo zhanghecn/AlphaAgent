@@ -101,7 +101,6 @@ sync_batch_schedules = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
 
-
 stocks = Table(
     "stocks",
     metadata,
@@ -233,162 +232,6 @@ Index("ix_stock_minute_bars_symbol_date", stock_minute_bars.c.vt_symbol, stock_m
 # MAX(bar_time)/MAX(updated_at) 新鲜度探测走索引（分钟线 3.2M 行）
 Index("ix_stock_minute_bars_bar_time", stock_minute_bars.c.bar_time)
 Index("ix_stock_minute_bars_updated_at", stock_minute_bars.c.updated_at)
-
-low_suction_concept_membership_history = Table(
-    "low_suction_concept_membership_history",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("sector_id", String(64), nullable=False),
-    Column("sector_name", String(160), nullable=False),
-    Column("vt_symbol", String(32), nullable=False),
-    Column("in_date", Date, nullable=False),
-    Column("out_date", Date, nullable=False),
-    Column("known_at", DateTime(timezone=True), nullable=False),
-    Column("evidence_level", String(24), nullable=False),
-    Column("source", String(160), nullable=False),
-    Column("source_record_id", String(240), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-    UniqueConstraint(
-        "source",
-        "source_record_id",
-        name="uq_low_suction_membership_source_record",
-    ),
-)
-Index(
-    "ix_low_suction_membership_sector_validity",
-    low_suction_concept_membership_history.c.sector_id,
-    low_suction_concept_membership_history.c.in_date,
-    low_suction_concept_membership_history.c.out_date,
-)
-Index(
-    "ix_low_suction_membership_symbol_validity",
-    low_suction_concept_membership_history.c.vt_symbol,
-    low_suction_concept_membership_history.c.in_date,
-    low_suction_concept_membership_history.c.out_date,
-)
-
-low_suction_concept_membership_scopes = Table(
-    "low_suction_concept_membership_scopes",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("trade_date", Date, nullable=False),
-    Column("source_trade_date", Date, nullable=False),
-    Column("sector_id", String(64), nullable=False),
-    Column("expected_member_count", Integer, nullable=False),
-    Column("returned_member_count", Integer, nullable=False),
-    Column("pagination_complete", Boolean, nullable=False),
-    Column("known_at", DateTime(timezone=True), nullable=False),
-    Column("evidence_level", String(24), nullable=False),
-    Column("source", String(160), nullable=False),
-    Column("source_request_id", String(240), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-    UniqueConstraint(
-        "source",
-        "trade_date",
-        "sector_id",
-        name="uq_low_suction_membership_scope_pair",
-    ),
-    UniqueConstraint(
-        "source",
-        "source_request_id",
-        name="uq_low_suction_membership_scope_request",
-    ),
-)
-Index(
-    "ix_low_suction_membership_scope_evidence_date",
-    low_suction_concept_membership_scopes.c.evidence_level,
-    low_suction_concept_membership_scopes.c.trade_date,
-)
-Index(
-    "ix_low_suction_membership_scope_sector_date",
-    low_suction_concept_membership_scopes.c.sector_id,
-    low_suction_concept_membership_scopes.c.trade_date,
-)
-
-# Historical replay output is persisted separately from market inputs and from
-# natural-forward evidence.  Evidence fields prevent a survivorship-proxy run
-# from being presented as point-in-time validation.
-low_suction_historical_replay_runs = Table(
-    "low_suction_historical_replay_runs",
-    metadata,
-    Column("run_id", String(64), primary_key=True),
-    Column("policy_version", String(128), nullable=False),
-    Column("qualification_contract_version", String(128), nullable=False),
-    Column("evidence_level", String(48), nullable=False),
-    Column("membership_mode", String(48), nullable=False),
-    Column("input_fingerprint", String(64), nullable=False),
-    Column("trade_fingerprint", String(64), nullable=False),
-    Column("regression_artifact_sha256", String(64), nullable=True),
-    Column("trade_count", Integer, nullable=False),
-    Column("metrics", JSONB, nullable=False, server_default="{}"),
-    Column("built_at", DateTime(timezone=True), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-Index(
-    "ix_low_suction_historical_runs_built_at",
-    low_suction_historical_replay_runs.c.built_at,
-)
-
-low_suction_historical_replay_trades = Table(
-    "low_suction_historical_replay_trades",
-    metadata,
-    Column("run_id", String(64), primary_key=True),
-    Column("signal_id", String(256), primary_key=True),
-    Column("campaign_id", String(128), nullable=False),
-    Column("sector_id", String(64), nullable=False),
-    Column("concept_name", String(160), nullable=False),
-    Column("vt_symbol", String(32), nullable=False),
-    Column("stock_name", String(80), nullable=False),
-    Column("market_phase", String(32), nullable=False),
-    Column("time_block", String(24), nullable=False),
-    Column("dynamic_rank", Integer, nullable=False),
-    Column("wave_number", Integer, nullable=False),
-    Column("support_line", String(16), nullable=False),
-    Column("support_price", Float, nullable=False),
-    Column("support_test_date", Date, nullable=False),
-    Column("signal_date", Date, nullable=False),
-    Column("entry_price", Float, nullable=False),
-    Column("d1_date", Date, nullable=False),
-    Column("d1_close", Float, nullable=False),
-    Column("d1_net_return_pct", Float, nullable=False),
-    Column("exit_date", Date, nullable=False),
-    Column("exit_price", Float, nullable=False),
-    Column("exit_reason", String(64), nullable=False),
-    Column("holding_sessions", Integer, nullable=False),
-    Column("net_return_pct", Float, nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-Index(
-    "ix_low_suction_historical_trade_date",
-    low_suction_historical_replay_trades.c.run_id,
-    low_suction_historical_replay_trades.c.signal_date,
-)
-Index(
-    "ix_low_suction_historical_trade_phase",
-    low_suction_historical_replay_trades.c.run_id,
-    low_suction_historical_replay_trades.c.market_phase,
-)
-Index(
-    "ix_low_suction_historical_trade_symbol",
-    low_suction_historical_replay_trades.c.run_id,
-    low_suction_historical_replay_trades.c.vt_symbol,
-)
-Index(
-    "ix_low_suction_historical_trade_sector",
-    low_suction_historical_replay_trades.c.run_id,
-    low_suction_historical_replay_trades.c.sector_id,
-)
-Index(
-    "ix_low_suction_historical_trade_return",
-    low_suction_historical_replay_trades.c.run_id,
-    low_suction_historical_replay_trades.c.net_return_pct,
-)
 
 low_suction_security_history = Table(
     "low_suction_security_history",
@@ -570,385 +413,6 @@ Index(
     low_suction_forward_membership_snapshot_scopes.c.source_trade_date,
 )
 
-low_suction_forward_leader_rank_snapshots = Table(
-    "low_suction_forward_leader_rank_snapshots",
-    metadata,
-    Column("source_trade_date", Date, primary_key=True),
-    Column("ranking_version", String(80), primary_key=True),
-    Column("identity_mode", String(64), primary_key=True),
-    Column("sector_id", String(64), primary_key=True),
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("target_session", String(40), nullable=False),
-    Column("target_trade_date", Date, nullable=True),
-    Column("known_at", DateTime(timezone=True), nullable=False),
-    Column("feature_cutoff", DateTime(timezone=True), nullable=False),
-    Column("membership_known_at", DateTime(timezone=True), nullable=False),
-    Column("security_known_at", DateTime(timezone=True), nullable=False),
-    Column("sector_name", String(160), nullable=False),
-    Column("cycle_id", String(240), nullable=False),
-    Column("cycle_start", Date, nullable=False),
-    Column("cycle_days", Integer, nullable=False),
-    Column("cycle_relative_return", Float, nullable=True),
-    Column("strong_day_count_cycle", Integer, nullable=True),
-    Column("sessions_since_strong", Integer, nullable=True),
-    Column("turnover_median_20d", Float, nullable=True),
-    Column("capacity_passed", Boolean, nullable=False),
-    Column("relative_strength_rank", Integer, nullable=True),
-    Column("market_recognition_rank", Integer, nullable=True),
-    Column("rank", Integer, nullable=True),
-    Column("rank_eligible", Boolean, nullable=False),
-    Column("is_top3", Boolean, nullable=False),
-    Column("excluded_reason", String(80), nullable=True),
-    Column("input_fingerprint", String(80), nullable=False),
-    Column("evidence_level", String(40), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_low_suction_forward_leader_target_mode_top3",
-    low_suction_forward_leader_rank_snapshots.c.target_trade_date,
-    low_suction_forward_leader_rank_snapshots.c.identity_mode,
-    low_suction_forward_leader_rank_snapshots.c.is_top3,
-)
-Index(
-    "ix_low_suction_forward_leader_symbol_source",
-    low_suction_forward_leader_rank_snapshots.c.vt_symbol,
-    low_suction_forward_leader_rank_snapshots.c.source_trade_date,
-)
-
-low_suction_forward_leader_rank_snapshot_scopes = Table(
-    "low_suction_forward_leader_rank_snapshot_scopes",
-    metadata,
-    Column("source_trade_date", Date, primary_key=True),
-    Column("ranking_version", String(80), primary_key=True),
-    Column("identity_mode", String(64), primary_key=True),
-    Column("target_session", String(40), nullable=False),
-    Column("target_trade_date", Date, nullable=True),
-    Column("known_at", DateTime(timezone=True), nullable=False),
-    Column("feature_cutoff", DateTime(timezone=True), nullable=False),
-    Column("main_rise_definition", String(64), nullable=False),
-    Column("active_concept_count", Integer, nullable=False),
-    Column("membership_row_count", Integer, nullable=False),
-    Column("main_board_member_count", Integer, nullable=False),
-    Column("security_eligible_count", Integer, nullable=False),
-    Column("ranked_row_count", Integer, nullable=False),
-    Column("top3_row_count", Integer, nullable=False),
-    Column("excluded_row_count", Integer, nullable=False),
-    Column("complete", Boolean, nullable=False),
-    Column("status", String(40), nullable=False),
-    Column("input_fingerprint", String(80), nullable=False),
-    Column("selected_mode", String(64), nullable=True),
-    Column("evidence_level", String(40), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_low_suction_forward_leader_scope_complete_source",
-    low_suction_forward_leader_rank_snapshot_scopes.c.complete,
-    low_suction_forward_leader_rank_snapshot_scopes.c.source_trade_date,
-)
-
-low_suction_forward_ma5_candidates = Table(
-    "low_suction_forward_ma5_candidates",
-    metadata,
-    Column("contract_version", String(80), primary_key=True),
-    Column("signal_trade_date", Date, primary_key=True),
-    Column("identity_mode", String(64), primary_key=True),
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("source_trade_date", Date, nullable=False),
-    Column("stock_name", String(160), nullable=False),
-    Column("sector_id", String(64), nullable=False),
-    Column("sector_name", String(160), nullable=False),
-    Column("rank", Integer, nullable=False),
-    Column("known_at", DateTime(timezone=True), nullable=False),
-    Column("feature_cutoff_date", Date, nullable=False),
-    Column("spell_anchor_date", Date, nullable=False),
-    Column("spell_age_sessions", Integer, nullable=False),
-    Column("observation_limit_sessions", Integer, nullable=False),
-    Column("current_wave_number", Integer, nullable=False),
-    Column("confirmed_higher_highs", Integer, nullable=False),
-    Column("wave_start_date", Date, nullable=False),
-    Column("reference_peak_date", Date, nullable=False),
-    Column("reference_peak_price", Float, nullable=False),
-    Column("pullback_confirmation_date", Date, nullable=True),
-    Column("support_line", String(16), nullable=True),
-    Column("support_price", Float, nullable=True),
-    Column("line_distance_low_pct", Float, nullable=True),
-    Column("line_distance_close_pct", Float, nullable=True),
-    Column("signal_close_not_below_previous", Boolean, nullable=False),
-    Column("stock_structure_intact", Boolean, nullable=False),
-    Column("concept_main_rise_intact", Boolean, nullable=False),
-    Column("impulse_gain_pct", Float, nullable=False),
-    Column("strong_days_ge_9_5pct", Integer, nullable=False),
-    Column("max_volume_ratio_prior5", Float, nullable=True),
-    Column("xuguang_climax_candidate", Boolean, nullable=False),
-    Column("volume_ratio_prior5", Float, nullable=True),
-    Column("volume_class_prior5", String(24), nullable=False),
-    Column("stock_main_net_inflow", Float, nullable=True),
-    Column("stock_main_net_inflow_ratio", Float, nullable=True),
-    Column("stock_fund_flow_source", String(160), nullable=True),
-    Column("stock_fund_flow_known_at", DateTime(timezone=True), nullable=True),
-    Column("sector_main_net_inflow", Float, nullable=True),
-    Column("sector_main_net_inflow_ratio", Float, nullable=True),
-    Column("sector_fund_flow_source", String(160), nullable=True),
-    Column("sector_fund_flow_known_at", DateTime(timezone=True), nullable=True),
-    Column("market_timing_direction", String(24), nullable=True),
-    Column("market_timing_danger_state", String(24), nullable=True),
-    Column("market_timing_known_at", DateTime(timezone=True), nullable=True),
-    Column("signal_eligible", Boolean, nullable=False),
-    Column("decision_reason", String(96), nullable=False),
-    Column("selected_mode_at_capture", String(64), nullable=True),
-    Column("input_fingerprint", String(80), nullable=False),
-    Column("evidence_level", String(40), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_low_suction_forward_ma5_candidate_signal",
-    low_suction_forward_ma5_candidates.c.signal_eligible,
-    low_suction_forward_ma5_candidates.c.signal_trade_date,
-)
-Index(
-    "ix_low_suction_forward_ma5_candidate_symbol",
-    low_suction_forward_ma5_candidates.c.vt_symbol,
-    low_suction_forward_ma5_candidates.c.signal_trade_date,
-)
-
-low_suction_forward_ma5_scopes = Table(
-    "low_suction_forward_ma5_scopes",
-    metadata,
-    Column("contract_version", String(80), primary_key=True),
-    Column("signal_trade_date", Date, primary_key=True),
-    Column("identity_mode", String(64), primary_key=True),
-    Column("source_trade_date", Date, nullable=False),
-    Column("known_at", DateTime(timezone=True), nullable=False),
-    Column("complete", Boolean, nullable=False),
-    Column("status", String(40), nullable=False),
-    Column("prior_top3_count", Integer, nullable=False),
-    Column("unique_candidate_count", Integer, nullable=False),
-    Column("active_concept_count", Integer, nullable=False),
-    Column("signal_count", Integer, nullable=False),
-    Column("selected_mode_at_capture", String(64), nullable=True),
-    Column("input_fingerprint", String(80), nullable=False),
-    Column("evidence_level", String(40), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_low_suction_forward_ma5_scope_complete_date",
-    low_suction_forward_ma5_scopes.c.complete,
-    low_suction_forward_ma5_scopes.c.signal_trade_date,
-)
-
-low_suction_forward_ma5_outcomes = Table(
-    "low_suction_forward_ma5_outcomes",
-    metadata,
-    Column("contract_version", String(80), primary_key=True),
-    Column("signal_trade_date", Date, primary_key=True),
-    Column("identity_mode", String(64), primary_key=True),
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("source_trade_date", Date, nullable=False),
-    Column("candidate_input_fingerprint", String(80), nullable=False),
-    Column("status", String(48), nullable=False),
-    Column("entry_date", Date, nullable=True),
-    Column("entry_price", Float, nullable=True),
-    Column("entry_proxy", String(64), nullable=False),
-    Column("exit_date", Date, nullable=True),
-    Column("exit_price", Float, nullable=True),
-    Column("exit_reason", String(80), nullable=True),
-    Column("gross_return_pct", Float, nullable=True),
-    Column("net_return_pct", Float, nullable=True),
-    Column("mae_pct", Float, nullable=True),
-    Column("mfe_pct", Float, nullable=True),
-    Column("round_trip_cost_pct", Float, nullable=False),
-    Column("right_censored", Boolean, nullable=False),
-    Column("terminal", Boolean, nullable=False),
-    Column("last_evaluated_trade_date", Date, nullable=True),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_low_suction_forward_ma5_outcome_status",
-    low_suction_forward_ma5_outcomes.c.terminal,
-    low_suction_forward_ma5_outcomes.c.signal_trade_date,
-)
-
-
-low_suction_strategy_runs = Table(
-    "low_suction_strategy_runs",
-    metadata,
-    Column("strategy_version", String(80), primary_key=True),
-    Column("trade_date", Date, primary_key=True),
-    Column("phase", String(32), primary_key=True),
-    Column("source_trade_date", Date, nullable=True),
-    Column("attempted_at", DateTime(timezone=True), nullable=False),
-    Column("feature_cutoff_at", DateTime(timezone=True), nullable=True),
-    Column("status", String(40), nullable=False),
-    Column("complete", Boolean, nullable=False),
-    Column("candidate_count", Integer, nullable=False, server_default="0"),
-    Column("recommendation_count", Integer, nullable=False, server_default="0"),
-    Column("positions_opened", Integer, nullable=False, server_default="0"),
-    Column("positions_closed", Integer, nullable=False, server_default="0"),
-    Column("input_fingerprint", String(80), nullable=False),
-    Column("blocking_reasons", JSONB, nullable=False, server_default="[]"),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_low_suction_strategy_runs_date_phase",
-    low_suction_strategy_runs.c.trade_date,
-    low_suction_strategy_runs.c.phase,
-)
-
-
-low_suction_strategy_signals = Table(
-    "low_suction_strategy_signals",
-    metadata,
-    Column("signal_id", String(240), primary_key=True),
-    Column("strategy_version", String(80), nullable=False),
-    Column("signal_trade_date", Date, nullable=False),
-    Column("source_trade_date", Date, nullable=False),
-    Column("captured_at", DateTime(timezone=True), nullable=False),
-    Column("feature_cutoff_at", DateTime(timezone=True), nullable=False),
-    Column("identity_mode", String(64), nullable=False),
-    Column("vt_symbol", String(32), nullable=False),
-    Column("stock_name", String(160), nullable=False),
-    Column("sector_id", String(64), nullable=False),
-    Column("sector_name", String(160), nullable=False),
-    Column("rank", Integer, nullable=False),
-    Column("leader_spell_start", Date, nullable=False),
-    Column("current_wave_number", Integer, nullable=False),
-    Column("confirmed_higher_highs", Integer, nullable=False),
-    Column("wave_start_date", Date, nullable=False),
-    Column("reference_peak_date", Date, nullable=False),
-    Column("reference_peak_price", Float, nullable=False),
-    Column("pullback_confirmation_date", Date, nullable=True),
-    Column("support_line", String(16), nullable=True),
-    Column("support_price", Float, nullable=True),
-    Column("line_distance_low_pct", Float, nullable=True),
-    Column("provisional_open", Float, nullable=False),
-    Column("provisional_high", Float, nullable=False),
-    Column("provisional_low", Float, nullable=False),
-    Column("provisional_close", Float, nullable=False),
-    Column("provisional_volume", Float, nullable=False),
-    Column("provisional_turnover", Float, nullable=True),
-    Column("provisional_ma5", Float, nullable=True),
-    Column("previous_close", Float, nullable=False),
-    Column("strong_days_ge_9_5pct", Integer, nullable=False),
-    Column("stock_structure_intact", Boolean, nullable=False),
-    Column("concept_main_rise_intact", Boolean, nullable=False),
-    Column("signal_eligible", Boolean, nullable=False),
-    Column("decision_reason", String(96), nullable=False),
-    Column("recommendation_state", String(32), nullable=False),
-    Column("portfolio_reason", String(64), nullable=True),
-    Column("quote_source", String(160), nullable=False),
-    Column("quote_trade_time", DateTime(timezone=True), nullable=False),
-    Column("input_fingerprint", String(80), nullable=False),
-    Column("evidence_level", String(48), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-    UniqueConstraint(
-        "strategy_version",
-        "signal_trade_date",
-        "vt_symbol",
-        name="uq_low_suction_strategy_signal_symbol_date",
-    ),
-)
-Index(
-    "ix_low_suction_strategy_signals_date_state",
-    low_suction_strategy_signals.c.signal_trade_date,
-    low_suction_strategy_signals.c.recommendation_state,
-)
-
-
-low_suction_paper_positions = Table(
-    "low_suction_paper_positions",
-    metadata,
-    Column("signal_id", String(240), primary_key=True),
-    Column("strategy_version", String(80), nullable=False),
-    Column("vt_symbol", String(32), nullable=False),
-    Column("stock_name", String(160), nullable=False),
-    Column("sector_id", String(64), nullable=False),
-    Column("sector_name", String(160), nullable=False),
-    Column("status", String(32), nullable=False),
-    Column("entry_trade_date", Date, nullable=False),
-    Column("entry_at", DateTime(timezone=True), nullable=False),
-    Column("entry_quote_time", DateTime(timezone=True), nullable=False),
-    Column("entry_raw_price", Float, nullable=False),
-    Column("entry_price", Float, nullable=False),
-    Column("volume", Integer, nullable=False),
-    Column("entry_amount", Float, nullable=False),
-    Column("buy_fee", Float, nullable=False),
-    Column("buy_cash_delta", Float, nullable=False),
-    Column("reference_peak_price", Float, nullable=False),
-    Column("exit_trigger_date", Date, nullable=True),
-    Column("exit_trigger_reason", String(80), nullable=True),
-    Column("exit_due_after", Date, nullable=True),
-    Column("exit_deferred_sessions", Integer, nullable=False, server_default="0"),
-    Column("last_mark_date", Date, nullable=True),
-    Column("last_mark_price", Float, nullable=True),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_low_suction_paper_positions_status",
-    low_suction_paper_positions.c.status,
-    low_suction_paper_positions.c.entry_trade_date,
-)
-Index(
-    "ix_low_suction_paper_positions_sector_status",
-    low_suction_paper_positions.c.sector_id,
-    low_suction_paper_positions.c.status,
-)
-
-
-low_suction_paper_trades = Table(
-    "low_suction_paper_trades",
-    metadata,
-    Column("signal_id", String(240), primary_key=True),
-    Column("strategy_version", String(80), nullable=False),
-    Column("vt_symbol", String(32), nullable=False),
-    Column("stock_name", String(160), nullable=False),
-    Column("sector_id", String(64), nullable=False),
-    Column("sector_name", String(160), nullable=False),
-    Column("entry_trade_date", Date, nullable=False),
-    Column("entry_at", DateTime(timezone=True), nullable=False),
-    Column("entry_price", Float, nullable=False),
-    Column("volume", Integer, nullable=False),
-    Column("entry_amount", Float, nullable=False),
-    Column("buy_fee", Float, nullable=False),
-    Column("buy_cash_delta", Float, nullable=False),
-    Column("exit_trigger_date", Date, nullable=False),
-    Column("exit_trigger_reason", String(80), nullable=False),
-    Column("exit_trade_date", Date, nullable=False),
-    Column("exit_at", DateTime(timezone=True), nullable=False),
-    Column("exit_quote_time", DateTime(timezone=True), nullable=False),
-    Column("exit_raw_price", Float, nullable=False),
-    Column("exit_price", Float, nullable=False),
-    Column("exit_amount", Float, nullable=False),
-    Column("sell_fee", Float, nullable=False),
-    Column("sell_cash_delta", Float, nullable=False),
-    Column("total_fees", Float, nullable=False),
-    Column("net_pnl", Float, nullable=False),
-    Column("net_return_pct", Float, nullable=False),
-    Column("exit_deferred_sessions", Integer, nullable=False, server_default="0"),
-    Column("evidence_level", String(48), nullable=False),
-    Column("raw", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-Index(
-    "ix_low_suction_paper_trades_exit_date",
-    low_suction_paper_trades.c.exit_trade_date,
-)
-
 sectors = Table(
     "sectors",
     metadata,
@@ -1093,7 +557,6 @@ stock_business_segments = Table(
 )
 Index("ix_stock_business_segments_vt_symbol", stock_business_segments.c.vt_symbol)
 
-
 # ── Shenwan Industry Classification ──
 
 shenwan_industries = Table(
@@ -1176,7 +639,6 @@ industry_board_mapping = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
-
 
 # ── Sector dashboard: daily bars, metrics, period scores ──
 
@@ -1409,7 +871,6 @@ Index("ix_stock_events_vt_symbol", stock_events.c.vt_symbol)
 Index("ix_stock_events_date", stock_events.c.event_date)
 Index("ix_stock_events_updated_at", stock_events.c.updated_at)
 
-
 # 低吸日线回测：单行 id=1 存最新一次 run（同 leader 系列模式，CLI 写库 API 读库）
 low_suction_daily_backtest_runs = Table(
     "low_suction_daily_backtest_runs",
@@ -1421,7 +882,6 @@ low_suction_daily_backtest_runs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
-
 
 # 低吸日线回测：每次手动/定时请求的运行轨道，报告本体仍由上表单行保存。
 low_suction_daily_backtest_rebuild_runs = Table(
@@ -1448,7 +908,6 @@ Index(
     low_suction_daily_backtest_rebuild_runs.c.requested_at,
 )
 
-
 # 低吸实时推荐：仅记录实际重算，供当日扫描轨道与事后诊断使用。
 low_suction_live_scan_runs = Table(
     "low_suction_live_scan_runs",
@@ -1474,7 +933,6 @@ Index(
     low_suction_live_scan_runs.c.started_at,
 )
 
-
 # 低吸实时推荐：每个交易日保留一条快照。盘中分钟虚拟 K、15:01 尾盘固化
 # 和晚间确认日线均覆盖同一交易日，历史交易日可供前端回看。
 low_suction_live_snapshots = Table(
@@ -1489,7 +947,6 @@ low_suction_live_snapshots = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
     UniqueConstraint("trade_date", name="uq_low_suction_live_snapshot_trade_date"),
 )
-
 
 # ── Stock fund flows ──
 
@@ -1759,296 +1216,6 @@ Index(
     stock_limit_up_daily.c.trade_date,
 )
 
-
-# ── 潜龙首板(首板打板)产品线 ──
-# 策略口径 = 量化因子研究/潜龙首板/潜龙首板条件定稿.md v4,一字不改。
-# 盘前池:每个执行交易日一行/股,8 条硬条件全部来自 T-1 收盘数据。
-qianlong_pool_entries = Table(
-    "qianlong_pool_entries",
-    metadata,
-    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("name", String(80), nullable=False),
-    Column("prev_close", Float, nullable=False),   # T-1 收盘
-    Column("trigger_price", Float, nullable=False),  # 昨收 × 1.08
-    Column("limit_price", Float, nullable=True),   # 涨停价(昨收 × 1.1)
-    Column("ma20", Float, nullable=True),
-    Column("dist_ma20", Float, nullable=True),
-    Column("chg_tm1", Float, nullable=True),       # 昨日涨幅 %
-    Column("low_tm1", Float, nullable=True),
-    Column("turnover_rate_tm1", Float, nullable=True),
-    Column("market_cap_yi", Float, nullable=True),
-    # v6 底盘形态字段
-    Column("vol_ma5", Float, nullable=True),        # 前5日均量(手), 盘中量比基准
-    Column("chassis_tag", String(4), nullable=True),  # A=全新急建仓 B=小阳建仓 AB=双满足
-    Column("trend_days", Float, nullable=True),     # 多头排列持续天数(T-1)
-    Column("yang10", Float, nullable=True),         # 近10日阳线数
-    Column("ret10", Float, nullable=True),          # 近10日涨幅(小数)
-    Column("lu_cnt20", Float, nullable=True),       # 近20日涨停次数
-    Column("lu_cnt60", Float, nullable=True),       # 近60日涨停次数
-    Column("rules_version", String(80), nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index("ix_qianlong_pool_entries_date", qianlong_pool_entries.c.trade_date)
-
-# 盘中触发信号:与池同主键,状态机随扫描推进;EOD 定版封板/连板/退出。
-# 该表同时是前推交割单(entered 且有 exit 的行),避免双写不一致。
-qianlong_signals = Table(
-    "qianlong_signals",
-    metadata,
-    Column("trade_date", Date, primary_key=True),
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("name", String(80), nullable=False),
-    # watching/touched/confirmed_entered/unconfirmed/skipped_gap/no_trigger
-    Column("status", String(24), nullable=False, server_default="watching"),
-    Column("chassis_tag", String(4), nullable=True),   # A=全新急建仓 B=小阳建仓 AB=双满足(v6)
-    Column("gap_open", Float, nullable=True),      # 高开幅度(小数)
-    Column("priority", Boolean, nullable=False, server_default="false"),  # B 类(小阳建仓)优先
-    Column("prev_close", Float, nullable=False),
-    Column("trigger_price", Float, nullable=False),
-    Column("touched_at", DateTime(timezone=True), nullable=True),
-    Column("entry_price", Float, nullable=True),   # 确认时现价 × 1.005 滑点
-    Column("entry_time", DateTime(timezone=True), nullable=True),
-    Column("last_price", Float, nullable=True),
-    Column("change_pct", Float, nullable=True),    # 现价相对昨收 %
-    # EOD 定版字段
-    Column("sealed", Boolean, nullable=True),      # 当日是否封板
-    Column("streak_h", Integer, nullable=True),    # 连板持有中的当前板数
-    Column("exit_date", Date, nullable=True),
-    Column("exit_price", Float, nullable=True),
-    # next_open_fail(未封板)/next_open_nostreak(未连板)/break_open(断板)
-    Column("exit_reason", String(24), nullable=True),
-    Column("ret_pct", Float, nullable=True),       # (exit/entry-1)×100
-    Column("rules_version", String(80), nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index("ix_qianlong_signals_date", qianlong_signals.c.trade_date)
-Index("ix_qianlong_signals_status", qianlong_signals.c.status)
-
-# 每分钟盘中扫描运行轨道(诊断用)。
-qianlong_live_scan_runs = Table(
-    "qianlong_live_scan_runs",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("trade_date", Date, nullable=False),
-    Column("started_at", DateTime(timezone=True), nullable=False),
-    Column("finished_at", DateTime(timezone=True), nullable=False),
-    Column("duration_ms", Integer, nullable=False),
-    Column("status", String(24), nullable=False),
-    Column("pool_count", Integer, nullable=True),
-    Column("touched_count", Integer, nullable=True),
-    Column("entered_count", Integer, nullable=True),
-    Column("spot_active_symbols", Integer, nullable=True),
-    Column("rules_version", String(80), nullable=False),
-    Column("message", Text, nullable=True),
-    Column("error", Text, nullable=True),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-Index(
-    "ix_qianlong_live_scan_runs_date_time",
-    qianlong_live_scan_runs.c.trade_date,
-    qianlong_live_scan_runs.c.started_at,
-)
-
-# 回测报告:单行 id=1 物化(同低吸模式,CLI/调度写库,API 只读)。
-qianlong_backtest_runs = Table(
-    "qianlong_backtest_runs",
-    metadata,
-    Column("id", Integer, primary_key=True),  # 固定 1
-    Column("rules_version", String(80), nullable=False),
-    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("payload", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-
-# 回测重算运行轨道(手动/定时请求)。
-qianlong_backtest_rebuild_runs = Table(
-    "qianlong_backtest_rebuild_runs",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("source", String(24), nullable=False),
-    Column("status", String(24), nullable=False),
-    Column("stage", String(48), nullable=False),
-    Column("rules_version", String(80), nullable=False),
-    Column("requested_at", DateTime(timezone=True), nullable=False),
-    Column("started_at", DateTime(timezone=True), nullable=True),
-    Column("finished_at", DateTime(timezone=True), nullable=True),
-    Column("message", Text, nullable=True),
-    Column("error", Text, nullable=True),
-    Column("metrics", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_qianlong_backtest_rebuild_requested",
-    qianlong_backtest_rebuild_runs.c.requested_at,
-)
-
-# ── N型补涨打板(原趋势弱转强)产品线 ──
-# 策略口径 = 量化因子研究/低吸研究/N型补涨打板.md 定稿(2026-08-30,原弱转强V4)。
-# 盘前池:每个执行交易日一行/股/组,全部条件来自 T-1 收盘数据;池=触发池全量(雷达),
-# actionable=四组白名单出手标记。
-w2s_pool_entries = Table(
-    "w2s_pool_entries",
-    metadata,
-    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("group_key", String(8), primary_key=True),  # yin2/yang2a/yang2b/yin4/yang4
-    Column("name", String(80), nullable=False),
-    Column("actionable", Boolean, nullable=False, server_default="false"),  # 白名单出手
-    Column("prev_close", Float, nullable=False),   # T-1 收盘
-    Column("trigger_price", Float, nullable=False),  # 板上买:触发价=涨停价(v4)
-    Column("limit_price", Float, nullable=True),
-    # 条件快照值(T-1)
-    Column("chg_tm1", Float, nullable=True),       # 昨日涨幅 %
-    Column("lshadow_tm1", Float, nullable=True),   # 昨日下影线 %(v4 已弃用,留列兼容)
-    Column("ushadow_tm1", Float, nullable=True),   # 昨日上影线 %
-    Column("yang_tm1", Boolean, nullable=True),    # 昨日收阳
-    Column("vol_rel5_tm1", Float, nullable=True),  # 昨日量比(v4 已弃用,留列兼容)
-    Column("amp_tm1", Float, nullable=True),       # 昨日振幅 %(v4 已弃用,留列兼容)
-    Column("turnover_tm1", Float, nullable=True),  # 昨日换手 %(v4 已弃用,留列兼容)
-    Column("base20_tm1", Float, nullable=True),    # 底座20日涨幅 %(v4 已弃用,留列兼容)
-    Column("last_streak", Integer, nullable=True), # v3 列(弃用)→ 用 seg_h
-    Column("gap_days", Integer, nullable=True),    # 坑宽(D0-末板,研究 gap 口径)
-    # 坑模型快照(v4 新增)
-    Column("base", String(8), nullable=True),      # 地基形态 HIGH/FLAT/U/V/MID/LB/DN
-    Column("base_label", String(8), nullable=True),  # 地基中文名
-    Column("pos3", String(8), nullable=True),      # 坑三状态 无坑/坑内/已回顶
-    Column("low_dd", Float, nullable=True),        # 坑深 %(断板期最低收盘距顶)
-    Column("pull", Float, nullable=True),          # 昨收距顶 %
-    Column("reb", Float, nullable=True),           # 弹回 %(昨收距坑底)
-    Column("ma_st", String(4), nullable=True),     # 均线排列态 +++/−++/+--
-    Column("n_lim_mid", Integer, nullable=True),   # 断板期孤立涨停日数
-    Column("topped", Boolean, nullable=True),      # 断板期曾收顶上(曾收顶上)
-    Column("d23ok", Boolean, nullable=True),       # 下探中(D-2收<D-3收且D-3非涨停)
-    Column("seg_h", Integer, nullable=True),       # 最近≥2板段高度
-    Column("mkt_lim_tm1", Integer, nullable=True), # 昨日大盘(主板非ST)涨停家数(信息项)
-    Column("halted", Boolean, nullable=False, server_default="false"),  # v3 停手(v4 废弃恒false)
-    Column("rules_version", String(80), nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index("ix_w2s_pool_entries_date", w2s_pool_entries.c.trade_date)
-
-# 答题训练题库(照 hpr_quiz_questions 模式):触发池事件×次日触板×非一字,
-# 应买=白名单命中(actionable);payload 含K线窗/答案/白名单对照讲解。
-w2s_quiz_questions = Table(
-    "w2s_quiz_questions",
-    metadata,
-    Column("decision_date", Date, primary_key=True),   # 入场日(决策日)
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("year", String(4), nullable=False),
-    Column("month", String(7), nullable=False),        # YYYY-MM 切片键
-    Column("seq", Integer, nullable=False),            # 月内题号(匿名题干用)
-    Column("name", String(80), nullable=False),
-    Column("group_key", String(8), nullable=False),
-    Column("point", String(8), nullable=False),        # 组key;—=不该买(白名单外)
-    Column("ret_pct", Float, nullable=True),           # 板留断走收益(判分用)
-    Column("payload", JSONB, nullable=False, server_default="{}"),
-    Column("rules_version", String(80), nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index("ix_w2s_quiz_questions_month", w2s_quiz_questions.c.month)
-
-# 盘中触发信号:与池同主键,状态机随扫描推进;EOD 定版封板/连板/退出。
-# 该表同时是前推交割单(entered 且有 exit 的行),避免双写不一致。
-w2s_signals = Table(
-    "w2s_signals",
-    metadata,
-    Column("trade_date", Date, primary_key=True),
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("group_key", String(8), primary_key=True),
-    Column("name", String(80), nullable=False),
-    # watching/skipped_gap/halted/touched/entered/holding/pending_exit/no_trigger/closed
-    Column("status", String(24), nullable=False, server_default="watching"),
-    Column("gap_open", Float, nullable=True),      # 竞价/开盘高开幅度(小数,仅A1过滤用)
-    Column("prev_close", Float, nullable=False),
-    Column("trigger_price", Float, nullable=False),
-    Column("touched_at", DateTime(timezone=True), nullable=True),
-    Column("entry_price", Float, nullable=True),   # A1/B=触发价(昨收×1.07);A2=涨停价
-    Column("entry_time", DateTime(timezone=True), nullable=True),
-    Column("last_price", Float, nullable=True),
-    Column("change_pct", Float, nullable=True),    # 现价相对昨收 %
-    # EOD 定版字段
-    Column("sealed", Boolean, nullable=True),      # 买入当日是否封板
-    Column("streak_h", Integer, nullable=True),    # 连板持有中的当前板数
-    Column("exit_date", Date, nullable=True),
-    Column("exit_price", Float, nullable=True),
-    # next_close_fail(T+1未涨停收盘卖)/break_close(断板收盘卖)/max_hold_close(T+15兜底)
-    Column("exit_reason", String(24), nullable=True),
-    Column("ret_pct", Float, nullable=True),       # (exit/entry-1)×100
-    Column("rules_version", String(80), nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index("ix_w2s_signals_date", w2s_signals.c.trade_date)
-Index("ix_w2s_signals_status", w2s_signals.c.status)
-
-# 每分钟盘中扫描运行轨道(诊断用)。
-w2s_live_scan_runs = Table(
-    "w2s_live_scan_runs",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("trade_date", Date, nullable=False),
-    Column("started_at", DateTime(timezone=True), nullable=False),
-    Column("finished_at", DateTime(timezone=True), nullable=False),
-    Column("duration_ms", Integer, nullable=False),
-    Column("status", String(24), nullable=False),
-    Column("pool_count", Integer, nullable=True),
-    Column("touched_count", Integer, nullable=True),
-    Column("entered_count", Integer, nullable=True),
-    Column("spot_active_symbols", Integer, nullable=True),
-    Column("rules_version", String(80), nullable=False),
-    Column("message", Text, nullable=True),
-    Column("error", Text, nullable=True),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-Index(
-    "ix_w2s_live_scan_runs_date_time",
-    w2s_live_scan_runs.c.trade_date,
-    w2s_live_scan_runs.c.started_at,
-)
-
-# 回测报告:单行 id=1 物化(CLI/调度写库,API 只读)。
-w2s_backtest_runs = Table(
-    "w2s_backtest_runs",
-    metadata,
-    Column("id", Integer, primary_key=True),  # 固定 1
-    Column("rules_version", String(80), nullable=False),
-    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("payload", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-
-# 回测重算运行轨道(手动/定时请求)。
-w2s_backtest_rebuild_runs = Table(
-    "w2s_backtest_rebuild_runs",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("source", String(24), nullable=False),
-    Column("status", String(24), nullable=False),
-    Column("stage", String(48), nullable=False),
-    Column("rules_version", String(80), nullable=False),
-    Column("requested_at", DateTime(timezone=True), nullable=False),
-    Column("started_at", DateTime(timezone=True), nullable=True),
-    Column("finished_at", DateTime(timezone=True), nullable=True),
-    Column("message", Text, nullable=True),
-    Column("error", Text, nullable=True),
-    Column("metrics", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index(
-    "ix_w2s_backtest_rebuild_requested",
-    w2s_backtest_rebuild_runs.c.requested_at,
-)
-
-
 # 首触板时间(v4.9): 每笔触板事件的首次触板15分钟K区间(末刻HH:MM).
 # 历史=pytdx研究导入(source=pytdx, 2024-08起); 每日=eod从涨停池快照首封时间fbt增量补(source=zt_pool).
 # 交割单每笔显示 + 好差票库生成join用; 不进判定.
@@ -2061,7 +1228,6 @@ w2s_touch_times = Table(
     Column("source", String(24), nullable=False, server_default="pytdx"),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
 )
-
 
 # ── 高位接力打板(二接三/三接四, hpr) ──
 # 策略口径 = 量化因子研究/高位接力/高位接力规则.md v1.3 定稿(2026-09-19)。
@@ -2343,7 +1509,6 @@ Index(
     hpr_quiz_questions.c.month,
 )
 
-
 # ── 断板反包打板(2/4/5+板断板1~3天后再涨停, fbb) ──
 # 策略口径 = 量化因子研究/反包/反包规则.md v2 定稿(2026-09-25)。
 # 池 = 昨日处于断板第 1~3 天且前波高度 2/4/5+(3板删除)的全量(雷达);
@@ -2521,116 +1686,6 @@ Index(
     fbb_quiz_questions.c.month,
 )
 
-
-# ── 二波反包打板(erbo: 妖股波段深洗后再触板) ──
-# 口径 = services/erbo/contracts.py (erbo-v1.0)。
-# 池 = 30日波段50~80%×深洗8~15%×MA20上方5%×30日涨停≥2×昨阴×断板3~7天 的潜伏名单;
-# 出手档 = 末日开盘 A平开-2~2 / B深低开≤-4;死格(浅低开-4~-2/高开>+2)只留雷达;
-# 买 = 盘中触涨停价(T字可买,一字剔除);卖 = T+1(同 fbb-v2.2)。
-
-erbo_pool_entries = Table(
-    "erbo_pool_entries",
-    metadata,
-    Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("name", String(80), nullable=False, server_default=""),
-    Column("gap", Integer, nullable=False),
-    Column("gain30_pct", Float, nullable=True),
-    Column("dd_pct", Float, nullable=True),
-    Column("ma20gap_pct", Float, nullable=True),
-    Column("lim30", Integer, nullable=True),
-    Column("yin_yang", String(2), nullable=True),
-    Column("last_open_pct", Float, nullable=True),
-    Column("point", String(4), nullable=False, server_default="—"),  # A/B/—
-    Column("level", String(2), nullable=False, server_default="—"),
-    Column("actionable", Boolean, nullable=False, server_default="false"),
-    Column("avoid_static", Text, nullable=True),
-    Column("cold_market", Boolean, nullable=False, server_default="false"),
-    Column("reb30", Integer, nullable=True),      # 30日内断≥2天再拉回次数(S4 特征源)
-    Column("s4", Boolean, nullable=False, server_default="false"),  # 断过两回精选标记
-    Column("prev_close", Float, nullable=True),
-    Column("limit_price", Float, nullable=False),
-    Column("rules_version", String(80), nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-Index("ix_erbo_pool_entries_date", erbo_pool_entries.c.trade_date)
-
-erbo_signals = Table(
-    "erbo_signals",
-    metadata,
-    Column("trade_date", Date, primary_key=True),
-    Column("vt_symbol", String(32), primary_key=True),
-    Column("name", String(80), nullable=True),
-    Column("gap", Integer, nullable=True),
-    Column("point", String(4), nullable=True),
-    Column("level", String(2), nullable=True),
-    Column("prev_close", Float, nullable=True),
-    Column("limit_price", Float, nullable=False),
-    Column("status", String(24), nullable=False, server_default="watching"),
-    Column("auction_pct", Float, nullable=True),
-    Column("opened", Boolean, nullable=True),
-    Column("touched_at", DateTime(timezone=True), nullable=True),
-    Column("entry_price", Float, nullable=True),
-    Column("entry_time", DateTime(timezone=True), nullable=True),
-    Column("last_price", Float, nullable=True),
-    Column("change_pct", Float, nullable=True),
-    Column("sealed", Boolean, nullable=True),
-    Column("streak_h", Integer, nullable=True),
-    Column("exit_date", Date, nullable=True),
-    Column("exit_price", Float, nullable=True),
-    Column("exit_reason", String(24), nullable=True),
-    Column("ret_pct", Float, nullable=True),
-    Column("bad_ticket", Boolean, nullable=True),
-    Column("rules_version", String(80), nullable=True),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index("ix_erbo_signals_status", erbo_signals.c.status)
-Index("ix_erbo_signals_date", erbo_signals.c.trade_date)
-
-erbo_live_scan_runs = Table(
-    "erbo_live_scan_runs",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("trade_date", Date, nullable=False),
-    Column("finished_at", DateTime(timezone=True), nullable=True),
-    Column("status", String(24), nullable=False),
-    Column("stats", JSONB, nullable=False, server_default="{}"),
-    Column("message", Text, nullable=True),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-)
-Index("ix_erbo_live_scan_runs_date", erbo_live_scan_runs.c.trade_date)
-
-erbo_backtest_runs = Table(
-    "erbo_backtest_runs",
-    metadata,
-    Column("id", Integer, primary_key=True),
-    Column("rules_version", String(80), nullable=False),
-    Column("payload", JSONB, nullable=False),
-    Column("built_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-
-erbo_backtest_rebuild_runs = Table(
-    "erbo_backtest_rebuild_runs",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("source", String(24), nullable=False),
-    Column("status", String(24), nullable=False),
-    Column("stage", String(48), nullable=False),
-    Column("rules_version", String(80), nullable=False),
-    Column("requested_at", DateTime(timezone=True), nullable=False),
-    Column("started_at", DateTime(timezone=True), nullable=True),
-    Column("finished_at", DateTime(timezone=True), nullable=True),
-    Column("message", Text, nullable=True),
-    Column("error", Text, nullable=True),
-    Column("metrics", JSONB, nullable=False, server_default="{}"),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-Index("ix_erbo_backtest_rebuild_requested", erbo_backtest_rebuild_runs.c.requested_at)
-
-
 market_timing_panel = Table(
     "market_timing_panel",
     metadata,
@@ -2653,14 +1708,12 @@ mainline_sentiment_history = Table(
     Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
-
 def create_schema(engine) -> None:
     """Create all AlphaAgent sync tables when they are missing."""
 
     drop_legacy_product_tables(engine)
     metadata.create_all(engine)
     _apply_compatible_schema_patches(engine)
-
 
 def ensure_schema_once(engine) -> None:
     """Create/patch schema once per API process.
@@ -2679,7 +1732,6 @@ def ensure_schema_once(engine) -> None:
             return
         create_schema(engine)
         _SCHEMA_READY = True
-
 
 def _apply_compatible_schema_patches(engine) -> None:
     """Patch columns added after early local databases were created."""
@@ -2701,8 +1753,6 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_label VARCHAR(24)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_gate VARCHAR(64)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_hint VARCHAR(128)",
-        "ALTER TABLE erbo_pool_entries ADD COLUMN IF NOT EXISTS reb30 INTEGER",
-        "ALTER TABLE erbo_pool_entries ADD COLUMN IF NOT EXISTS s4 BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",
@@ -2737,7 +1787,6 @@ def _apply_compatible_schema_patches(engine) -> None:
             if not _is_schema_patch_lock_timeout(exc):
                 raise
             logger.warning("compatible schema patch skipped: %s", exc.__class__.__name__)
-
 
 def _is_schema_patch_lock_timeout(exc: Exception) -> bool:
     orig = getattr(exc, "orig", None)

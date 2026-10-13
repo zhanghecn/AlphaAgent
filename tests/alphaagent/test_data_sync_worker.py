@@ -129,9 +129,8 @@ def test_worker_health_server_returns_report_status() -> None:
         server.server_close()
 
 
-def test_worker_runtime_constants_match_the_low_suction_scan_cadence() -> None:
+def test_worker_runtime_constants_match_scheduler_cadence() -> None:
     assert data_sync_worker.load_worker_runtime_constants() == {
-        "LIVE_SCAN_INTERVAL_SECONDS": 60,
         "SCHEDULER_TICK_SECONDS": 2,
     }
 
@@ -141,31 +140,16 @@ def test_healthcheck_rejects_wrong_capture_cadence_before_market_open() -> None:
     report = _health_report(
         now=now,
         constants={
-            "LIVE_SCAN_INTERVAL_SECONDS": 30,
             "SCHEDULER_TICK_SECONDS": 15,
         },
     )
 
     assert report["ok"] is False
     assert report["reason_codes"] == [
-        "low_suction_live_scan_interval_not_60s",
         "scheduler_tick_not_2s",
     ]
 
 
-def test_healthcheck_rejects_stale_intraday_schedule_heartbeats() -> None:
-    now = datetime(2026, 7, 22, 10, 0, tzinfo=CHINA_TZ)
-    report = _health_report(
-        now=now,
-        schedules=[
-            _schedule("low_suction_live_scan", now=now, age_seconds=181),
-        ],
-    )
-
-    assert report["ok"] is False
-    assert report["reason_codes"] == [
-        "low_suction_live_scan_heartbeat_stale",
-    ]
 
 
 def test_healthcheck_accepts_a_fresh_low_suction_scan_heartbeat() -> None:

@@ -82,7 +82,11 @@ def test_preserved_research_routes_remain() -> None:
 
     assert not any(path.startswith("/api/limit-up") for path in paths)
     assert any(path.startswith("/api/first-board") for path in paths)
-    assert any(path.startswith("/api/low-suction") for path in paths)
+    # 2026-10-13 大清理:低吸/qianlong/w2s/erbo 线全下线,路由与调度一并摘除
+    assert not any(path.startswith("/api/low-suction") for path in paths)
+    assert not any(path.startswith("/api/qianlong") for path in paths)
+    assert not any(path.startswith("/api/weak-to-strong") for path in paths)
+    assert not any(path.startswith("/api/erbo") for path in paths)
     assert any(path.startswith("/api/market-timing") for path in paths)
     assert any(path.startswith("/api/mainline-replay") for path in paths)
 

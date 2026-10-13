@@ -21,7 +21,6 @@ CHINA_TZ = timezone(timedelta(hours=8))
 DEFAULT_HEALTH_PORT = 8010
 
 EXPECTED_RUNTIME_CONSTANTS = {
-    "LIVE_SCAN_INTERVAL_SECONDS": 60,
     "SCHEDULER_TICK_SECONDS": 2,
 }
 SCHEDULE_HEARTBEAT_MAX_AGE_SECONDS = {
@@ -59,11 +58,8 @@ def run_forever(*, stop_event: Event | None = None) -> None:
     _configure_market_cache()
     ensure_sync_schema(recover_interrupted=True)
     start_data_sync_scheduler()
-    _start_low_suction_view_reconcile()
-    _start_w2s_report_reconcile()
     _start_hpr_report_reconcile()
     _start_fbb_report_reconcile()
-    _start_erbo_report_reconcile()
     health_server: ThreadingHTTPServer | None = None
     try:
         health_server = start_worker_health_server()
@@ -84,45 +80,6 @@ def _configure_market_cache() -> None:
     from alphaagent.server.core.config import get_settings
 
     configure_market_cache(get_settings().redis_url)
-
-
-def _start_low_suction_view_reconcile() -> None:
-    """后台自检低吸物化视图版本漂移（不阻塞调度器与健康端口启动）。"""
-
-    def _run() -> None:
-        try:
-            from alphaagent.server.services.low_suction.daily_picks_service import (
-                backfill_live_snapshots,
-                reconcile_materialized_views_on_startup,
-            )
-
-            actions = reconcile_materialized_views_on_startup()
-            LOGGER.info("low-suction materialized view reconcile: %s", actions)
-            # 版本切换后历史快照按版本隔离会整体消失，按当前版本回填最近
-            # 交易日，让推荐页日期切换器无缝衔接（幂等：已有日期跳过）。
-            backfill = backfill_live_snapshots()
-            LOGGER.info("low-suction live snapshot backfill: %s", backfill)
-        except Exception:  # noqa: BLE001
-            LOGGER.exception("low-suction materialized view reconcile failed")
-
-    Thread(target=_run, name="low-suction-view-reconcile", daemon=True).start()
-
-
-def _start_w2s_report_reconcile() -> None:
-    """后台自检N型补涨打板回测报告版本漂移(版本门禁失效即自动重建,防页面空但DB有数据)。"""
-
-    def _run() -> None:
-        try:
-            from alphaagent.server.services.weak_to_strong import contracts, repository, service
-
-            if repository.load_backtest_report(contracts.W2S_RULES_VERSION) is None:
-                LOGGER.info("w2s backtest report missing for %s, scheduling rebuild",
-                            contracts.W2S_RULES_VERSION)
-                service.start_backtest_rebuild(source="startup")
-        except Exception:  # noqa: BLE001
-            LOGGER.exception("w2s backtest report reconcile failed")
-
-    Thread(target=_run, name="w2s-report-reconcile", daemon=True).start()
 
 
 def _start_hpr_report_reconcile() -> None:
@@ -152,25 +109,6 @@ def _start_hpr_report_reconcile() -> None:
     Thread(target=_run, name="hpr-report-reconcile", daemon=True).start()
 
 
-def _start_erbo_report_reconcile() -> None:
-    """erbo 回测报告缺失/版本漂移时自动调度重建(启动自检,同 fbb)。"""
-
-    def _run() -> None:
-        try:
-            from alphaagent.server.services.erbo import contracts, repository, service
-
-            latest = repository.latest_rebuild_run()
-            report = repository.load_backtest_report(contracts.ERBO_RULES_VERSION)
-            if report is None and not (latest or {}).get("status") in ("queued", "running"):
-                LOGGER.info("erbo backtest report missing for %s, scheduling rebuild",
-                            contracts.ERBO_RULES_VERSION)
-                service.run_backtest_sync(source="startup")
-        except Exception:  # noqa: BLE001
-            LOGGER.exception("erbo backtest report reconcile failed")
-
-    Thread(target=_run, name="erbo-report-reconcile", daemon=True).start()
-
-
 def _start_fbb_report_reconcile() -> None:
     """后台自检断板反包回测报告版本漂移(版本门禁失效即自动重建,防页面空但DB有数据)。"""
 
@@ -190,13 +128,10 @@ def _start_fbb_report_reconcile() -> None:
 
 @lru_cache(maxsize=1)
 def load_worker_runtime_constants() -> dict[str, int]:
-    """Read low-suction cadence constants without importing the scheduler graph."""
+    """Read scheduler cadence constants without importing the scheduler graph."""
 
     services = Path(__file__).resolve().parent
     sources = {
-        "LIVE_SCAN_INTERVAL_SECONDS": (
-            services / "low_suction" / "daily_picks_service.py"
-        ),
         "SCHEDULER_TICK_SECONDS": services / "data_sync.py",
     }
     return {
