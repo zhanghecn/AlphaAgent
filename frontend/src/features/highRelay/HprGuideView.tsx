@@ -190,11 +190,19 @@ export function HprGuideView() {
             ))}
             <tr className="border-b-2 border-muted/40">
               <td className="py-1 pr-3 text-[11px] font-semibold text-violet-500/80" colSpan={8}>
-                弱市组（K 系五条，2020-22 弱市时代定型；2023 起参考成绩见回测页）
+                弱市组（K 系四条，2020-22 弱市时代定型；2023 起参考成绩见回测页）
               </td>
             </tr>
             {rules.weak_cheat_rows.map((r) => (
               <CheatTableRow key={r.name} row={r} />
+            ))}
+            <tr className="border-b-2 border-muted/40">
+              <td className="py-1 pr-3 text-[11px] font-semibold text-emerald-500/90" colSpan={8}>
+                通用组（跨时代口诀——不论当月启用哪组都可出手；成绩计入弱市组参与切换）
+              </td>
+            </tr>
+            {(rules.common_cheat_rows ?? []).map((r) => (
+              <CheatTableRow key={r.name} row={r} badge="通用组" />
             ))}
           </tbody>
         </table>
@@ -318,7 +326,8 @@ export function HprGuideView() {
           <div className="text-base font-semibold">口诀怎么算出来的 —— 每月初算一次的切换算法</div>
           <p className="mt-1.5 text-sm leading-7">
             全部口诀分两组：<span className="font-medium">强市组八条(A1~C3)</span> 与{" "}
-            <span className="font-medium">弱市组五条(K 系)</span>。每月初用「上月末为止」的数据算一遍，哪组强整组启用：
+            <span className="font-medium">弱市组四条(K 系)</span>。每月初用「上月末为止」的数据算一遍，哪组强整组启用；
+            另有<span className="font-medium">通用组</span>跨时代常开，不参与切换：
           </p>
           <ol className="mt-2.5 space-y-2 text-sm leading-7">
             <li>
@@ -338,10 +347,17 @@ export function HprGuideView() {
             </li>
           </ol>
           <div className="mt-3 border-t pt-2.5 text-sm leading-7">
+            <span className="font-medium">通用组——跨时代口诀：</span>
+            K5（二板贴零强开）7 年每一年都赚钱（25 笔·胜 84%，定型它的 2020-22 赚，
+            没参与定型的 2023-26 也赚），是 13 条里唯一跨时代的——所以它单独归通用组，
+            不论当月算出来启用哪组，K5 命中都可以买。以后再发现跨时代口诀也放这组。
+            它的成绩仍算进弱市组参与上面的切换判定（压舱石：剔掉它切换会来回翻，实测劣化）。
+          </div>
+          <div className="mt-2.5 border-t pt-2.5 text-sm leading-7">
             <span className="font-medium">为什么是这套参数：</span>
             判据(剔 3)、窗宽({rules.dyn_group_window} 月)、门槛(3 笔)共 90 种组合全部实测过——判据怎么选差别很小，
             真正起作用的是「9 月窗」(切得快又不来回翻)和「低门槛」(数据少的月份也能单选活组，不被迫双开)。
-            七年实测 <span className="font-mono">177 笔 · 胜 76% · 每笔 +11.55</span>，最差年 +139。
+            七年实测 <span className="font-mono">188 笔 · 胜 77% · 每笔 +11.55</span>（含通用组），七年每一年都是正的。
           </div>
           <div className="mt-1.5 text-sm leading-7">
             <span className="font-medium">无未来函数：</span>

@@ -13,11 +13,13 @@ export function CheatTableRow({
   showName = true,
   failCols,
   statText,
+  badge,
 }: {
   row: HprCheatRow;
   showName?: boolean;
   failCols?: string[];
   statText?: string;   // 成绩列覆盖文本(动态口诀组传近窗动态成绩;缺省=row.stat研究锚定)
+  badge?: string;      // 行名后小徽章(v7.17 通用组:跨时代口诀不论当月组都可出手)
 }) {
   const fail = (col: string) => (failCols ?? []).includes(col);
   const yangCls = fail("yang")
@@ -30,7 +32,14 @@ export function CheatTableRow({
   return (
     <tr className="border-b border-muted/40">
       {showName ? (
-        <td className="py-1.5 pr-3 font-medium whitespace-nowrap">{row.name}</td>
+        <td className="py-1.5 pr-3 font-medium whitespace-nowrap">
+          {row.name}
+          {badge ? (
+            <span className="ml-1.5 rounded border border-emerald-500/40 px-1 py-px text-[10px] font-normal text-emerald-500 align-middle">
+              {badge}
+            </span>
+          ) : null}
+        </td>
       ) : null}
       <td className={cn("py-1.5 pr-3 font-medium whitespace-nowrap rounded", yangCls, fail("yang") && FAIL_TD)}>{row.yang}</td>
       <td

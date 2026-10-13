@@ -175,9 +175,14 @@ export function HprLiveView({
             )}
           >
             <span className="font-semibold">当前口诀组:{DYN_GROUP_META[dyn.group]?.label ?? dyn.group}</span>
+            {dyn.always_on?.length ? (
+              <span className="rounded border border-emerald-500/40 px-1.5 py-px font-medium text-emerald-500">
+                通用组 {dyn.always_on.join("、")}
+              </span>
+            ) : null}
             <span className="text-muted-foreground">
               近一年哪组口诀赚得多就用哪组{dyn.asof ? ` · 数据至 ${dyn.asof}` : ""}
-              {dyn.group !== "both" ? "——另一组命中的票只看不买(灰显)" : ""}
+              {dyn.group !== "both" ? "——另一组命中的票只看不买(灰显,常驻口诀除外)" : ""}
             </span>
           </div>
         ) : null}

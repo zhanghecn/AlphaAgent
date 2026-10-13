@@ -58,14 +58,16 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
 
     # 动态口诀组(v7.1):按当前启用组标注出手资格——强市组命中/弱市组命中,
     # 只有启用组的命中才是「出手」;另一组的候选保留展示但灰显(未启用)。
+    # v7.17 K5常驻:常驻口诀不论当月组都算出手(不再「弱市组未启用」灰显)。
     dyn = current_dyn_group()
     grp = str(dyn["group"])
     active_count = 0
     for e in entries:
         strong_hit = bool(e.get("actionable"))
         weak_hit = str(e.get("weak_point") or "—") != "—"
+        always_on = str(e.get("weak_point") or "") in contracts.COMMON_POINT_KEYS
         e["strong_active"] = strong_hit and grp in ("strong", "both")
-        e["weak_active"] = weak_hit and grp in ("weak", "both")
+        e["weak_active"] = weak_hit and (grp in ("weak", "both") or always_on)
         e["active"] = bool(e["strong_active"] or e["weak_active"])
         if e["active"]:
             active_count += 1
@@ -109,6 +111,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
             "group": grp,
             "asof": dyn.get("asof"),
             "label": {"weak": "弱市组", "strong": "强市组", "both": "双开(样本不足)"}[grp],
+            "always_on": list(contracts.COMMON_POINT_KEYS),   # v7.17 通用组(跨时代常开)
         },
         "counts": {
             "pool": len(pool),
@@ -567,7 +570,11 @@ def get_current_koujue() -> dict[str, object]:
             out.append({**r, "dyn_stat": ds})
         return out
 
-    weak_rows = rows_with_dyn(contracts.WEAK_CHEAT_ROWS)
+    # v7.17 通用组(第三组):跨时代口诀单列,不论当月组都出手;成绩计入所属时代组参与切换
+    common_rows = rows_with_dyn([r for r in contracts.WEAK_CHEAT_ROWS + contracts.CHEAT_ROWS
+                                 if str(r["no"]) in contracts.COMMON_POINT_KEYS])
+    weak_rows = rows_with_dyn([r for r in contracts.WEAK_CHEAT_ROWS
+                               if str(r["no"]) not in contracts.COMMON_POINT_KEYS])
     strong_rows = rows_with_dyn(contracts.CHEAT_ROWS)
 
     # 切换历史(v7.3):直接读物化月状态序列的变化点——每年真实判定口径
@@ -604,7 +611,8 @@ def get_current_koujue() -> dict[str, object]:
             stt = "green"
         health.append({
             "no": no, "name": point_names.get(no, no),
-            "group": "weak" if no in contracts.WEAK_POINT_KEYS else "strong",
+            "group": ("common" if no in contracts.COMMON_POINT_KEYS
+                      else "weak" if no in contracts.WEAK_POINT_KEYS else "strong"),
             "n24": len(rs24), "win24": round(sum(1 for x in rs24 if x > 0) / len(rs24), 3) if rs24 else None,
             "avg24": round(a24, 2) if a24 is not None else None,
             "avg_all": round(a_all, 2) if a_all is not None else None,
@@ -617,13 +625,17 @@ def get_current_koujue() -> dict[str, object]:
         "window_months": win,
         "asof": months[-1],
         "current_group": current,
-        "groups": {"weak": {**wk, "label": "弱市组", "rows": weak_rows},
+        "always_on": list(contracts.COMMON_POINT_KEYS),   # v7.17 通用组(跨时代常开)
+        "groups": {"common": {"label": "通用组", "rows": common_rows},
+                   "weak": {**wk, "label": "弱市组", "rows": weak_rows},
                    "strong": {**st, "label": "强市组", "rows": strong_rows}},
-        "current_rows": weak_rows if current == "weak" else
-                        strong_rows if current == "strong" else weak_rows + strong_rows,
+        # 当前启用行=当月组+通用组(通用组永远在启用集里)
+        "current_rows": (weak_rows if current == "weak" else
+                         strong_rows if current == "strong" else weak_rows + strong_rows) + common_rows,
         "switch_history": history,
         "health": health,
-        "caliber": "近9月两组剔掉最猛3笔后的每笔平均收益高者整组启用;月末滚动,样本不足双开",
+        "caliber": "近9月两组剔掉最猛3笔后的每笔平均收益高者整组启用;月末滚动,样本不足双开;"
+                   "通用组(K5)跨时代常开,不论当月组都可出手",
     }
 
 
@@ -648,9 +660,14 @@ def get_rules() -> dict[str, object]:
         "point_boards": contracts.POINT_BOARDS,   # 板位归属(打3板/打4板)
         "rules": contracts.RULES,
         "cheat_rows": contracts.CHEAT_ROWS,   # 速查表(规则页主表;单一事实源,前端不维护副本)
-        "weak_cheat_rows": contracts.WEAK_CHEAT_ROWS,  # 弱市组速查表(v7.0动态口诀组)
+        # 弱市组速查表排除通用组行,通用组单列(v7.17第三组;答题讲解仍读WEAK_CHEAT_ROWS全表不受分区影响)
+        "weak_cheat_rows": [r for r in contracts.WEAK_CHEAT_ROWS
+                            if str(r.get("no")) not in contracts.COMMON_POINT_KEYS],
+        "common_cheat_rows": [r for r in contracts.WEAK_CHEAT_ROWS + contracts.CHEAT_ROWS
+                              if str(r.get("no")) in contracts.COMMON_POINT_KEYS],
         "weak_point_boards": contracts.WEAK_POINT_BOARDS,
         "dyn_group_window": contracts.DYN_GROUP_WINDOW,
+        "dyn_always_on": list(contracts.COMMON_POINT_KEYS),   # v7.17 通用组(速查表分区+徽章)
         "falsified_rules": contracts.FALSIFIED_RULES,
         "risk_notes": contracts.RISK_NOTES,
         "ths_pool_conditions": contracts.THS_POOL_CONDITIONS,

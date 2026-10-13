@@ -138,10 +138,14 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     payload["dyn_month_states"] = month_states
 
     def _dyn_take(row) -> str:
-        """该笔按当月组状态是否出手;出手=命中组编号,不出手=''(双命中归K系,与轻表同口径)"""
+        """该笔按当月组状态是否出手;出手=命中组编号,不出手=''(双命中归K系,与轻表同口径)。
+        v7.17 K5常驻:常驻口诀不论当月组都出手(strong月的K5命中不再滤掉;weak/both月
+        行为不变——双命中归K系口径下原本就走wk)。切换判定轻表dyn_trades不受影响。"""
         st = contracts.dyn_state_at(month_states, str(row["月"]))
         wk = str(row["弱口诀"]) if row["弱口诀"] == row["弱口诀"] else "—"
         pt = str(row["方案点"])
+        if wk in contracts.COMMON_POINT_KEYS:
+            return wk
         if st == "weak":
             return wk if wk != "—" else ""
         if st == "strong":

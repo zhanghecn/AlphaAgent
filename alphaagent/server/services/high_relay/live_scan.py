@@ -125,7 +125,9 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
     for entry in pool:
         strong_ok = bool(entry.get("actionable")) and grp in ("strong", "both")
         weak_hit = str(entry.get("weak_point") or "—") != "—"
-        weak_ok = weak_hit and grp in ("weak", "both")
+        # v7.17 K5常驻:常驻口诀不论当月组都触发(组停它不停)
+        weak_ok = weak_hit and (grp in ("weak", "both")
+                                or str(entry.get("weak_point")) in contracts.COMMON_POINT_KEYS)
         if not (strong_ok or weak_ok):
             continue  # 雷达票(未命中/静态回避/未启用组候选)只展示不触发,不写信号
         vt = str(entry["vt_symbol"])

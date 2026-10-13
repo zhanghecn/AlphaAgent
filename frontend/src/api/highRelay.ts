@@ -88,7 +88,7 @@ export interface HprLivePayload {
     | "preopen" | "auction" | "first_window" | "morning" | "lunch" | "afternoon" | "closed";
   rules_version: string;
   /** 当前启用口诀组(v7.1:出手资格按组过滤;asof=数据截止月) */
-  dyn_group: { group: HprDynGroup; asof: string | null; label: string } | null;
+  dyn_group: { group: HprDynGroup; asof: string | null; label: string; always_on?: string[] } | null;
   counts: {
     pool: number;
     actionable: number;
@@ -318,6 +318,8 @@ export interface HprRulesPayload {
   weak_cheat_rows: HprCheatRow[];        // 弱市组K系速查表(v7.2 起规则页并列渲染)
   weak_point_boards: Record<string, string>;  // K2→打4板(K系板位归属)
   dyn_group_window: number;                   // 动态组滚动窗宽月数(v7.15=9,机制区算法说明用)
+  dyn_always_on: string[];                    // 通用组口诀(v7.17:跨时代常开,速查表分区+徽章)
+  common_cheat_rows: HprCheatRow[];           // 通用组速查表(v7.17第三组;weak_cheat_rows已排除通用组行)
   falsified_rules: string[];
   risk_notes: string[];
   ths_pool_conditions: Record<string, string>;
@@ -360,6 +362,7 @@ export interface HprKoujueCurrent {
   window_months: number;
   asof: string;                      // 数据截止月(YYYY-MM)
   current_group: "weak" | "strong" | "both";
+  always_on: string[];                // v7.17 常驻口诀(K5:不论当月组都可出手)
   groups: { weak: HprKoujueGroupStats; strong: HprKoujueGroupStats };
   current_rows: (HprCheatRow & { dyn_stat: string })[];
   switch_history: { month: string; from: string; to: string }[];
