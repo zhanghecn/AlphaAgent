@@ -357,7 +357,7 @@ export function HprGuideView() {
             <span className="font-medium">为什么是这套参数：</span>
             判据(剔 3)、窗宽({rules.dyn_group_window} 月)、门槛(3 笔)共 90 种组合全部实测过——判据怎么选差别很小，
             真正起作用的是「9 月窗」(切得快又不来回翻)和「低门槛」(数据少的月份也能单选活组，不被迫双开)。
-            七年实测 <span className="font-mono">188 笔 · 胜 77% · 每笔 +11.55</span>（含通用组），七年每一年都是正的。
+            七年实测 <span className="font-mono">198 笔 · 胜 78% · 每笔 +11.76</span>（含通用组），七年每一年都是正的。
           </div>
           <div className="mt-1.5 text-sm leading-7">
             <span className="font-medium">无未来函数：</span>
