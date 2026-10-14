@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, timedelta
 
 import numpy as np
@@ -533,6 +534,46 @@ def scheme_today_window(point: str, auction_pct=None):
             if w[0] <= auction_pct < w[1]:  # type: ignore[index]
                 return w
     return wins[0]
+
+
+def _cand_row(s: dict) -> dict:
+    """候选分支 → 下发行 {no,sub,name,today,buy}(实时候选展示,2026-10-14)。"""
+    lo, hi = s["today"]
+    return {"no": str(s["no"]), "sub": s.get("sub"), "name": str(s["name"]),
+            "today": [lo, hi],
+            "buy": "低吸" if lo < 0 and hi <= 3 else "触板打"}
+
+
+def entry_candidates(entry: Mapping[str, object]) -> list[dict]:
+    """池条目重算强市组全部候选分支(2026-10-14,主人:方案点按竞价
+    条件可能有多个,实时推荐显示到 A1·低开等强开 子项级)。
+
+    判定输入池条目已全存(b*_open/b*_turn/pre10_pct/foundation_pose/
+    anchor_*/foundation_chg),运行时重算=永远当前 contracts 口径(改窗发版
+    后存量池展示不滞后);与物化定型 tag_point 同源(match_schemes 首命中
+    即 point),顺序=出手优先级。C2×A3·B3 链重叠票今开落哪个窗就按哪条。"""
+    brs = match_schemes(
+        str(entry.get("group4") or ""), entry.get("b1_open"),
+        entry.get("b2_open"), entry.get("b3_open"),
+        b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
+        foundation_chg=entry.get("foundation_chg"),
+        pre10_pct=entry.get("pre10_pct"),
+        foundation_pose=entry.get("foundation_pose"),
+        anchor_pos=entry.get("anchor_pos"), anchor_dist=entry.get("anchor_dist"))
+    return [_cand_row(s) for s in brs]
+
+
+def entry_weak_candidates(entry: Mapping[str, object]) -> list[dict]:
+    """池条目重算弱市组全部候选分支(与 entry_candidates 同构;K4 双子项
+    同窗并列展示,首条=weak_point 归属)。K5 通用组常开(v7.17)。"""
+    wbrs = match_weak_schemes(
+        str(entry.get("group4") or ""), entry.get("b1_open"),
+        entry.get("b2_open"), entry.get("b3_open"),
+        b1_turn=entry.get("b1_turn"), b2_turn=entry.get("b2_turn"),
+        b3_turn=entry.get("b3_turn"),
+        foundation_chg=entry.get("foundation_chg"),
+        prev_wave60=entry.get("prev_wave60"), dist_h60=entry.get("dist_h60"))
+    return [_cand_row(s) for s in wbrs]
 
 
 def static_avoid(point: str, group4: str, b1_open, b2_open, pre3_pct) -> str:

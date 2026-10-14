@@ -1272,6 +1272,11 @@ hpr_pool_entries = Table(
     Column("b2_turn", Float, nullable=True),             # 二板换手 %
     Column("b3_turn", Float, nullable=True),             # 三板换手 %(2026-09-28)
     Column("turn_grad", Float, nullable=True),           # 换手梯度 b2-b1
+    # 判定腿补充快照(实时候选重算用:A2透支/B2·B3姿态/C2锚点腿)
+    Column("pre10_pct", Float, nullable=True),           # 首板前10日涨幅 %(A2 透支腿)
+    Column("foundation_pose", String(8), nullable=True), # 地基姿态 站线上/骑线/线下(B2·B3 姿态腿)
+    Column("anchor_pos", Integer, nullable=True),        # 锚点板位(C2 锚点腿)
+    Column("anchor_dist", Integer, nullable=True),       # 距锚点天数(C2 锚点腿)
     Column("mkt_lim_tm1", Integer, nullable=True),       # 昨日大盘涨停家数(信息项)
     # 弱市组候选(v7.1 动态口诀组):K系链级命中;weak_gate=today_{lo}_{hi}[,...] 并集窗,
     # 当前组=weak/both 才出手(get_live/live_scan 按组过滤)
@@ -1753,6 +1758,11 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_label VARCHAR(24)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_gate VARCHAR(64)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS weak_hint VARCHAR(128)",
+        # 实时候选重算(2026-10-14):补齐 A2透支/B2·B3姿态/C2锚点 四条判定腿的输入快照
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS pre10_pct FLOAT",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS foundation_pose VARCHAR(8)",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS anchor_pos INTEGER",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS anchor_dist INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",

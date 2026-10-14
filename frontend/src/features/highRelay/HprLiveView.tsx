@@ -254,30 +254,19 @@ export function HprLiveView({
 
 function LiveRow({ entry }: { entry: HprLiveEntry }) {
   const meta = STATUS_META[entry.status] ?? STATUS_META.watching;
-  const badge = POINT_BADGES[entry.point] ?? null;
   // v7.1 动态口诀组:出手资格=当前启用组命中(active);未启用组命中/雷达降透明度(只看不做)
   const active = entry.active ?? entry.actionable;
   const dimmed = !active;
   const auctionBlocked =
     entry.status === "skipped_auction" ||
     (entry.avoid_static != null && entry.avoid_static !== "");
-  const weakHit = entry.weak_point != null && entry.weak_point !== "—";
   return (
     <tr className={cn("border-b last:border-b-0 hover:bg-muted/30", dimmed && "opacity-50")}>
       <td className="px-3 py-2.5">
         <StockIdentityLink name={entry.name ?? entry.vt_symbol} vtSymbol={entry.vt_symbol} />
       </td>
       <td className="px-3 py-2.5">
-        {badge ? (
-          <span
-            className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", badge.className)}
-            title={badge.full}
-          >
-            {badge.label}
-          </span>
-        ) : (
-          <span className="text-muted-foreground/60">—</span>
-        )}
+        <CandidateBadges entry={entry} />
       </td>
       <td className="px-3 py-2.5 text-xs">
         {active ? (
@@ -315,47 +304,6 @@ function LiveRow({ entry }: { entry: HprLiveEntry }) {
       <td className={cn("px-3 py-2.5 text-right font-mono tabular-nums",
         entry.status === "skipped_auction" ? "text-amber-600" : pctTone(entry.auction_pct))}>
         {entry.auction_pct == null ? "--" : formatPct(entry.auction_pct)}
-        {entry.today_window && entry.today_window.length > 0 ? (
-          // 出手条件(主人定):盘前显示「需多少」待竞价对照;竞价后对照今开 ✓/✗;
-          // 多分支链重叠票(C2×A3·B3/B1×转温)多窗并列,悬浮见完整条件表(action_hint)
-          <div
-            className={cn(
-              "text-[10px]",
-              entry.auction_pct == null
-                ? "text-muted-foreground"
-                : inAnyWindow(entry.today_window, entry.auction_pct)
-                  ? "text-rise"
-                  : "text-amber-600",
-            )}
-            title={entry.action_hint ?? undefined}
-          >
-            需{entry.today_window.map(fmtWindow).join("或")}
-            {entry.auction_pct != null
-              ? inAnyWindow(entry.today_window, entry.auction_pct) ? " ✓" : " ✗"
-              : ""}
-          </div>
-        ) : null}
-        {weakHit && entry.weak_windows && entry.weak_windows.length > 0 ? (
-          // 弱市组候选窗(v7.1):K系今开窗另列一行;弱市组未启用时灰显(对照不误导)
-          <div
-            className={cn(
-              "text-[10px]",
-              entry.weak_active
-                ? entry.auction_pct == null
-                  ? "text-violet-500"
-                  : inAnyWindow(entry.weak_windows, entry.auction_pct)
-                    ? "text-violet-500"
-                    : "text-amber-600"
-                : "text-muted-foreground/60",
-            )}
-            title={entry.weak_hint ?? undefined}
-          >
-            K窗 需{entry.weak_windows.map(fmtWindow).join("或")}
-            {entry.auction_pct != null
-              ? inAnyWindow(entry.weak_windows, entry.auction_pct) ? " ✓" : " ✗"
-              : ""}
-          </div>
-        ) : null}
       </td>
       <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatPrice(entry.last_price)}</td>
       <td className={cn("px-3 py-2.5 text-right font-mono tabular-nums", pctTone(entry.change_pct))}>
@@ -387,17 +335,64 @@ function pctTone(value: number | null | undefined) {
   return value >= 0 ? "text-rise" : "text-fall";
 }
 
+/** 方案点候选列表(主人定2026-10-14:方案点按竞价条件可能不止一个,显示到子项级——
+ * A1 双平贴零有「低开等强开/平开等温开」两档,C2×A3·B3 链重叠票今开落哪个窗按哪条)。
+ * 每候选=编号·子项+各自竞价窗;竞价定型后落窗候选 ✓,落空/未启用组降透明;
+ * 悬浮=该分支完整出手条件(开多少+怎么买)。无候选=雷达(—);纯信号行兜底单徽章。 */
+function CandidateBadges({ entry }: { entry: HprLiveEntry }) {
+  const rows = [
+    ...(entry.candidates ?? []).map((c) => ({ c, weak: false })),
+    ...(entry.weak_candidates ?? []).map((c) => ({ c, weak: true })),
+  ];
+  if (rows.length === 0) {
+    const badge = POINT_BADGES[entry.point] ?? null;
+    if (!badge) return <span className="text-muted-foreground/60">—</span>;
+    return (
+      <span
+        className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", badge.className)}
+        title={badge.full}
+      >
+        {badge.label}
+      </span>
+    );
+  }
+  const settled = entry.auction_pct != null;
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      {rows.map(({ c, weak }, i) => {
+        const badge = POINT_BADGES[c.no];
+        const groupOn = weak ? entry.weak_active !== false : entry.strong_active !== false;
+        const hit =
+          settled && c.today[0] <= (entry.auction_pct as number) && (entry.auction_pct as number) < c.today[1];
+        return (
+          <span
+            key={`${c.no}-${c.sub ?? i}`}
+            className={cn(
+              "whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium",
+              badge?.className ?? "bg-muted text-muted-foreground",
+              !groupOn && "opacity-40",
+              groupOn && settled && !hit && "opacity-45",
+            )}
+            title={`${c.no} ${c.name}${c.sub ? `·${c.sub}` : ""} · 今天开${fmtWindow(c.today)} · ${
+              c.buy === "低吸" ? "开盘直接买(低吸)" : "盘中触涨停价打"
+            }${weak && !groupOn ? "(弱市组未启用,只看不做)" : ""}`}
+          >
+            {c.no}
+            {c.sub ? `·${c.sub}` : ""} {fmtWindow(c.today)}
+            {settled && hit ? " ✓" : ""}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 /** 今开窗格式化:[lo,hi] → "<3" / "≥6" / "6~9.5"(与后端 action_hint 同口径) */
 function fmtWindow(win: [number, number]) {
   const [lo, hi] = win;
   if (lo <= -90) return `<${hi}`;
   if (hi >= 90) return `≥${lo}`;
   return `${lo}~${hi}`;
-}
-
-/** 今开是否落在任一候选窗(多分支链重叠票有多个窗,任一含即合规) */
-function inAnyWindow(wins: [number, number][], auctionPct: number) {
-  return wins.some(([lo, hi]) => lo <= auctionPct && auctionPct < hi);
 }
 
 function fmtNum(value: number | null | undefined) {

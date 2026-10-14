@@ -20,6 +20,16 @@ export type HprStatus =
   | "watching" | "sealed_watch" | "entered" | "holding" | "pending_exit" | "closed"
   | "skipped_auction" | "skipped_gap" | "late_touch" | "no_trigger";
 
+/** 口诀候选分支(实时候选2026-10-14):子项级——A1 有低开等强开/平开等温开两档,
+ * 链重叠票(C2×A3·B3)/跨组(K2/K5)按竞价窗各走各条;首条=定型归属 */
+export interface HprSchemeCandidate {
+  no: HprAnyPoint;
+  sub: string | null;
+  name: string;
+  today: [number, number];
+  buy: "触板打" | "低吸";
+}
+
 export interface HprLiveEntry {
   vt_symbol: string;
   name: string | null;
@@ -34,11 +44,15 @@ export interface HprLiveEntry {
   action_hint: string | null;
   /** 出手今开窗列表(全部候选分支窗;无窗为空数组) */
   today_window: [number, number][];
+  /** 强市组全部候选分支(2026-10-14:方案点可能不止一个,显示到子项;空数组=无命中) */
+  candidates: HprSchemeCandidate[];
   /** 弱市组候选(v7.1 动态口诀组):K系链级命中,当前组=weak/both 才出手 */
   weak_point: HprWeakPoint | "—";
   weak_label: string | null;
   weak_hint: string | null;
   weak_windows: [number, number][];
+  /** 弱市组全部候选分支(2026-10-14;K5=通用组常开) */
+  weak_candidates: HprSchemeCandidate[];
   b3_turn: number | null;
   /** 动态组标注(v7.1,后端 get_live 下发):strong/weak_active=该组当前启用且命中;
    *  active=出手资格(启用组任一命中);paused_label=命中但所属组未启用(灰显) */

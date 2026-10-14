@@ -75,10 +75,15 @@ const LIVE_PAYLOAD: HprLivePayload = {
       auction_gate: null,
       action_hint: "今天开3~5,盘中触涨停价打",
       today_window: [[3.0, 5.0]],
+      candidates: [
+        { no: "B1", sub: "转温", name: "强开系", today: [3.0, 5.0], buy: "触板打" },
+        { no: "B1", sub: "续强", name: "强开系", today: [6.0, 9.0], buy: "触板打" },
+      ],
       weak_point: "—",
       weak_label: null,
       weak_hint: null,
       weak_windows: [],
+      weak_candidates: [],
       b3_turn: null,
       strong_active: true,
       weak_active: false,
@@ -126,10 +131,14 @@ const LIVE_PAYLOAD: HprLivePayload = {
       auction_gate: null,
       action_hint: null,
       today_window: [],
+      candidates: [],
       weak_point: "K5",
       weak_label: "K5 二板贴零强开",
       weak_hint: "今天开6~9.5,盘中触涨停价打",
       weak_windows: [[6.0, 9.5]],
+      weak_candidates: [
+        { no: "K5", sub: null, name: "二板贴零强开", today: [6.0, 9.5], buy: "触板打" },
+      ],
       b3_turn: null,
       strong_active: false,
       weak_active: false,
@@ -179,10 +188,12 @@ const LIVE_PAYLOAD: HprLivePayload = {
       auction_gate: null,
       action_hint: null,
       today_window: [],
+      candidates: [],
       weak_point: "—",
       weak_label: null,
       weak_hint: null,
       weak_windows: [],
+      weak_candidates: [],
       b3_turn: null,
       strong_active: false,
       weak_active: false,
@@ -249,16 +260,17 @@ describe("HprLiveView", () => {
     expect(html).toContain("持有中");
     expect(html).toContain("爱仕达");
     expect(html).toContain("下影→实体");
-    // 出手条件(主人定):今开列下显示「需多少」并对照今开(mock: 今开+2.1 不在窗3~5 → ✗)
-    expect(html).toContain("需3~5");
-    expect(html).toContain(" ✗");
-    expect(html).toContain("今天开3~5,盘中触涨停价打");  // title 悬浮完整条件
-    // v7.1 动态口诀组:当前组横幅 + 弱市组命中票灰显(未启用)+K窗对照
+    // 方案点候选列表(主人定2026-10-14:方案点显示到子项级,可能不止一个):
+    // B1 双子档并列;今开+2.1 落空两窗(降透明,无 ✓);title=分支完整出手条件
+    expect(html).toContain("B1·转温 3~5");
+    expect(html).toContain("B1·续强 6~9");
+    expect(html).toContain("今天开3~5 · 盘中触涨停价打");  // title 悬浮完整条件
+    expect(html).toContain("opacity-45");               // 竞价定型落空候选降透明
+    // v7.1 动态口诀组:当前组横幅 + 弱市组命中票灰显(未启用)+K 候选徽章(紫系)
     expect(html).toContain("当前口诀组:强市组");
     expect(html).toContain("近一年哪组口诀赚得多就用哪组");
     expect(html).toContain("弱市组未启用");
-    expect(html).toContain("K5");                       // K系徽章(紫系)
-    expect(html).toContain("K窗 需6~9.5");
+    expect(html).toContain("K5 6~9.5");                 // K系候选徽章带窗(紫系)
     expect(html).toContain("出手 1");                    // active 口径(未启用组不计出手)
   });
 });

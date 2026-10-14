@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from alphaagent.server.services.high_relay import (
     backtest as backtest_mod,
     contracts,
+    pool as pool_mod,
     quiz as quiz_mod,
     repository,
 )
@@ -159,6 +160,12 @@ def _live_row(entry: dict[str, object] | None,
             "weak_label": entry.get("weak_label"),
             "weak_hint": entry.get("weak_hint"),
             "weak_windows": _parse_gate(entry.get("weak_gate")),
+            # 实时候选(主人2026-10-14):全部候选分支到子项级——
+            # 方案点按竞价条件可能有多个(C2×A3·B3 链重叠/A1双档/K系跨组),
+            # 每候选带各自 today 窗,竞价定型后前端按窗对照 ✓;运行时重算
+            # (判定输入池条目全存)=永远当前 contracts 口径,首条=定型归属
+            "candidates": pool_mod.entry_candidates(entry),
+            "weak_candidates": pool_mod.entry_weak_candidates(entry),
             "b3_turn": entry.get("b3_turn"),
             "prev_close": entry.get("prev_close"),
             "limit_price": entry.get("limit_price"),
