@@ -163,7 +163,7 @@ export function HprGuideView() {
         <div className="mb-2 rounded-md bg-violet-500/5 px-3 py-2 text-xs leading-5 text-violet-500/90 ring-1 ring-violet-500/20">
           三板换手池的票，<span className="font-semibold">第一眼看地基K线阴阳</span>——
           阴K走 K2/K5，阳K走 K4，一票只落一条路：
-          阴地基：今开 <span className="font-mono">6~9.5</span> 强开查 K2(三换10~15 × 地基要干净)或 K5(二板贴零 × 前波=0)；
+          阴地基：今开 <span className="font-mono">6~9</span> 强开查 K2(三换10~15 × 地基要干净)，今开 <span className="font-mono">6~9.5</span> 也查 K5(二板贴零 × 前波=0,通用组窗到9.5)；
           阳地基：今开 <span className="font-mono">0~3</span> 弱开查 K4(三换12~20 × 一板要放量)，今开 <span className="font-mono">3~6</span> 温开不碰(毒)。
         </div>
         <table className="w-full border-collapse text-sm">
