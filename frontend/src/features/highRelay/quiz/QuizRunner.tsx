@@ -436,6 +436,10 @@ export function QuizRunner({
           />
           <InfoCell label="首板前20日" value={fmtSigned(d.pre20_pct)} fail={failSet.has("首板前20日")} />
           <InfoCell label="首板前10日" value={fmtSigned(d.pre10_pct)} fail={failSet.has("首板前10日")} />
+          {d.dist_ma10 != null ? (
+            // v7.19 A2 站线腿判定格:地基收盘距十日线(≥0=站上十日线)
+            <InfoCell label="距MA10" value={fmtSigned(d.dist_ma10)} fail={failSet.has("距MA10")} />
+          ) : null}
           {d.b1_turn != null ? (
             // v7.1 弱市组判定格(仅2020-22题下发):K4 一板放量实体板腿(换手≥5)
             <InfoCell label="一板换手" value={`${d.b1_turn.toFixed(1)}`} fail={failSet.has("一板换手")} />

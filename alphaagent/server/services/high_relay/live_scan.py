@@ -200,7 +200,8 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
                         pre10_pct=entry.get("pre10_pct"),
                         foundation_pose=entry.get("foundation_pose"),
                         anchor_pos=entry.get("anchor_pos"),
-                        anchor_dist=entry.get("anchor_dist"))
+                        anchor_dist=entry.get("anchor_dist"),
+                        dist_ma10=entry.get("dist_ma10"))
                 if real_point != point:
                     patch["point"] = real_point
                     patch["level"] = ("A" if str(real_point).startswith("K")

@@ -298,6 +298,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             b3_turn=rec.get("b3_turn"), foundation_chg=rec.get("foundation_chg"),
             pre10_pct=rec.get("pre10_pct"),
             foundation_pose=rec.get("foundation_pose"),
+            dist_ma10=rec.get("dist_ma10"),
             anchor_pos=rec.get("anchor_pos"), anchor_dist=rec.get("anchor_dist"))
         weak = pool_mod.tag_weak(
             group4, rec.get("b1_open"), rec.get("b2_open"),

@@ -244,7 +244,8 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
 def tag_scheme(group4: str, b1_open, b2_open, b3_open,
                auction_pct=None, b2_turn=None, b3_turn=None,
                foundation_chg=None, pre10_pct=None,
-               foundation_pose=None, anchor_pos=None, anchor_dist=None):
+               foundation_pose=None, anchor_pos=None, anchor_dist=None,
+               dist_ma10=None):
     """打板口诀卡七条打标·分支版(判定逻辑唯一实现,tag_point 是它的编号薄壳):
     返回命中的 SCHEMES 条目本身——多分支口诀(A1/B1/B2/C2)定位到具体分支,
     答题讲解取子项名/速查表行用(q31);未命中返回 None。
@@ -252,8 +253,11 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
     vol2_when_b1_low = A2 条件换手(一板<3 板弱时二板一字须换手<5,假锁排除);
     block_foundation_chg = (lo,hi,cap) 条件回避(v6.2 C2):首板前一日涨跌∈[lo,hi)
     (先手小阳)且三板开<cap(温开) → 不命中;三开≥cap(强开链)照打(保华瓷们);
-    block_pre10 = X 条件回避(v6.3 A2):首板前10个交易日涨幅≥X(近端透支,
-    一字=高位末段冲刺)不命中——阳组专属毒(阴组反向肥,勿通用);
+    block_pre10 = X 条件回避(v6.3 A2,v7.19 阈值10→20):首板前10个交易日
+    涨幅≥X(近端透支,一字=高位末段冲刺)不命中——阳组专属毒(阴组反向肥,勿通用);
+    dist_ma10_min = 地基站线腿(v7.19 A2):首板前一日(地基日)收盘距MA10 ≥X
+    才命中——地基收在十日线上方=涨势里歇脚;破线=阴跌里挣扎,弱势地基的一字
+    是诱多(49笔里破线7笔均-2.17/站线42笔均+6.5,七年检验站线组零负年);
     block_foundation_ma20 = (已废弃v6.10)原首板前日收盘距20日线<X%回避,
     被 foundation_pose_ok 姿态尺替代(数字口径混掉穿线/整根线下两类,见FALSIFIED);
     foundation_pose_ok = 地基K线姿态尺(v6.10 B2/B3):首板前一日K线 vs 20日线——
@@ -301,7 +305,10 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
                 continue  # 先手小阳×三板温开=半路残局(v6.2)
         bp10 = s.get("block_pre10")
         if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
-            continue  # 近10日已涨透支=高位一字末段冲刺(v6.3 A2)
+            continue  # 近10日已涨透支=高位一字末段冲刺(v6.3 A2;v7.19 阈值10→20)
+        ma10min = s.get("dist_ma10_min")
+        if ma10min is not None and (dist_ma10 is None or dist_ma10 < ma10min):
+            continue  # 地基破十日线=阴跌里挣扎,弱势一字诱多(v7.19 A2)
         fpok = s.get("foundation_pose_ok")
         if fpok and foundation_pose not in ("站线上", "骑线"):
             continue  # 弱票地基要有人做:站线上=有人扛/骑线=有人争;贴线死水掉线下没人救(v6.10)
@@ -421,7 +428,8 @@ def match_weak_schemes(group4: str, b1_open, b2_open, b3_open,
 def tag_point(group4: str, b1_open, b2_open, b3_open,
               auction_pct=None, b2_turn=None, b3_turn=None,
               foundation_chg=None, pre10_pct=None,
-              foundation_pose=None, anchor_pos=None, anchor_dist=None) -> str:
+              foundation_pose=None, anchor_pos=None, anchor_dist=None,
+              dist_ma10=None) -> str:
     """七条口诀编号打标(hpr-v6.8,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
     tag_scheme 的薄壳:返回命中条目的编号(如「A1」),未命中「—」;
     判定细节/各腿语义见 tag_scheme docstring。"""
@@ -429,21 +437,24 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
                    auction_pct=auction_pct, b2_turn=b2_turn, b3_turn=b3_turn,
                    foundation_chg=foundation_chg, pre10_pct=pre10_pct,
                    foundation_pose=foundation_pose,
-                   anchor_pos=anchor_pos, anchor_dist=anchor_dist)
+                   anchor_pos=anchor_pos, anchor_dist=anchor_dist,
+                   dist_ma10=dist_ma10)
     return str(s["no"]) if s else "—"
 
 
 def match_schemes(group4: str, b1_open, b2_open, b3_open,
                   b2_turn=None, b3_turn=None,
                   foundation_chg=None, pre10_pct=None,
-                  foundation_pose=None, anchor_pos=None, anchor_dist=None) -> list[dict]:
+                  foundation_pose=None, anchor_pos=None, anchor_dist=None,
+                  dist_ma10=None) -> list[dict]:
     """按链条件(不含今开)定位全部链全过分支,按 SCHEMES 优先级序返回。
 
     多分支口诀(捡尸/便捷一字系档)共享编号,且存在跨方案链重叠
     (C2 链全不限含 A3/B3;B1 链含转温的二板段):该票今天按哪条出手由今开决定,
     盘前出手条件=全部候选分支窗的条件表(今开落在哪窗就按哪条);
     今开定型后归属=tag_point(首窗命中者,与本列表顺序一致)。
-    镜像 tag_point 的链段判定(改任何一处另一处必须同步,含 block_foundation_chg/block_pre10)。"""
+    镜像 tag_point 的链段判定(改任何一处另一处必须同步,含 block_foundation_chg/
+    block_pre10/dist_ma10_min)。"""
     c = contracts
     out: list[dict] = []
     for s in c.SCHEMES:
@@ -479,6 +490,9 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
         bp10 = s.get("block_pre10")
         if bp10 is not None and pre10_pct is not None and pre10_pct >= bp10:
             continue  # 近10日涨幅透支(v6.3 A2;镜像 tag_point)
+        ma10min = s.get("dist_ma10_min")
+        if ma10min is not None and (dist_ma10 is None or dist_ma10 < ma10min):
+            continue  # 地基破十日线诱多(v7.19 A2;镜像 tag_point)
         fpok = s.get("foundation_pose_ok")
         if fpok and foundation_pose not in ("站线上", "骑线"):
             continue  # 地基姿态尺(v6.10 B2/B3;镜像 tag_point)
@@ -559,7 +573,8 @@ def entry_candidates(entry: Mapping[str, object]) -> list[dict]:
         foundation_chg=entry.get("foundation_chg"),
         pre10_pct=entry.get("pre10_pct"),
         foundation_pose=entry.get("foundation_pose"),
-        anchor_pos=entry.get("anchor_pos"), anchor_dist=entry.get("anchor_dist"))
+        anchor_pos=entry.get("anchor_pos"), anchor_dist=entry.get("anchor_dist"),
+        dist_ma10=entry.get("dist_ma10"))
     return [_cand_row(s) for s in brs]
 
 
@@ -647,7 +662,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                           pre10_pct=rec.get("pre10_pct"),
                           foundation_pose=rec.get("foundation_pose"),
                           anchor_pos=rec.get("anchor_pos"),
-                          anchor_dist=rec.get("anchor_dist"))
+                          anchor_dist=rec.get("anchor_dist"), dist_ma10=rec.get("dist_ma10"))
         avoid = static_avoid(point, group4, rec.get("b1_open"),
                              rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid
@@ -663,7 +678,7 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                                  pre10_pct=rec.get("pre10_pct"),
                                  foundation_pose=rec.get("foundation_pose"),
                                  anchor_pos=rec.get("anchor_pos"),
-                                 anchor_dist=rec.get("anchor_dist")) if point != "—" else []
+                                 anchor_dist=rec.get("anchor_dist"), dist_ma10=rec.get("dist_ma10")) if point != "—" else []
         wins = [s["today"] for s in branches]
         gate = ",".join(f"today_{w[0]:g}_{w[1]:g}" for w in wins) or None
         # 弱市组候选(v7.1 动态口诀组):链级打标,当前组=weak/both 时才出手

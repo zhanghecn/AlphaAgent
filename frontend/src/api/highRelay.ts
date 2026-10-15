@@ -450,6 +450,7 @@ export interface HprQuizDisplay {
   b3_turn: number | null;       // 三板换手率(三接四)
   pre20_pct: number | null;     // 首板前20日涨幅(半山腰判定)
   pre10_pct: number | null;     // 首板前10日涨幅(A2近端透支判定)
+  dist_ma10?: number | null;    // 地基收盘距十日线%(v7.19 A2站线腿,≥0=站上十日线)
   foundation_chg: number | null; // 地基日涨幅%(判定同源单源下发,q32;C2「涨1~3%×三板<7」腿)
   foundation_pose: string | null; // 地基K线姿态(v6.10弱票腿B2/B3判定:站线上/骑线/贴线/掉线下)
   foundation_ma20: number | null; // 地基日收盘距20日线%(v6.10起仅参考)
