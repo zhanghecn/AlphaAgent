@@ -558,7 +558,7 @@ function KoujueHealthList({ health }: { health: HprKoujueHealth[] }) {
                   <i className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
                   <span>{h.no} {h.name}</span>
                   <span className="ml-auto font-mono tabular-nums">
-                    近2年 {h.n24}笔·均{healthAvg(h.avg24)}
+                    近2年 {h.n24}笔·胜{Math.round((h.win24 ?? 0) * 100)}%·均{healthAvg(h.avg24)}
                   </span>
                 </li>
               ))}
