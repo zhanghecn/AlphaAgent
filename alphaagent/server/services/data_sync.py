@@ -6190,8 +6190,20 @@ def _completed_stock_daily_session_coverage(
     stock_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     target_date = completed_daily_bar_cutoff(_now_china())
+    # spot 故障防御(2026-10-21 线上事故:境外限流致 stocks 每天只刷新~2000/5928 票,
+    # 新鲜度门控把未刷新票误判「非交易」踢出日线同步,日线逐日塌陷 10-19 缺23%/10-20 缺64%,
+    # 新连板票隐形、池缺票)——target_date 刷新覆盖率 <50% 判定 spot 故障态,
+    # 不按 stocks.updated_at 门控,全票放行(真增量对停牌/退市票天然无害:源无数据即空)
+    _cn_tz = timezone(timedelta(hours=8))
+    fresh_count = 0
+    for row in stock_rows:
+        updated_at = _as_aware_datetime(row.get("updated_at"))
+        if updated_at is not None and updated_at.astimezone(_cn_tz).date() >= target_date:
+            fresh_count += 1
+    spot_degraded = bool(stock_rows) and fresh_count < len(stock_rows) * 0.5
     tradable_stock_rows = [
-        row for row in stock_rows if _stock_has_current_daily_quote(row, target_date)
+        row for row in stock_rows
+        if spot_degraded or _stock_has_current_daily_quote(row, target_date)
     ]
     active_vt_symbols = {
         vt_symbol(str(row["symbol"]), str(row["exchange"]))
