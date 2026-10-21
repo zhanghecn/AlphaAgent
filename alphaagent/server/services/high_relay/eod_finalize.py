@@ -1,11 +1,15 @@
 """高位接力打板盘后定版:信号状态推进 + 次日池计算。
 
 退出推进用"从数据重算"而非增量状态,天然幂等(重复跑/补跑结果一致)。
-口径(连板链组合方案 A1~D2, E3 卖出纪律):
-- 买入日当天没封住(炸板)→ 当天收盘价卖(break_day_close),不隔夜赌
-- 封住了 → 买入次日起首个未涨停日收盘卖(next_close_fail/break_close)
+口径(E3 卖出纪律,与 backtest.py 逐行一致——v6.4 竞价卖/v6.5 纯收盘价/v6.7 跌停口径):
+- 买入日当天没封住(炸板,T+1 当天卖不了)→ 次日起首个非一字跌停日收盘卖
+  (break_day_close);全天一字跌停=排队卖不出,顺延
+- 封住了 → 持有到首个未涨停日收盘卖(next_close_fail/break_close),盘中不判断
+- 唯一盘中动作(v6.4): D+1 封板、D+2 开盘≤-5% → 竞价直接卖(d2_deep_open_sell,开盘价)
+- 断板日全天一字死封跌停 → 顺延首个开板日开盘卖(limit_down_defer);
+  15 日满仍锁死按断板日跌停价计(limit_down_locked);其余收盘跌停按跌停价卖(v6.7)
 - 一路涨停到第 15 个交易日 → 当日收盘卖(max_hold_close,研究兜底口径)
-- 数据还没到退出日 → holding(在持),streak_h = 买入日起连续涨停天数
+- 数据还没到退出日(含顺延路径未走完)→ holding(在持),streak_h = 买入日起连续涨停天数
 
 残留状态定版(扫描漏检/服务中断兜底,全部由日线+首触时间重推):
 - watching: 当日最高<涨停价 → no_trigger;首触≤09:45 → entered(回填);
@@ -140,7 +144,8 @@ def _settle_residual_signals(data_date: date) -> int:
     vts = sorted({str(r["vt_symbol"]) for r in pend})
     start = min(r["trade_date"] for r in pend)
     bars = _load_bars(vts, start, data_date)
-    bmap = {(str(r.vt_symbol), r.trade_date): r for r in bars.itertuples()} \
+    # pandas3: itertuples 的 trade_date 是 Timestamp,信号侧是 date——统一 .date() 作键
+    bmap = {(str(r.vt_symbol), r.trade_date.date()): r for r in bars.itertuples()} \
         if not bars.empty else {}
 
     settled = 0
@@ -175,7 +180,7 @@ def _settle_residual_signals(data_date: date) -> int:
 
 
 def _finalize_exits(data_date: date) -> dict[str, int]:
-    """推进所有未了结信号到 data_date 口径(E3 卖出)。"""
+    """推进所有未了结信号到 data_date 口径(E3 卖出,与 backtest.py 逐行一致)。"""
     open_signals = repository.load_open_entry_signals()
     if not open_signals:
         return {"closed": 0, "holding": 0, "processed": 0}
@@ -184,6 +189,7 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
     bars = _load_bars(vts, min_date - timedelta(days=20), data_date)
 
     closed = holding = 0
+    max_hold = contracts.MAX_HOLD_DAYS
     for sig in open_signals:
         vt = str(sig["vt_symbol"])
         entry_date = sig["trade_date"]
@@ -193,53 +199,121 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
         sig_base = {k: sig.get(k) for k in
                     ("name", "group4", "point", "prev_close", "limit_price")}
         sub = bars[(bars["vt_symbol"] == vt)
-                   & (bars["trade_date"] >= entry_date)
-                   & (bars["trade_date"] <= data_date)] if not bars.empty else pd.DataFrame()
+                   & (bars["trade_date"] >= pd.Timestamp(entry_date))
+                   & (bars["trade_date"] <= pd.Timestamp(data_date))] if not bars.empty else pd.DataFrame()
         if sub.empty:
             repository.upsert_signal(entry_date, vt, status="pending_exit", **sig_base)
             holding += 1
             continue
-        first = sub.iloc[0]
-        # 买入日没封住 → 当天收盘卖(E3);判定用池触发价(=当日涨停价)
-        sealed = abs(float(first["close_price"]) - limit_price) <= 1e-6 and bool(first["is_lim"])
+        # 统一 date 类型(pandas3 下 Timestamp 与 date 不可比较/作键);写库 exit_date 即 date
+        sub = sub.copy()
+        sub["trade_date"] = sub["trade_date"].dt.date
+        rows = list(sub.itertuples())
+        first = rows[0]
+        # 封板判定=收盘涨停(与 pool.derive_daily 的 is_lim 等价)
+        sealed = (abs(float(first.close_price) - limit_price) <= 1e-6
+                  and bool(first.is_lim))
         if not sealed:
-            exit_price = float(first["close_price"])
+            # 炸板(T+1 当天卖不了): 次日起首个非一字跌停日收盘卖;
+            # 全天一字跌停=排队卖不出顺延(v6.7 仅此顺延)——回测 sealed=False 分支同口径
+            prev_c = float(first.close_price)
+            exit_day = None
+            exit_price = None
+            for k in range(1, min(len(rows), max_hold + 1)):
+                r = rows[k]
+                ko, kc = float(r.open_price), float(r.close_price)
+                locked = (ko == kc == float(r.high_price) == float(r.low_price)
+                          and prev_c > 0 and (kc / prev_c - 1) <= -0.095)
+                prev_c = kc
+                if locked:
+                    continue
+                exit_day, exit_price = r.trade_date, kc
+                break
+            if exit_day is None and len(rows) - 1 >= max_hold:
+                # 防御:15 日连续一字跌停(现实未发生)按末日收盘
+                exit_day = rows[max_hold].trade_date
+                exit_price = float(rows[max_hold].close_price)
+            if exit_day is None:
+                repository.upsert_signal(entry_date, vt, status="holding",
+                                         sealed=False, streak_h=0, **sig_base)
+                holding += 1
+                continue
             repository.upsert_signal(
                 entry_date, vt, status="closed", sealed=False, streak_h=0,
-                exit_date=entry_date, exit_price=exit_price,
+                exit_date=exit_day, exit_price=exit_price,
                 exit_reason="break_day_close",
                 ret_pct=round((exit_price / entry_price - 1) * 100, 3), **sig_base)
             closed += 1
             continue
-        # 封住了 → 次日起首个未涨停日收盘卖,15 日兜底
-        later = sub[sub["trade_date"] > entry_date]
-        exit_day: date | None = None
-        exit_price: float | None = None
+        # 封住了 → E0: 次日起首个未涨停日(15 日兜底)
+        hold_days: int | None = None
+        capped = False
+        for k in range(1, min(len(rows), max_hold + 1)):
+            if not bool(rows[k].is_lim):
+                hold_days = k
+                break
+        if hold_days is None:
+            if len(rows) - 1 >= max_hold:
+                hold_days = max_hold
+                capped = True
+            else:
+                streak_h = 1 + sum(1 for r in rows[1:] if bool(r.is_lim))
+                repository.upsert_signal(entry_date, vt, status="holding",
+                                         sealed=True, streak_h=streak_h, **sig_base)
+                holding += 1
+                continue
+        exit_day = None
+        exit_price = None
         reason: str | None = None
-        for idx, r in enumerate(later.itertuples(), start=1):
-            if idx > contracts.MAX_HOLD_DAYS:
-                break
-            if not bool(r.is_lim):
-                exit_day = r.trade_date
-                exit_price = float(r.close_price)
-                reason = "next_close_fail" if idx == 1 else "break_close"
-                break
-        if exit_day is None and len(later) >= contracts.MAX_HOLD_DAYS:
-            last = later.iloc[contracts.MAX_HOLD_DAYS - 1]
-            exit_day = last["trade_date"]
-            exit_price = float(last["close_price"])
-            reason = "max_hold_close"
-        if exit_day is not None and exit_price is not None:
-            streak_h = 1 + int(sum(1 for r in later.itertuples()
-                                   if r.trade_date < exit_day and bool(r.is_lim)))
-            repository.upsert_signal(
-                entry_date, vt, status="closed", sealed=True, streak_h=streak_h,
-                exit_date=exit_day, exit_price=exit_price, exit_reason=reason,
-                ret_pct=round((exit_price / entry_price - 1) * 100, 3), **sig_base)
-            closed += 1
-        else:
-            streak_h = 1 + int(sum(1 for r in later.itertuples() if bool(r.is_lim)))
-            repository.upsert_signal(entry_date, vt, status="holding",
-                                     sealed=True, streak_h=streak_h, **sig_base)
-            holding += 1
+        # v6.4 唯一盘中动作: D+1 封住(hold_days>=2)且 D+2 开盘≤-5% → 竞价卖(开盘价)
+        if hold_days >= 2:
+            d1c = float(rows[1].close_price)
+            d2o = float(rows[2].open_price)
+            if d1c > 0 and (d2o / d1c - 1) <= -0.05:
+                exit_day = rows[2].trade_date
+                exit_price = d2o
+                reason = "d2_deep_open_sell"
+        if exit_day is None:
+            k0 = hold_days
+            r0 = rows[k0]
+            exit_day = r0.trade_date
+            exit_price = float(r0.close_price)
+            reason = ("next_close_fail" if k0 == 1 else
+                      ("max_hold_close" if capped else "break_close"))
+            # v6.7: 断板日全天一字死封跌停 → 排队卖不出,顺延首个开板日开盘卖
+            prev0 = float(rows[k0 - 1].close_price)
+            k0o, k0h, k0l = (float(r0.open_price), float(r0.high_price),
+                             float(r0.low_price))
+            if (exit_price <= prev0 * 0.905 + 0.011 and k0o == k0h == k0l
+                    and abs(k0o - exit_price) <= 0.011):
+                pc = exit_price
+                deferred = False
+                for j in range(k0 + 1, min(len(rows), max_hold + 1)):
+                    rj = rows[j]
+                    jo, jh, jl, jc = (float(rj.open_price), float(rj.high_price),
+                                      float(rj.low_price), float(rj.close_price))
+                    if jo == jh == jl == jc and (jc / pc - 1) <= -0.095:
+                        pc = jc
+                        continue
+                    exit_day, exit_price = rj.trade_date, jo
+                    reason = "limit_down_defer"
+                    deferred = True
+                    break
+                if not deferred:
+                    if len(rows) - 1 >= max_hold:
+                        reason = "limit_down_locked"  # 15 日满仍锁死:按断板日跌停价计
+                    else:
+                        # 顺延路径数据未走完(还在锁死):明天再推进
+                        streak_h = 1 + sum(1 for r in rows[1:] if bool(r.is_lim))
+                        repository.upsert_signal(entry_date, vt, status="holding",
+                                                 sealed=True, streak_h=streak_h, **sig_base)
+                        holding += 1
+                        continue
+        streak_h = 1 + int(sum(1 for r in rows[1:]
+                               if r.trade_date < exit_day and bool(r.is_lim)))
+        repository.upsert_signal(
+            entry_date, vt, status="closed", sealed=True, streak_h=streak_h,
+            exit_date=exit_day, exit_price=exit_price, exit_reason=reason,
+            ret_pct=round((exit_price / entry_price - 1) * 100, 3), **sig_base)
+        closed += 1
     return {"closed": closed, "holding": holding, "processed": len(open_signals)}

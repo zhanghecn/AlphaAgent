@@ -467,7 +467,7 @@ def get_quiz_questions(month: str) -> dict[str, object]:
 
 def get_quiz_mixed(year: str | None = None,
                    era: str | None = None) -> dict[str, object]:
-    """综合挑战卷(主人定 2026-09-28):六条口诀每条随机≥2道好票 + 陷阱差票
+    """综合挑战卷(主人定 2026-09-28):每条口诀随机≥2道好票 + 陷阱差票
     (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序。
     year 非空=只在该年抽,逗号分隔可多选年份一起综合(v7.5);
     era 优先于 year(v7.2 时代抽题,按年份段):weak=2020-22,strong=2023 起。"""

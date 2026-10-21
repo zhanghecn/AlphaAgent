@@ -246,7 +246,7 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
                foundation_chg=None, pre10_pct=None,
                foundation_pose=None, anchor_pos=None, anchor_dist=None,
                dist_ma10=None):
-    """打板口诀卡七条打标·分支版(判定逻辑唯一实现,tag_point 是它的编号薄壳):
+    """打板口诀卡八条打标·分支版(判定逻辑唯一实现,tag_point 是它的编号薄壳):
     返回命中的 SCHEMES 条目本身——多分支口诀(A1/B1/B2/C2)定位到具体分支,
     答题讲解取子项名/速查表行用(q31);未命中返回 None。
     chain = 数值区间半开[lo,hi);vol2/vol3 = 二板/三板换手率窗(缺数据不命中带窗点);
