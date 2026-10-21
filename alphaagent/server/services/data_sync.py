@@ -884,13 +884,21 @@ class DataSyncRunner:
         all_items: list[dict[str, Any]] = []
         page = 1
         total: int | None = None
+        page_retries = 0
         self._report_progress("读取股票清单", current=0, current_label=f"第 {page} 页")
         while True:
             self._report_progress("读取股票清单", current=len(all_items), total=total, current_label=f"第 {page} 页")
-            data = self.adapter.list_stocks(page=page, page_size=page_size, sort=sort)
+            data = self.adapter.list_stocks(page=page, page_size=page_size, sort=sort, refresh=True)
             items = data.get("items") or []
             total = data.get("total")
             if not items:
+                # 限流截断防御(2026-10-21 线上事故:限流空页静默截断 2000/5928 记 succeeded,
+                # stocks 新鲜度门控连锁踢票,日线逐日塌陷)——明显未到尾页时同页重试
+                # (递增降速,源侧瞬态限流自愈),耗尽仍截断 → incomplete(框架记 failed 暴露)
+                if total and len(all_items) < total * 0.9 and page_retries < 3:
+                    page_retries += 1
+                    time.sleep(3 * page_retries)
+                    continue
                 break
             all_items.extend(items)
             self._report_progress(
@@ -904,6 +912,8 @@ class DataSyncRunner:
             if total is not None and len(all_items) >= total:
                 break
             page += 1
+            page_retries = 0
+            time.sleep(0.3)  # 页间降速(境外直连限流敏感)
             if page > STOCK_LIST_MAX_PAGES:
                 break
         self._report_progress("写入股票清单", current=0, total=len(all_items), rows_read=len(all_items), sample_items=all_items)
@@ -916,7 +926,14 @@ class DataSyncRunner:
             rows_written=rows_written,
             sample_items=all_items,
         )
-        return {"rows_read": len(all_items), "rows_written": rows_written}
+        result: dict[str, Any] = {"rows_read": len(all_items), "rows_written": rows_written}
+        if total and len(all_items) < total * 0.9:
+            result["status"] = "incomplete"
+            result["message"] = (
+                f"清单截断:{len(all_items)}/{total} 只(疑似限流),已保留已刷新部分;"
+                f"日线同步由 spot 故障门控防御兜底全量"
+            )
+        return result
 
     def _run_sync_sector_list(self, params: dict[str, Any]) -> dict[str, Any]:
         types = params.get("types", ["concept", "industry", "theme"])

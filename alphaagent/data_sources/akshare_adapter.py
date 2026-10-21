@@ -307,10 +307,15 @@ class AkShareAdapter:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def list_stocks(self, page: int = 1, page_size: int = 50, sort: str = "mktcap", order: str = "desc") -> dict[str, Any]:
-        """Return a page of live A-share quotes through fast public quote APIs."""
+    def list_stocks(self, page: int = 1, page_size: int = 50, sort: str = "mktcap", order: str = "desc", refresh: bool = False) -> dict[str, Any]:
+        """Return a page of live A-share quotes through fast public quote APIs.
+
+        refresh=True 绕过 10s 页缓存(同步任务必须拿实时页,否则限流截断的空页
+        会被缓存放大成整轮失败——2026-10-21 线上事故)。"""
 
         key = f"list_stocks:{page}:{page_size}:{sort.strip().lower()}:{order.strip().lower()}"
+        if refresh:
+            return self._list_stocks_uncached(page, page_size, sort, order)
         return market_cache.get_or_set(key, LIST_TTL_SECONDS, lambda: self._list_stocks_uncached(page, page_size, sort, order))
 
     def _list_stocks_uncached(self, page: int, page_size: int, sort: str, order: str = "desc") -> dict[str, Any]:
@@ -3789,6 +3794,9 @@ def _sina_all_a_page(page: int, page_size: int, sort: str) -> dict[str, Any]:
     with _akshare_network_env():
         total = _sina_sector_member_count("hs_a")
         rows = _sina_sector_member_rows("hs_a", page=page, page_size=page_size, sort=sort)
+    if not rows and total and (page - 1) * page_size < total:
+        # 限流空页显式化(2026-10-21 线上事故:空页不抛异常,同步层静默截断记成功)
+        raise RuntimeError(f"sina empty page {page} before list end (total={total})")
     return {
         "items": [_sina_all_a_row_to_api(row) for row in rows],
         "page": page,
@@ -3806,11 +3814,15 @@ def _sina_all_a_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
 def _eastmoney_all_a_page(page: int, page_size: int, sort: str, order: str = "desc") -> dict[str, Any]:
     data = _eastmoney_clist_page(page=page, page_size=page_size, sort=sort, order=order)
     rows = (data.get("data") or {}).get("diff") or []
+    total = (data.get("data") or {}).get("total")
+    if not rows and total and (page - 1) * page_size < total:
+        # 限流空页显式化(同新浪侧):抛出让降级链流转到腾讯兜底
+        raise RuntimeError(f"eastmoney empty page {page} before list end (total={total})")
     return {
         "items": [_eastmoney_quote_row_to_api(row) for row in rows if isinstance(row, dict)],
         "page": page,
         "page_size": page_size,
-        "total": (data.get("data") or {}).get("total"),
+        "total": total,
         "source": "eastmoney.push2delay.clist",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
