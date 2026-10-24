@@ -1,6 +1,6 @@
 """高位接力打板池计算:T-1 收盘后给次日 2/3 连板票打链式方案候选标。
 
-口径 = 打板口诀卡七条(hpr-v5.1,量化因子研究/高位接力/打板口诀卡.md):
+口径 = contracts.SCHEMES / WEAK_SCHEMES(当前版本,唯一事实源):
 - 池 = 昨日恰好 2/3 连板的主板非ST票(全量,雷达);地基日=首板前一天,阴阳分组
 - 候选 = 链档条件(一板×二板[×三板]的开盘档)+换手窗;今天开窗由竞价定型后复核,
   ≥9.5顶格不命中;多分支口诀(捡尸/便捷一字系档)共享编号,顺序判定
@@ -331,7 +331,7 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
 def tag_weak(group4: str, b1_open, b2_open, b3_open,
              auction_pct=None, b1_turn=None, b2_turn=None, b3_turn=None,
              foundation_chg=None, prev_wave60=None, dist_h60=None):
-    """弱市口诀组打标(v7.0,与 量化因子研究/高位接力/弱市口诀卡v5.md 一致)。
+    """弱市口诀组打标(v7.0起,以 contracts.WEAK_SCHEMES 为唯一判定定义)。
 
     判定独立于 tag_scheme(强市组零回归):K系含缩量承接(三换<二换)/前波=0/
     距新高贴顶等强市组 matcher 没有的条件。返回命中的 WEAK_SCHEMES 条目
@@ -430,7 +430,7 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
               foundation_chg=None, pre10_pct=None,
               foundation_pose=None, anchor_pos=None, anchor_dist=None,
               dist_ma10=None) -> str:
-    """七条口诀编号打标(hpr-v6.8,与 量化因子研究/高位接力/打板口诀卡.md 一致)。
+    """强市八条口诀编号打标(以 contracts.SCHEMES 为唯一判定定义)。
     tag_scheme 的薄壳:返回命中条目的编号(如「A1」),未命中「—」;
     判定细节/各腿语义见 tag_scheme docstring。"""
     s = tag_scheme(group4, b1_open, b2_open, b3_open,

@@ -1,12 +1,10 @@
 import { apiClient } from "./client";
 
 // ── 高位接力打板(二接三/三接四)产品线 API 契约 ──
-// 策略口径 = hpr-v4.4 打板口诀卡七条(量化因子研究/高位接力/打板口诀卡.md,2026-09-28合体定稿)。
+// 策略口径以后端 high_relay/contracts.py 与 /rules 契约为唯一事实源。
 // 买点 = 昨日恰好2/3连板,链区间(前几板开盘%+换手窗)命中且今天开盘在口诀窗内,
 // 触涨停价即打(低吸类低开直接买);开盘≥9.5%顶格不命中(正常开盘口径)。
-// 池 = 昨日2/3连板全量(雷达),七条 v6.0(A=阳B=阴C=中性,字母语义跨板位统一):
-// A1双平贴零/A2一字转强/A3高开低吸(三接四阳) B1强开系/B2捡尸/B3贴零温开(三接四阴)
-// C1冒泡转弱(二接三,阴阳都打)/C2四板换手+C3一字换手(三接四不分阴阳,v6.11拆分)。
+// 池 = 昨日2/3连板全量(雷达);强市八条+弱市K系按月切组,通用组=K5+B1·转温分支。
 
 export type HprPoint =
   | "A1" | "A2" | "B1" | "B2" | "C1"
@@ -332,7 +330,7 @@ export interface HprRulesPayload {
   weak_cheat_rows: HprCheatRow[];        // 弱市组K系速查表(v7.2 起规则页并列渲染)
   weak_point_boards: Record<string, string>;  // K2→打4板(K系板位归属)
   dyn_group_window: number;                   // 动态组滚动窗宽月数(v7.15=9,机制区算法说明用)
-  dyn_always_on: string[];                    // 通用组口诀(v7.17:跨时代常开,速查表分区+徽章)
+  dyn_always_on: string[];                    // 通用组整点/分支(K5+B1·转温,速查表分区+徽章)
   common_cheat_rows: HprCheatRow[];           // 通用组速查表(v7.17第三组;weak_cheat_rows已排除通用组行)
   falsified_rules: string[];
   risk_notes: string[];
@@ -356,13 +354,19 @@ export interface HprKoujueGroupStats {
   avg: number | null;
   win: number | null;
   label: string;                     // 弱市组/强市组
-  rows: (HprCheatRow & { dyn_stat: string })[];   // 速查表行+近12月动态成绩(多分支仅首行)
+  rows: (HprCheatRow & { dyn_stat: string })[];   // 速查表行+近窗动态成绩(B1按分支,其他多分支按编号汇总)
+}
+
+export interface HprKoujueCommonGroup {
+  label: string;
+  rows: HprKoujueGroupStats["rows"];
 }
 
 export interface HprKoujueHealth {
   no: string;
+  sub?: string | null;             // 分支级通用组:B1 转温/续强分别体检
   name: string;
-  group: "weak" | "strong";
+  group: "weak" | "strong" | "common";
   n24: number;                        // 近24月笔数(0=形态未出现)
   win24: number | null;
   avg24: number | null;
@@ -376,8 +380,8 @@ export interface HprKoujueCurrent {
   window_months: number;
   asof: string;                      // 数据截止月(YYYY-MM)
   current_group: "weak" | "strong" | "both";
-  always_on: string[];                // v7.17 常驻口诀(K5:不论当月组都可出手)
-  groups: { weak: HprKoujueGroupStats; strong: HprKoujueGroupStats };
+  always_on: string[];                // 通用组整点/分支(K5+B1·转温:不论当月组都可出手)
+  groups: { common: HprKoujueCommonGroup; weak: HprKoujueGroupStats; strong: HprKoujueGroupStats };
   current_rows: (HprCheatRow & { dyn_stat: string })[];
   switch_history: { month: string; from: string; to: string }[];
   health: HprKoujueHealth[];         // v7.13 口诀近况(红黄绿体检, 异常优先展示)

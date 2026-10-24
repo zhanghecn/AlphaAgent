@@ -9,6 +9,7 @@ import { HPR_LIVE_REFRESH_INTERVAL_MS } from "./HighRelayPage";
 import type { HprLivePayload, HprQuizQuestion } from "@/api/highRelay";
 import { HprLedgerView } from "@/features/highRelay/HprLedgerView";
 import { HprLiveView } from "@/features/highRelay/HprLiveView";
+import * as HighRelayGuide from "@/features/highRelay/HprGuideView";
 import { QuizRunner } from "@/features/highRelay/quiz/QuizRunner";
 import { visibleBarsForWidth } from "@/features/highRelay/quiz/QuizKlineChart";
 import { isWrongAnswer, judge, simulateMonth, summarize, quizQuestionId } from "@/features/highRelay/quiz/quizScore";
@@ -914,5 +915,23 @@ describe("QuizRunner 综合挑战卷(mixed)", () => {
     expect(html).toContain("暖机期：历史数据不够");
     expect(html).toContain("当时按纪律出手");
     expect(html).toContain("暖机期·历史数据不足");
+  });
+});
+
+describe("KoujueHealthList 分支健康度", () => {
+  it("B1 转温与续强分别显示分支名，不混成一条", () => {
+    const HealthList = (HighRelayGuide as any).KoujueHealthList;
+    expect(typeof HealthList).toBe("function");
+    const health = [
+      { no: "B1", sub: "转温", name: "强开系", group: "common", n24: 5,
+        win24: 0.8, avg24: 4.4, avg_all: 16.5, status: "amber" },
+      { no: "B1", sub: "续强", name: "强开系", group: "strong", n24: 9,
+        win24: 0.222, avg24: -8.5, avg_all: 0.1, status: "red" },
+    ];
+
+    const html = renderToStaticMarkup(<HealthList health={health} />);
+
+    expect(html).toContain("B1 强开系·转温");
+    expect(html).toContain("B1 强开系·续强");
   });
 });

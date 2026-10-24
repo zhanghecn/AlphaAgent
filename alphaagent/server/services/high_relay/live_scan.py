@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from alphaagent.server.db.session import get_engine
-from alphaagent.server.services.high_relay import contracts, repository
+from alphaagent.server.services.high_relay import contracts, pool as pool_mod, repository
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -67,6 +67,15 @@ def run_live_scan_tick(now: datetime | None = None) -> dict[str, object]:
                   pool_count=len(pool))
         return {"status": "failed", "message": f"{exc.__class__.__name__}"}
     return result
+
+
+def _strong_access(entry: dict[str, object], group: str) -> tuple[bool, dict[str, object]]:
+    """强市组出手资格与允许竞价窗;非强市月只放行通用分支自己的窗。"""
+    if group in ("strong", "both"):
+        return bool(entry.get("actionable")), entry
+    candidates = contracts.common_scheme_candidates(pool_mod.entry_candidates(entry))
+    gate = ",".join(f"today_{c['today'][0]:g}_{c['today'][1]:g}" for c in candidates)
+    return bool(entry.get("actionable") and candidates), {**entry, "auction_gate": gate}
 
 
 def _first_jump_status(entry: dict[str, object], auction_pct: float,
@@ -124,7 +133,7 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
     writes: list[tuple[str, dict[str, object]]] = []
 
     for entry in pool:
-        strong_ok = bool(entry.get("actionable")) and grp in ("strong", "both")
+        strong_ok, scan_entry = _strong_access(entry, grp)
         weak_hit = str(entry.get("weak_point") or "—") != "—"
         # v7.17 K5常驻:常驻口诀不论当月组都触发(组停它不停)
         weak_ok = weak_hit and (grp in ("weak", "both")
@@ -168,7 +177,7 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
             if open_price and open_price > 0:
                 auction_pct = round((open_price / prev_close - 1) * 100, 2)
                 patch["auction_pct"] = auction_pct
-                term = _first_jump_status(entry, auction_pct,
+                term = _first_jump_status(scan_entry, auction_pct,
                                           strong_ok=strong_ok, weak_ok=weak_ok)
                 if term is not None:
                     patch["status"] = term

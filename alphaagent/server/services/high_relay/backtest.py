@@ -138,19 +138,10 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     payload["dyn_month_states"] = month_states
 
     def _dyn_take(row) -> str:
-        """该笔按当月组状态是否出手;出手=命中组编号,不出手=''(双命中归K系,与轻表同口径)。
-        v7.17 K5常驻:常驻口诀不论当月组都出手(strong月的K5命中不再滤掉;weak/both月
-        行为不变——双命中归K系口径下原本就走wk)。切换判定轻表dyn_trades不受影响。"""
+        """按当月组与通用整点/分支决定是否出手;切换判定轻表不受常驻影响。"""
         st = contracts.dyn_state_at(month_states, str(row["月"]))
         wk = str(row["弱口诀"]) if row["弱口诀"] == row["弱口诀"] else "—"
-        pt = str(row["方案点"])
-        if wk in contracts.COMMON_POINT_KEYS:
-            return wk
-        if st == "weak":
-            return wk if wk != "—" else ""
-        if st == "strong":
-            return pt if pt != "—" else ""
-        return wk if wk != "—" else (pt if pt != "—" else "")
+        return contracts.dyn_take_point(st, str(row["方案点"]), wk, row.get("方案子项"))
 
     take = done_all.apply(_dyn_take, axis=1)
     dyn_sim = done_all[take != ""].copy()
@@ -202,7 +193,8 @@ def _dyn_trades(done: pd.DataFrame) -> list[dict[str, object]]:
         if wk != "—":
             out.append({"m": str(r["月"]), "g": "weak", "p": wk, "r": round(float(e3), 2)})
         elif pt != "—":
-            out.append({"m": str(r["月"]), "g": "strong", "p": pt, "r": round(float(e3), 2)})
+            out.append({"m": str(r["月"]), "g": "strong", "p": pt,
+                        "s": str(r.get("方案子项") or ""), "r": round(float(e3), 2)})
     return out
 
 
@@ -292,7 +284,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
         buy = round(float(cols["limit_price"][i]), 2)
         buy_open = round((float(cols["open_price"][i])
                           / float(cols["prev_close"][i]) - 1) * 100, 2)
-        point = pool_mod.tag_point(
+        scheme = pool_mod.tag_scheme(
             group4, rec.get("b1_open"), rec.get("b2_open"),
             rec.get("b3_open"), auction_pct=buy_open, b2_turn=rec.get("b2_turn"),
             b3_turn=rec.get("b3_turn"), foundation_chg=rec.get("foundation_chg"),
@@ -300,6 +292,8 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             foundation_pose=rec.get("foundation_pose"),
             dist_ma10=rec.get("dist_ma10"),
             anchor_pos=rec.get("anchor_pos"), anchor_dist=rec.get("anchor_dist"))
+        point = str(scheme["no"]) if scheme else "—"
+        point_sub = str(scheme.get("sub") or "") if scheme else ""
         weak = pool_mod.tag_weak(
             group4, rec.get("b1_open"), rec.get("b2_open"),
             rec.get("b3_open"), auction_pct=buy_open, b1_turn=rec.get("b1_turn"),
@@ -414,6 +408,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "N": n_board,
             "阴阳": "阳" if yang else "阴",
             "方案点": point,
+            "方案子项": point_sub,
             "弱口诀": str(weak["no"]) if weak else "—",
             "回避": avoid,
             "买价": buy,

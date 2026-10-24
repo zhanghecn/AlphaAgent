@@ -151,8 +151,7 @@ export function HprGuideView() {
       <section className="rounded-lg border p-4" aria-label="口诀速查表">
         <div className="mb-1 text-sm font-semibold">
           口诀速查表 · 全部 13 条
-          <span className="ml-2 font-mono text-xs font-normal text-primary">强市 150笔·胜77%·均+10.6</span>
-          <span className="ml-1.5 font-mono text-xs font-normal text-violet-500">弱市 40笔·胜78%·均+13.2</span>
+          <span className="ml-2 font-mono text-xs font-normal text-muted-foreground">成绩列＝定型段 E3；最新合计看回测</span>
         </div>
         <div className="mb-2 text-xs text-muted-foreground">
           昨天恰好 2/3 连板、今天冲下一板——两组口诀按行情自动切换（看上方「动态口诀组」）；
@@ -182,7 +181,7 @@ export function HprGuideView() {
           <tbody className="tabular-nums">
             <tr className="border-b-2 border-muted/40">
               <td className="py-1 pr-3 text-[11px] font-semibold text-muted-foreground" colSpan={8}>
-                强市组（A1~C3 八条，2023-26 定型验证）
+                强市组（A1~C3 八条，B1·转温单列通用组）
               </td>
             </tr>
             {rules.cheat_rows.map((r) => (
@@ -198,7 +197,7 @@ export function HprGuideView() {
             ))}
             <tr className="border-b-2 border-muted/40">
               <td className="py-1 pr-3 text-[11px] font-semibold text-emerald-500/90" colSpan={8}>
-                通用组（跨时代口诀——不论当月启用哪组都可出手；成绩计入弱市组参与切换）
+                通用组（K5 与 B1·转温跨时代常开；成绩仍计入原所属组参与切换）
               </td>
             </tr>
             {(rules.common_cheat_rows ?? []).map((r) => (
@@ -354,16 +353,14 @@ export function HprGuideView() {
           </ol>
           <div className="mt-3 border-t pt-2.5 text-sm leading-7">
             <span className="font-medium">通用组——跨时代口诀：</span>
-            K5（二板贴零强开）7 年每一年都赚钱（25 笔·胜 84%，定型它的 2020-22 赚，
-            没参与定型的 2023-26 也赚），是 13 条里唯一跨时代的——所以它单独归通用组，
-            不论当月算出来启用哪组，K5 命中都可以买。以后再发现跨时代口诀也放这组。
-            它的成绩仍算进弱市组参与上面的切换判定（压舱石：剔掉它切换会来回翻，实测劣化）。
+            K5 与 B1·转温都在弱市、强市两段验证有效，所以放入通用组；B1·续强仍只属强市组。
+            通用分支的成绩仍计入原所属组参与切换；K5 的压舱石作用不变。
           </div>
           <div className="mt-2.5 border-t pt-2.5 text-sm leading-7">
             <span className="font-medium">为什么是这套参数：</span>
             判据(剔 3)、窗宽({rules.dyn_group_window} 月)、门槛(3 笔)共 90 种组合全部实测过——判据怎么选差别很小，
             真正起作用的是「9 月窗」(切得快又不来回翻)和「低门槛」(数据少的月份也能单选活组，不被迫双开)。
-            七年实测 <span className="font-mono">198 笔 · 胜 78% · 每笔 +11.76</span>（含通用组），七年每一年都是正的。
+            七年每一年都是正的；最新笔数、胜率和均笔以回测页物化为准，不在规则页另写一份。
           </div>
           <div className="mt-1.5 text-sm leading-7">
             <span className="font-medium">无未来函数：</span>
@@ -492,7 +489,7 @@ function healthAvg(v: number | null) {
   return v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
 }
 
-function KoujueHealthList({ health }: { health: HprKoujueHealth[] }) {
+export function KoujueHealthList({ health }: { health: HprKoujueHealth[] }) {
   const [showOk, setShowOk] = useState(false);
   const bad = health.filter((h) => h.status !== "green");
   const ok = health.filter((h) => h.status === "green");
@@ -523,11 +520,11 @@ function KoujueHealthList({ health }: { health: HprKoujueHealth[] }) {
       {bad.length > 0 ? (
         <ul className="mt-1.5 space-y-1">
           {bad.map((h) => (
-            <li key={h.no} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+            <li key={`${h.no}${h.sub ?? ""}`} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
               <i className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                 h.status === "red" ? "bg-rose-500" : h.status === "amber" ? "bg-amber-500" : "bg-muted-foreground/40"
               }`} />
-              <span className="font-medium">{h.no} {h.name}</span>
+              <span className="font-medium">{h.no} {h.name}{h.sub ? `·${h.sub}` : ""}</span>
               <span className={h.status === "red" ? "text-rose-500" : "text-amber-500"}>
                 {HEALTH_NOTE[h.status]}
               </span>
@@ -554,9 +551,9 @@ function KoujueHealthList({ health }: { health: HprKoujueHealth[] }) {
           {showOk ? (
             <ul className="mt-1 grid gap-x-6 gap-y-0.5 md:grid-cols-2">
               {ok.map((h) => (
-                <li key={h.no} className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <li key={`${h.no}${h.sub ?? ""}`} className="flex items-center gap-2 text-[11px] text-muted-foreground">
                   <i className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
-                  <span>{h.no} {h.name}</span>
+                  <span>{h.no} {h.name}{h.sub ? `·${h.sub}` : ""}</span>
                   <span className="ml-auto font-mono tabular-nums">
                     近2年 {h.n24}笔·胜{Math.round((h.win24 ?? 0) * 100)}%·均{healthAvg(h.avg24)}
                   </span>

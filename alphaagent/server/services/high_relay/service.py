@@ -27,6 +27,12 @@ class BacktestAlreadyRunningError(RuntimeError):
 
 # ── 实时推荐 ──
 
+def _common_strong_hit(row: dict[str, object]) -> bool:
+    """实时行是否命中通用强市分支;有竞价后只认实际落入该分支窗。"""
+    candidates = list(row.get("candidates") or [])
+    return bool(contracts.common_scheme_candidates(candidates, row.get("auction_pct")))
+
+
 def get_live(trade_date: date | None = None) -> dict[str, object]:
     """今日池 × 触发状态;指定日期可回看。盘前/盘后均可读(盘后为定版)。
 
@@ -66,8 +72,9 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
     for e in entries:
         strong_hit = bool(e.get("actionable"))
         weak_hit = str(e.get("weak_point") or "—") != "—"
-        always_on = str(e.get("weak_point") or "") in contracts.COMMON_POINT_KEYS
-        e["strong_active"] = strong_hit and grp in ("strong", "both")
+        strong_common = strong_hit and _common_strong_hit(e)
+        always_on = contracts.is_common_scheme(str(e.get("weak_point") or ""))
+        e["strong_active"] = strong_hit and (grp in ("strong", "both") or strong_common)
         e["weak_active"] = weak_hit and (grp in ("weak", "both") or always_on)
         e["active"] = bool(e["strong_active"] or e["weak_active"])
         if e["active"]:
@@ -112,7 +119,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
             "group": grp,
             "asof": dyn.get("asof"),
             "label": {"weak": "弱市组", "strong": "强市组", "both": "双开(样本不足)"}[grp],
-            "always_on": list(contracts.COMMON_POINT_KEYS),   # v7.17 通用组(跨时代常开)
+            "always_on": contracts.common_scheme_labels(),   # v7.17 通用组(跨时代常开)
         },
         "counts": {
             "pool": len(pool),
@@ -572,6 +579,14 @@ def get_current_koujue() -> dict[str, object]:
                 continue
             seen.add(no)
             d = dyn.get(no) or {"n": 0}
+            if no in contracts.COMMON_BRANCH_POINTS and r.get("sub"):
+                sub = str(r["sub"])
+                rs = [float(t["r"]) for t in trades
+                      if str(t["m"]) in recent and t["p"] == no
+                      and str(t.get("s") or "") == sub]
+                d = {"n": len(rs),
+                     "avg": round(sum(rs) / len(rs), 2) if rs else None,
+                     "win": round(sum(1 for x in rs if x > 0) / len(rs), 3) if rs else None}
             ds = (f"近{win}月 {d['n']}笔"
                   + (f"·胜{round(d['win'] * 100)}%·均{d['avg']:+.1f}" if d["n"] else "无出手"))
             out.append({**r, "dyn_stat": ds})
@@ -579,10 +594,11 @@ def get_current_koujue() -> dict[str, object]:
 
     # v7.17 通用组(第三组):跨时代口诀单列,不论当月组都出手;成绩计入所属时代组参与切换
     common_rows = rows_with_dyn([r for r in contracts.WEAK_CHEAT_ROWS + contracts.CHEAT_ROWS
-                                 if str(r["no"]) in contracts.COMMON_POINT_KEYS])
+                                 if contracts.is_common_scheme(r.get("no"), r.get("sub"))])
     weak_rows = rows_with_dyn([r for r in contracts.WEAK_CHEAT_ROWS
                                if str(r["no"]) not in contracts.COMMON_POINT_KEYS])
-    strong_rows = rows_with_dyn(contracts.CHEAT_ROWS)
+    strong_rows = rows_with_dyn([r for r in contracts.CHEAT_ROWS
+                                 if not contracts.is_common_scheme(r.get("no"), r.get("sub"))])
 
     # 切换历史(v7.3):直接读物化月状态序列的变化点——每年真实判定口径
     # (v7.15 剔3/9月/门槛3:暖机期 both→2020-03 weak→2023-06 strong,上月末口径)
@@ -600,11 +616,20 @@ def get_current_koujue() -> dict[str, object]:
     m24, m12 = set(months[-24:]), set(months[-12:])
     point_names = {**{str(s["no"]): str(s["name"]) for s in contracts.SCHEMES},
                    **{str(s["no"]): str(s["name"]) for s in contracts.WEAK_SCHEMES}}
-    health: list[dict[str, object]] = []
+    health_scopes: list[tuple[str, str]] = []
     for no in (*contracts.POINT_KEYS, *contracts.WEAK_POINT_KEYS):
-        rs_all = [float(t["r"]) for t in trades if t["p"] == no]
-        rs24 = [float(t["r"]) for t in trades if t["p"] == no and str(t["m"]) in m24]
-        rs12 = [float(t["r"]) for t in trades if t["p"] == no and str(t["m"]) in m12]
+        if no in contracts.COMMON_BRANCH_POINTS:
+            health_scopes.extend((no, str(s["sub"])) for s in contracts.SCHEMES
+                                 if s["no"] == no and s.get("sub"))
+        else:
+            health_scopes.append((no, ""))
+    health: list[dict[str, object]] = []
+    for no, sub in health_scopes:
+        scoped = [t for t in trades if t["p"] == no
+                  and (not sub or str(t.get("s") or "") == sub)]
+        rs_all = [float(t["r"]) for t in scoped]
+        rs24 = [float(t["r"]) for t in scoped if str(t["m"]) in m24]
+        rs12 = [float(t["r"]) for t in scoped if str(t["m"]) in m12]
         a_all = sum(rs_all) / len(rs_all) if rs_all else None
         a24 = sum(rs24) / len(rs24) if rs24 else None
         a12 = sum(rs12) / len(rs12) if rs12 else None
@@ -617,8 +642,8 @@ def get_current_koujue() -> dict[str, object]:
         else:
             stt = "green"
         health.append({
-            "no": no, "name": point_names.get(no, no),
-            "group": ("common" if no in contracts.COMMON_POINT_KEYS
+            "no": no, "sub": sub or None, "name": point_names.get(no, no),
+            "group": ("common" if contracts.is_common_scheme(no, sub)
                       else "weak" if no in contracts.WEAK_POINT_KEYS else "strong"),
             "n24": len(rs24), "win24": round(sum(1 for x in rs24 if x > 0) / len(rs24), 3) if rs24 else None,
             "avg24": round(a24, 2) if a24 is not None else None,
@@ -632,7 +657,7 @@ def get_current_koujue() -> dict[str, object]:
         "window_months": win,
         "asof": months[-1],
         "current_group": current,
-        "always_on": list(contracts.COMMON_POINT_KEYS),   # v7.17 通用组(跨时代常开)
+        "always_on": contracts.common_scheme_labels(),   # v7.17 通用组(跨时代常开)
         "groups": {"common": {"label": "通用组", "rows": common_rows},
                    "weak": {**wk, "label": "弱市组", "rows": weak_rows},
                    "strong": {**st, "label": "强市组", "rows": strong_rows}},
@@ -642,7 +667,7 @@ def get_current_koujue() -> dict[str, object]:
         "switch_history": history,
         "health": health,
         "caliber": "近9月两组剔掉最猛3笔后的每笔平均收益高者整组启用;月末滚动,样本不足双开;"
-                   "通用组(K5)跨时代常开,不论当月组都可出手",
+                   "通用组(K5+B1·转温)跨时代常开,不论当月组都可出手",
     }
 
 
@@ -666,15 +691,16 @@ def get_rules() -> dict[str, object]:
         "point_stats": contracts.POINT_STATS,     # 成绩速览(16笔·胜69%·均+12.0)
         "point_boards": contracts.POINT_BOARDS,   # 板位归属(打3板/打4板)
         "rules": contracts.RULES,
-        "cheat_rows": contracts.CHEAT_ROWS,   # 速查表(规则页主表;单一事实源,前端不维护副本)
+        "cheat_rows": [r for r in contracts.CHEAT_ROWS
+                       if not contracts.is_common_scheme(r.get("no"), r.get("sub"))],
         # 弱市组速查表排除通用组行,通用组单列(v7.17第三组;答题讲解仍读WEAK_CHEAT_ROWS全表不受分区影响)
         "weak_cheat_rows": [r for r in contracts.WEAK_CHEAT_ROWS
                             if str(r.get("no")) not in contracts.COMMON_POINT_KEYS],
         "common_cheat_rows": [r for r in contracts.WEAK_CHEAT_ROWS + contracts.CHEAT_ROWS
-                              if str(r.get("no")) in contracts.COMMON_POINT_KEYS],
+                              if contracts.is_common_scheme(r.get("no"), r.get("sub"))],
         "weak_point_boards": contracts.WEAK_POINT_BOARDS,
         "dyn_group_window": contracts.DYN_GROUP_WINDOW,
-        "dyn_always_on": list(contracts.COMMON_POINT_KEYS),   # v7.17 通用组(速查表分区+徽章)
+        "dyn_always_on": contracts.common_scheme_labels(),   # v7.17 通用组(速查表分区+徽章)
         "falsified_rules": contracts.FALSIFIED_RULES,
         "risk_notes": contracts.RISK_NOTES,
         "ths_pool_conditions": contracts.THS_POOL_CONDITIONS,

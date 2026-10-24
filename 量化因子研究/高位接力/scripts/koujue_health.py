@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """口诀体检仪 S1: 每条口诀的滚动成绩+三色预警+历史回放(宿主机: uv run python koujue_health.py)。
 
-设计(requirements/koujue_autogen_drift_plan.md):
+研究方法(历史管线;现役判定以 alphaagent.server.services.high_relay.contracts 为准):
 - 体检口径 = 全命中口径(A1 的成绩 = A1 命中的所有票, 双命中票两边都算),
   与 dyn_trades 的组归属口径不同——体检看口诀自身质量, 与组切换无关。
 - 逐月末滚动, 窗口不含当月(对齐 DYN_GROUP_WINDOW 口径), 累计均值只用截至
