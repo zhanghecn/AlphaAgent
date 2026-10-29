@@ -3850,3 +3850,61 @@ def test_schedule_actions_reject_removed_quant_actions():
         svc._schedule_action({"action": "quant_research"})
     with pytest.raises(svc.DataSyncError):
         svc._schedule_action({"action": "tail_preview"})
+
+
+# ── 夜间回测重算批:物化已覆盖最新日线时跳过重复全量(资源门禁) ──
+
+def _rebuild_run_row(status: str, at: datetime) -> dict[str, Any]:
+    return {"status": status, "requested_at": at, "finished_at": at}
+
+
+def test_hpr_backtest_rerun_skips_when_report_already_fresh(monkeypatch):
+    from alphaagent.server.services.high_relay import repository, service
+
+    done = _rebuild_run_row("done", datetime(2026, 10, 29, 12, 57, tzinfo=timezone.utc))
+    monkeypatch.setattr(svc, "_latest_complete_daily_date_for_research", lambda: date(2026, 10, 29))
+    monkeypatch.setattr(repository, "latest_rebuild_run", lambda: done)
+    monkeypatch.setattr(repository, "latest_successful_rebuild_run", lambda: done)
+    calls: list[int] = []
+    monkeypatch.setattr(service, "run_backtest_sync", lambda *a, **k: calls.append(1) or {"summary": {}})
+
+    result = svc._run_hpr_backtest_rerun_batch_job()
+
+    assert result["status"] == "skipped"
+    assert "已覆盖最新日线" in result["message"]
+    assert calls == []
+
+
+def test_hpr_backtest_rerun_still_runs_when_report_stale(monkeypatch):
+    from alphaagent.server.services.high_relay import repository, service
+
+    done = _rebuild_run_row("done", datetime(2026, 10, 28, 15, 9, tzinfo=timezone.utc))
+    monkeypatch.setattr(svc, "_latest_complete_daily_date_for_research", lambda: date(2026, 10, 29))
+    monkeypatch.setattr(repository, "latest_rebuild_run", lambda: done)
+    monkeypatch.setattr(repository, "latest_successful_rebuild_run", lambda: done)
+    calls: list[int] = []
+    monkeypatch.setattr(
+        service, "run_backtest_sync",
+        lambda *a, **k: calls.append(1) or {"summary": {"all": {"n": 150, "bw_pct": 10.6, "win": 0.77}}},
+    )
+
+    result = svc._run_hpr_backtest_rerun_batch_job()
+
+    assert calls == [1]
+    assert result["rows_written"] == 1
+
+
+def test_fbb_backtest_rerun_skips_when_report_already_fresh(monkeypatch):
+    from alphaagent.server.services.fanbao import repository, service
+
+    done = _rebuild_run_row("done", datetime(2026, 10, 29, 12, 57, tzinfo=timezone.utc))
+    monkeypatch.setattr(svc, "_latest_complete_daily_date_for_research", lambda: date(2026, 10, 29))
+    monkeypatch.setattr(repository, "latest_rebuild_run", lambda: done)
+    monkeypatch.setattr(repository, "latest_successful_rebuild_run", lambda: done)
+    calls: list[int] = []
+    monkeypatch.setattr(service, "run_backtest_sync", lambda *a, **k: calls.append(1) or {"summary": {}})
+
+    result = svc._run_fbb_backtest_rerun_batch_job()
+
+    assert result["status"] == "skipped"
+    assert calls == []

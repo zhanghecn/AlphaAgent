@@ -289,6 +289,19 @@ def latest_rebuild_run() -> dict[str, object] | None:
     return dict(row) if row else None
 
 
+def latest_successful_rebuild_run() -> dict[str, object] | None:
+    """最近一次成功重算(worker 新鲜度自检用:成功日落后于最新完整日线即补算)。"""
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        row = session.execute(
+            select(schema.hpr_backtest_rebuild_runs)
+            .where(schema.hpr_backtest_rebuild_runs.c.status == "done")
+            .order_by(desc(schema.hpr_backtest_rebuild_runs.c.id))
+            .limit(1)
+        ).mappings().one_or_none()
+    return dict(row) if row else None
+
+
 # ── 答题训练题库(随回测重建整表替换;API 只读) ──
 
 def save_quiz_questions(rules_version: str, rows: list[Mapping[str, object]]) -> int:

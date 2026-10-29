@@ -14,6 +14,7 @@ from alphaagent.server.services.high_relay import (
     quiz as quiz_mod,
     repository,
 )
+from alphaagent.server.services.rebuild_runtime import release_rebuild_memory
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -320,6 +321,7 @@ def run_backtest_sync(source: str = "scheduler") -> dict[str, object]:
     finally:
         with _rebuild_lock:
             _rebuild_running = False
+        release_rebuild_memory()  # 全量日线峰值 7.4GiB,gc+trim 归还 OS,不留常驻
 
 
 def _background_rebuild(run_id: int) -> None:
@@ -329,6 +331,7 @@ def _background_rebuild(run_id: int) -> None:
     finally:
         with _rebuild_lock:
             _rebuild_running = False
+        release_rebuild_memory()
 
 
 def _execute_rebuild(run_id: int) -> dict[str, object]:

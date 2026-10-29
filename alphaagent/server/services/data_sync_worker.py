@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -15,6 +15,8 @@ from pathlib import Path
 import signal
 from threading import Event, Thread
 
+from alphaagent.server.services.rebuild_runtime import report_rebuild_due
+
 
 LOGGER = logging.getLogger(__name__)
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -23,6 +25,10 @@ DEFAULT_HEALTH_PORT = 8010
 EXPECTED_RUNTIME_CONSTANTS = {
     "SCHEDULER_TICK_SECONDS": 2,
 }
+# 回测物化自检:每 10 分钟看一次「日线数据是否已晚于最近一次成功重算」。
+# 23:05/23:20 cron 只在冷启动 90 分钟回溯窗内补跑,机器当晚没开就整天不刷新;
+# 周期自检让数据就绪后(~15:05 完整日线判定)自动补算,不再依赖深夜开机。
+REPORT_RECONCILE_INTERVAL_SECONDS = 600
 SCHEDULE_HEARTBEAT_MAX_AGE_SECONDS = {
     # 2026-10-02 短线页双主线重构:低吸线全线下线(调度停),
     # low_suction_live_scan 心跳要求随之移除(此前健康检查误报 503 ~3天)
@@ -58,8 +64,8 @@ def run_forever(*, stop_event: Event | None = None) -> None:
     _configure_market_cache()
     ensure_sync_schema(recover_interrupted=True)
     start_data_sync_scheduler()
-    _start_hpr_report_reconcile()
-    _start_fbb_report_reconcile()
+    _start_hpr_report_reconcile(stop_event=stop)
+    _start_fbb_report_reconcile(stop_event=stop)
     health_server: ThreadingHTTPServer | None = None
     try:
         health_server = start_worker_health_server()
@@ -82,48 +88,116 @@ def _configure_market_cache() -> None:
     configure_market_cache(get_settings().redis_url)
 
 
-def _start_hpr_report_reconcile() -> None:
-    """后台自检高位接力回测报告版本漂移(版本门禁失效即自动重建,防页面空但DB有数据)。"""
+def _latest_complete_daily_date() -> date | None:
+    """复用调度链同一把「最新完整日线」尺(15:05 前不算今天,行数不足不算完整)。"""
+    from alphaagent.server.services.data_sync import (
+        _latest_complete_daily_date_for_research,
+    )
 
-    def _run() -> None:
+    return _latest_complete_daily_date_for_research()
+
+
+def _report_reconcile_loop(
+    check: Callable[[], None],
+    *,
+    interval_seconds: float,
+    stop_event: Event,
+    initial_delay_seconds: float = 0,
+) -> None:
+    """启动即查一次,之后按间隔自检;单次失败只记日志,不中断后续自检。
+
+    initial_delay_seconds 用于两条线错峰(全量回放峰值内存大,不叠加)。"""
+    if initial_delay_seconds and stop_event.wait(initial_delay_seconds):
+        return
+    while not stop_event.is_set():
         try:
-            from alphaagent.server.services.high_relay import (
-                contracts, quiz as quiz_mod, repository, service,
-            )
-
-            need = repository.load_backtest_report(contracts.HPR_RULES_VERSION) is None
-            if need:
-                LOGGER.info("hpr backtest report missing for %s, scheduling rebuild",
-                            contracts.HPR_RULES_VERSION)
-            if not need:
-                bank = repository.quiz_bank_status()
-                if bank.get("rules_versions") != [quiz_mod.quiz_rules_version()] \
-                        or not bank.get("count"):
-                    need = True
-                    LOGGER.info("hpr quiz bank drift (%s), scheduling rebuild", bank)
-            if need:
-                service.start_backtest_rebuild(source="startup")
+            check()
         except Exception:  # noqa: BLE001
-            LOGGER.exception("hpr backtest report reconcile failed")
+            LOGGER.exception("backtest report reconcile pass failed")
+        stop_event.wait(interval_seconds)
 
-    Thread(target=_run, name="hpr-report-reconcile", daemon=True).start()
+
+def _start_report_reconcile(
+    name: str,
+    check: Callable[[], None],
+    stop_event: Event | None,
+    *,
+    initial_delay_seconds: float = 0,
+) -> None:
+    Thread(
+        target=_report_reconcile_loop,
+        args=(check,),
+        kwargs={"interval_seconds": REPORT_RECONCILE_INTERVAL_SECONDS,
+                "stop_event": stop_event or Event(),
+                "initial_delay_seconds": initial_delay_seconds},
+        name=name,
+        daemon=True,
+    ).start()
 
 
-def _start_fbb_report_reconcile() -> None:
-    """后台自检断板反包回测报告版本漂移(版本门禁失效即自动重建,防页面空但DB有数据)。"""
+def _reconcile_hpr_report() -> None:
+    from alphaagent.server.services.high_relay import (
+        contracts, quiz as quiz_mod, repository, service,
+    )
 
-    def _run() -> None:
-        try:
-            from alphaagent.server.services.fanbao import contracts, repository, service
+    need = repository.load_backtest_report(contracts.HPR_RULES_VERSION) is None
+    if need:
+        LOGGER.info("hpr backtest report missing for %s, scheduling rebuild",
+                    contracts.HPR_RULES_VERSION)
+    if not need:
+        bank = repository.quiz_bank_status()
+        if bank.get("rules_versions") != [quiz_mod.quiz_rules_version()] \
+                or not bank.get("count"):
+            need = True
+            LOGGER.info("hpr quiz bank drift (%s), scheduling rebuild", bank)
+    if not need:
+        latest_data = _latest_complete_daily_date()
+        need = report_rebuild_due(
+            latest_data=latest_data,
+            latest_run=repository.latest_rebuild_run(),
+            latest_done=repository.latest_successful_rebuild_run(),
+            now=datetime.now(CHINA_TZ),
+        )
+        if need:
+            LOGGER.info("hpr backtest report stale (daily bars through %s), scheduling rebuild",
+                        latest_data)
+    if need:
+        service.start_backtest_rebuild(source="reconcile")
 
-            if repository.load_backtest_report(contracts.FANBAO_RULES_VERSION) is None:
-                LOGGER.info("fbb backtest report missing for %s, scheduling rebuild",
-                            contracts.FANBAO_RULES_VERSION)
-                service.start_backtest_rebuild(source="startup")
-        except Exception:  # noqa: BLE001
-            LOGGER.exception("fbb backtest report reconcile failed")
 
-    Thread(target=_run, name="fbb-report-reconcile", daemon=True).start()
+def _reconcile_fbb_report() -> None:
+    from alphaagent.server.services.fanbao import contracts, repository, service
+
+    need = repository.load_backtest_report(contracts.FANBAO_RULES_VERSION) is None
+    if need:
+        LOGGER.info("fbb backtest report missing for %s, scheduling rebuild",
+                    contracts.FANBAO_RULES_VERSION)
+    if not need:
+        latest_data = _latest_complete_daily_date()
+        need = report_rebuild_due(
+            latest_data=latest_data,
+            latest_run=repository.latest_rebuild_run(),
+            latest_done=repository.latest_successful_rebuild_run(),
+            now=datetime.now(CHINA_TZ),
+        )
+        if need:
+            LOGGER.info("fbb backtest report stale (daily bars through %s), scheduling rebuild",
+                        latest_data)
+    if need:
+        service.start_backtest_rebuild(source="reconcile")
+
+
+def _start_hpr_report_reconcile(stop_event: Event | None = None) -> None:
+    """高位接力回测物化自检:版本/题库漂移 + 数据新鲜度(错过夜间 cron 自动补算)。"""
+    _start_report_reconcile("hpr-report-reconcile", _reconcile_hpr_report, stop_event)
+
+
+def _start_fbb_report_reconcile(stop_event: Event | None = None) -> None:
+    """断板反包回测物化自检:与高位接力同一套新鲜度判据(10-28 晚曾整晚漏跑)。
+
+    首轮错开 120 秒:两条线全量回放峰值内存都大,不叠加(实测 hpr 单线 7.4GiB)。"""
+    _start_report_reconcile("fbb-report-reconcile", _reconcile_fbb_report, stop_event,
+                            initial_delay_seconds=120)
 
 
 @lru_cache(maxsize=1)

@@ -3573,15 +3573,29 @@ def _latest_complete_daily_date_for_research() -> date | None:
 
 
 def _run_hpr_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 23:05 全量重算高位接力回测并写库,供前端回测/交割单读取。"""
+    """每晚 23:05 全量重算高位接力回测并写库,供前端回测/交割单读取。
 
+    资源门禁(2026-10-29):周期自检已在数据就绪后补算过,物化仍新鲜则跳过,
+    每晚不再重复全量(单线峰值 7.4GiB);此档退化为兜底,漏刷时才真正重算。"""
+
+    from alphaagent.server.services.high_relay import repository
     from alphaagent.server.services.high_relay.service import (
         BacktestAlreadyRunningError,
         run_backtest_sync,
     )
+    from alphaagent.server.services.rebuild_runtime import report_rebuild_due
 
-    if _latest_complete_daily_date_for_research() is None:
+    latest_data = _latest_complete_daily_date_for_research()
+    if latest_data is None:
         return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    if not report_rebuild_due(
+        latest_data=latest_data,
+        latest_run=repository.latest_rebuild_run(),
+        latest_done=repository.latest_successful_rebuild_run(),
+        now=_now_china(),
+    ):
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0,
+                "message": "回测物化已覆盖最新日线,跳过重复全量重算"}
     try:
         payload = run_backtest_sync()
     except BacktestAlreadyRunningError:
@@ -3611,15 +3625,28 @@ def _run_hpr_backtest_rerun_batch_job() -> dict[str, Any]:
 
 
 def _run_fbb_backtest_rerun_batch_job() -> dict[str, Any]:
-    """每晚 23:20 全量重算断板反包回测并写库,供前端回测/交割单读取。"""
+    """每晚 23:20 全量重算断板反包回测并写库,供前端回测/交割单读取。
 
+    资源门禁同 hpr:物化仍新鲜则跳过重复全量,此档仅作漏刷兜底。"""
+
+    from alphaagent.server.services.fanbao import repository
     from alphaagent.server.services.fanbao.service import (
         BacktestAlreadyRunningError,
         run_backtest_sync,
     )
+    from alphaagent.server.services.rebuild_runtime import report_rebuild_due
 
-    if _latest_complete_daily_date_for_research() is None:
+    latest_data = _latest_complete_daily_date_for_research()
+    if latest_data is None:
         return {"status": "skipped", "rows_read": 0, "rows_written": 0, "message": "数据库未就绪"}
+    if not report_rebuild_due(
+        latest_data=latest_data,
+        latest_run=repository.latest_rebuild_run(),
+        latest_done=repository.latest_successful_rebuild_run(),
+        now=_now_china(),
+    ):
+        return {"status": "skipped", "rows_read": 0, "rows_written": 0,
+                "message": "回测物化已覆盖最新日线,跳过重复全量重算"}
     try:
         payload = run_backtest_sync()
     except BacktestAlreadyRunningError:

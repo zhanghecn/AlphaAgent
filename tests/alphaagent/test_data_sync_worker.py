@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.client import HTTPConnection
 import json
 from threading import Event
@@ -171,3 +171,85 @@ def test_healthcheck_skips_intraday_heartbeat_age_on_weekends() -> None:
 
     assert report["ok"] is True
     assert report["scan_heartbeat_required"] is False
+
+
+# ── 回测物化新鲜度自检(错过 23:05/23:20 cron 后的补算判据) ──
+
+NOW = datetime(2026, 10, 29, 20, 40, tzinfo=CHINA_TZ)
+
+
+def _run_row(status: str, at: datetime) -> dict[str, object]:
+    return {"status": status, "requested_at": at, "finished_at": at}
+
+
+def test_report_rebuild_waits_until_daily_data_ready() -> None:
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=None, latest_run=None, latest_done=None, now=NOW,
+    ) is False
+
+
+def test_report_rebuild_runs_when_never_built() -> None:
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=date(2026, 10, 29), latest_run=None, latest_done=None, now=NOW,
+    ) is True
+
+
+def test_report_rebuild_skips_when_done_covers_latest_daily() -> None:
+    done = _run_row("done", datetime(2026, 10, 29, 19, 30, tzinfo=CHINA_TZ))
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=date(2026, 10, 29), latest_run=done, latest_done=done, now=NOW,
+    ) is False
+
+
+def test_report_rebuild_catches_up_missed_nightly_cron() -> None:
+    # 昨晚 23:05 之后机器关机:最近一次成功只覆盖 10-28,今天日线已就绪→补算
+    done = _run_row("done", datetime(2026, 10, 28, 23, 9, tzinfo=CHINA_TZ))
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=date(2026, 10, 29), latest_run=done, latest_done=done, now=NOW,
+    ) is True
+
+
+def test_report_rebuild_uses_china_calendar_date_for_done() -> None:
+    # UTC 存储 15:30 = 上海 23:30,同日不算落后
+    done = _run_row("done", datetime(2026, 10, 29, 15, 30, tzinfo=timezone.utc))
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=date(2026, 10, 29), latest_run=done, latest_done=done, now=NOW,
+    ) is False
+
+
+def test_report_rebuild_does_not_duplicate_active_run() -> None:
+    done = _run_row("done", datetime(2026, 10, 28, 23, 9, tzinfo=CHINA_TZ))
+    running = _run_row("running", NOW - timedelta(minutes=1))
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=date(2026, 10, 29), latest_run=running, latest_done=done, now=NOW,
+    ) is False
+
+
+def test_report_rebuild_backs_off_after_failure() -> None:
+    done = _run_row("done", datetime(2026, 10, 28, 23, 9, tzinfo=CHINA_TZ))
+    failed = _run_row("failed", NOW - timedelta(minutes=5))
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=date(2026, 10, 29), latest_run=failed, latest_done=done, now=NOW,
+    ) is False
+    old_failed = _run_row("failed", NOW - timedelta(minutes=45))
+    assert data_sync_worker.report_rebuild_due(
+        latest_data=date(2026, 10, 29), latest_run=old_failed, latest_done=done, now=NOW,
+    ) is True
+
+
+def test_report_reconcile_loop_repeats_and_survives_errors() -> None:
+    stop = Event()
+    calls: list[int] = []
+
+    def check() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("transient db error")
+        if len(calls) >= 3:
+            stop.set()
+
+    data_sync_worker._report_reconcile_loop(
+        check, interval_seconds=0.01, stop_event=stop,
+    )
+
+    assert len(calls) >= 3
