@@ -30,7 +30,9 @@ from sqlalchemy import select
 
 from alphaagent.server.db import schema
 from alphaagent.server.db.session import get_engine, session_scope
-from alphaagent.server.services.high_relay import contracts, pool as pool_mod, repository
+from alphaagent.server.services.high_relay import (
+    contracts, live_scan, pool as pool_mod, repository,
+)
 
 logger = logging.getLogger(__name__)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -46,14 +48,15 @@ def run_eod_finalize() -> dict[str, object]:
     if data_date is None:
         return {"status": "skipped", "message": "数据库无日线"}
     touched = _backfill_touch_times(data_date)
+    recovered = _backfill_missing_pool_signals(data_date)
     settled = _settle_residual_signals(data_date)
     finalized = _finalize_exits(data_date)
     pool_result = pool_mod.compute_pool(data_date)
     entries = pool_result.get("entries") or []
     exec_date = date.fromisoformat(str(pool_result["exec_date"]))
     saved = repository.save_pool(exec_date, entries, contracts.HPR_RULES_VERSION)
-    message = (f"数据日 {data_date}:首触回填 {touched};残留定版 {settled};"
-               f"退出推进 {finalized['closed']} 笔/{finalized['holding']} 在持;"
+    message = (f"数据日 {data_date}:首触回填 {touched};漏扫补建 {recovered};"
+               f"残留定版 {settled};退出推进 {finalized['closed']} 笔/{finalized['holding']} 在持;"
                f"次日池 {exec_date} = {saved} 只"
                f"(出手 {pool_result['filter_stats'].get('actionable')}: "
                + "/".join(f"{pk}{pool_result['filter_stats'].get(f'act_{pk}', 0)}"
@@ -62,7 +65,7 @@ def run_eod_finalize() -> dict[str, object]:
     logger.info("hpr eod finalize: %s", message)
     return {"status": "ok",
             "rows_read": finalized["processed"] + len(entries),
-            "rows_written": saved + finalized["closed"] + settled + touched,
+            "rows_written": saved + finalized["closed"] + settled + recovered + touched,
             "message": message}
 
 
@@ -127,6 +130,88 @@ def _load_bars(vts: list[str], start: date, end: date) -> pd.DataFrame:
     elig = bars["prev_close"].notna() & (bars["prev_close"] > 0)
     bars["is_lim"] = elig & ((bars["close_price"] - bars["limit_price"]).abs() <= 1e-6)
     return bars
+
+
+def _dyn_group_for_date(data_date: date) -> str:
+    """漏扫补建使用当月的口诀组,避免跨月后用当前组误判历史。"""
+    from alphaagent.server.services.high_relay import service
+
+    states, asof = service._load_dyn_states()
+    month = data_date.isoformat()[:7]
+    if month in states:
+        return str(states[month])
+    # 新月份尚未物化时与盘中 current_dyn_group 一致:沿用最近物化月,不擅自双开。
+    if asof and asof < month and asof in states:
+        return str(states[asof])
+    return "both"
+
+
+def _backfill_missing_pool_signals(data_date: date) -> int:
+    """盘中整天漏跑时,从当日池和真实日线补建可出手票的信号。
+
+    只处理尚无信号的可出手票;已有实时结果绝不覆写,雷达票仍只展示不触发。
+    与盘中扫描共用动态组和竞价门,随后按最高价判断触板、收盘价补展示行情。
+    """
+    pool = repository.load_pool(data_date)
+    signals = repository.load_signal_map(data_date)
+    missing = [entry for entry in pool if str(entry["vt_symbol"]) not in signals]
+    if not missing:
+        return 0
+    vts = sorted({str(entry["vt_symbol"]) for entry in missing})
+    bars = _load_bars(vts, data_date - timedelta(days=20), data_date)
+    bmap = {(str(r.vt_symbol), r.trade_date.date()): r for r in bars.itertuples()} \
+        if not bars.empty else {}
+    group = _dyn_group_for_date(data_date)
+    created = 0
+    for entry in missing:
+        strong_ok, scan_entry = live_scan._strong_access(entry, group)
+        weak_hit = str(entry.get("weak_point") or "—") != "—"
+        weak_ok = weak_hit and (group in ("weak", "both")
+                                or str(entry.get("weak_point")) in contracts.COMMON_POINT_KEYS)
+        if not (strong_ok or weak_ok):
+            continue
+        vt = str(entry["vt_symbol"])
+        point = str(entry["weak_point"]) if weak_ok else str(entry.get("point") or "—")
+        level = "A" if weak_ok else str(entry.get("level") or "—")
+        patch: dict[str, object] = {
+            "name": entry.get("name"), "group4": entry.get("group4"),
+            "point": point, "level": level,
+            "prev_close": entry.get("prev_close"),
+            "limit_price": entry.get("limit_price"),
+            "rules_version": contracts.HPR_RULES_VERSION,
+        }
+        bar = bmap.get((vt, data_date))
+        if bar is None:
+            repository.upsert_signal(data_date, vt, status="no_trigger", **patch)
+            created += 1
+            continue
+        prev_close = float(entry["prev_close"])
+        limit_price = float(entry["limit_price"])
+        open_pct = round((float(bar.open_price) / prev_close - 1) * 100, 2)
+        close_price = float(bar.close_price)
+        patch.update({
+            "auction_pct": open_pct,
+            "last_price": close_price,
+            "change_pct": round((close_price / prev_close - 1) * 100, 3),
+        })
+        terminal = live_scan._first_jump_status(
+            scan_entry, open_pct, strong_ok=strong_ok, weak_ok=weak_ok,
+        )
+        if terminal is not None:
+            patch["status"] = terminal
+        else:
+            point, level = live_scan._point_after_auction(
+                entry, open_pct, weak_ok=weak_ok, point=point,
+            )
+            patch["point"] = point
+            patch["level"] = level
+            if float(bar.high_price) < limit_price - 1e-6:
+                patch["status"] = "no_trigger"
+            else:
+                patch.update(status="entered", entry_price=limit_price)
+        repository.upsert_signal(data_date, vt, **patch)
+        created += 1
+    return created
 
 
 def _settle_residual_signals(data_date: date) -> int:

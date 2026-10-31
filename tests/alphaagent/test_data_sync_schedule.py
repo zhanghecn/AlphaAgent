@@ -178,11 +178,111 @@ def test_default_batch_schedules_defined():
         "intraday_market_snapshot",
         "intraday_hourly",
         "eod_1900",
-        "hpr_live_scan",
+        "short_term_live_scan",
         "hpr_backtest_2305",
-        "fbb_live_scan",
         "fbb_backtest_2320",
     }
+
+
+def test_eod_finalizers_never_run_after_stock_list_or_daily_failure():
+    finalizers = {"hpr_eod_finalize", "j12_eod_finalize", "fbb_eod_finalize"}
+
+    for job_id in finalizers | {"rebuild_stock_limit_up_daily"}:
+        assert svc._depends_on(job_id, "sync_stock_daily_bars") is True
+    for job_id in finalizers:
+        assert svc._depends_on(job_id, "sync_stock_list") is True
+    assert svc._depends_on("sync_stock_daily_bars", "sync_stock_list") is True
+    assert "sync_stock_daily_bars" in svc._BASE_SYNC_JOBS
+
+
+def _batch_for_dependency_test(job_ids: list[str]) -> dict[str, Any]:
+    return {
+        "status": "running",
+        "schedule_id": None,
+        "jobs": [svc._new_batch_job_item(job_id) for job_id in job_ids],
+        "completed_jobs": 0,
+        "succeeded_jobs": 0,
+        "failed_jobs": 0,
+        "skipped_jobs": 0,
+        "rows_read": 0,
+        "rows_written": 0,
+        "message": "",
+    }
+
+
+@pytest.mark.parametrize(
+    ("upstream", "job_ids", "expected_skipped"),
+    [
+        (
+            "sync_stock_list",
+            ["sync_stock_list", "sync_stock_daily_bars", "hpr_eod_finalize"],
+            {"sync_stock_daily_bars", "hpr_eod_finalize"},
+        ),
+        (
+            "sync_stock_daily_bars",
+            ["sync_stock_daily_bars", "hpr_eod_finalize"],
+            {"hpr_eod_finalize"},
+        ),
+    ],
+)
+def test_incomplete_upstream_skips_dependent_finalizers_in_real_batch(
+    monkeypatch, upstream, job_ids, expected_skipped
+):
+    batch_id = f"incomplete-{upstream}"
+    svc._SYNC_BATCHES[batch_id] = _batch_for_dependency_test(job_ids)
+    calls: list[str] = []
+
+    def fake_run_job(job_id, *_args, **_kwargs):
+        calls.append(job_id)
+        if job_id == upstream:
+            return {"status": "incomplete", "rows_read": 10, "rows_written": 10}
+        return {"status": "ok", "rows_read": 1, "rows_written": 1}
+
+    monkeypatch.setattr(svc, "run_job", fake_run_job)
+    try:
+        svc._run_sync_batch(batch_id, {"_job_ids": job_ids})
+        batch = svc._SYNC_BATCHES[batch_id]
+        statuses = {item["job_id"]: item["status"] for item in batch["jobs"]}
+
+        assert calls == [upstream]
+        assert statuses[upstream] == "failed"
+        assert {job_id for job_id in job_ids if job_id != upstream} == expected_skipped
+        assert all(statuses[job_id] == "skipped" for job_id in expected_skipped)
+        assert batch["completed_jobs"] == len(job_ids)
+        assert batch["skipped_jobs"] == len(expected_skipped)
+        assert batch["failed_jobs"] == 1
+    finally:
+        svc._SYNC_BATCHES.pop(batch_id, None)
+
+
+def test_short_term_live_scan_combines_both_products_every_minute():
+    schedule = next(
+        item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == "short_term_live_scan"
+    )
+
+    assert schedule["cron"] == "* 9-15 * * 1-5"
+    assert schedule["job_ids"] == ["hpr_live_scan_tick", "fbb_live_scan_tick"]
+
+
+def test_minute_live_scan_is_not_blocked_by_heavy_batch_throttle(monkeypatch):
+    triggered: list[dict[str, Any]] = []
+    monkeypatch.setattr(svc, "start_sync_batch", lambda **kw: triggered.append(kw) or {"id": "x"})
+    row = {
+        "id": "short_term_live_scan",
+        "cron": "* 9-15 * * 1-5",
+        "enabled": True,
+        "action": "sync",
+        "job_ids": ["hpr_live_scan_tick", "fbb_live_scan_tick"],
+        "concurrency": 1,
+        "last_started_at": datetime.now(timezone.utc) - timedelta(seconds=60),
+    }
+    monkeypatch.setattr(svc, "_load_batch_schedules", lambda: [row])
+    now = datetime(2026, 10, 30, 10, 2, tzinfo=timezone(timedelta(hours=8)))
+    monkeypatch.setattr(svc, "_now_china", lambda: now)
+
+    svc._run_scheduled_jobs(window_start=now - timedelta(seconds=2))
+
+    assert [item["schedule_id"] for item in triggered] == ["short_term_live_scan"]
 
 
 def test_intraday_market_snapshot_schedule_materializes_dashboard_sources():
@@ -845,7 +945,8 @@ def test_stock_list_sync_uses_total_not_legacy_40_page_cap(monkeypatch):
     captured_items: list[dict[str, Any]] = []
 
     class FakeAdapter:
-        def list_stocks(self, page=1, page_size=200, sort="mktcap"):
+        def list_stocks(self, page=1, page_size=200, sort="mktcap", refresh=False):
+            assert refresh is True
             seen_pages.append(page)
             total = 4100
             start = (page - 1) * 100

@@ -651,6 +651,9 @@ LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {
     "w2s_backtest_2250",
     "low_suction_live_scan",
     "low_suction_backtest_2230",
+    # 2026-10-31 两条分钟扫描合并,避免全局单批次锁让后一条被前一条吞掉
+    "hpr_live_scan",
+    "fbb_live_scan",
 }
 LEGACY_SCHEDULE_ACTIONS = {
     "quant_research",
@@ -762,13 +765,13 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         ],
     },
     {
-        "id": "hpr_live_scan",
-        "name": "高位接力盘中扫描（每分钟 09:30~15:00）",
+        "id": "short_term_live_scan",
+        "name": "短线实时推荐扫描（每分钟 09:30~15:00）",
         "cron": "* 9-15 * * 1-5",
         "action": "sync",
         "enabled": True,
         "concurrency": 1,
-        "job_ids": ["hpr_live_scan_tick"],
+        "job_ids": ["hpr_live_scan_tick", "fbb_live_scan_tick"],
     },
     {
         "id": "hpr_backtest_2305",
@@ -778,15 +781,6 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
         "enabled": True,
         "concurrency": 1,
         "job_ids": ["hpr_backtest_rerun"],
-    },
-    {
-        "id": "fbb_live_scan",
-        "name": "断板反包盘中扫描（每分钟 09:30~15:00）",
-        "cron": "* 9-15 * * 1-5",
-        "action": "sync",
-        "enabled": True,
-        "concurrency": 1,
-        "job_ids": ["fbb_live_scan_tick"],
     },
     {
         "id": "fbb_backtest_2320",
@@ -3384,7 +3378,10 @@ def get_latest_sync_batch() -> dict[str, Any] | None:
 
 
 # Base jobs whose failure should skip their downstream dependents.
-_BASE_SYNC_JOBS = {"sync_stock_list", "sync_sector_list", "sync_sector_members"}
+_BASE_SYNC_JOBS = {
+    "sync_stock_list", "sync_stock_daily_bars", "sync_sector_list", "sync_sector_members",
+}
+_EOD_DAILY_FINALIZERS = {"hpr_eod_finalize", "j12_eod_finalize", "fbb_eod_finalize"}
 
 
 def _depends_on(job_id: str, upstream: str) -> bool:
@@ -3392,9 +3389,13 @@ def _depends_on(job_id: str, upstream: str) -> bool:
 
     Used only to skip downstream jobs when a base job fails: per-stock jobs
     depend on the stock list, sector jobs on the sector list.
+    盘后定版还依赖当日全市场日线;上游失败时不得拿旧日期继续报成功。
     """
     if upstream == "sync_stock_list":
-        return job_id.startswith("sync_stock_") and job_id not in _BASE_SYNC_JOBS
+        return (job_id.startswith("sync_stock_") and job_id != "sync_stock_list") \
+            or job_id in _EOD_DAILY_FINALIZERS
+    if upstream == "sync_stock_daily_bars":
+        return job_id in _EOD_DAILY_FINALIZERS | {"rebuild_stock_limit_up_daily"}
     if upstream == "sync_sector_list":
         return job_id.startswith("sync_sector_") or job_id in {
             "sync_stock_sector_memberships",
@@ -3404,6 +3405,30 @@ def _depends_on(job_id: str, upstream: str) -> bool:
             "sync_stock_sector_memberships",
         }
     return False
+
+
+def _skip_downstream_after_failure(batch_id: str, job_ids: list[str], index: int) -> None:
+    """异常和 incomplete 共用下游失败传播;已被上游跳过的任务不重复计数。"""
+    upstream = job_ids[index]
+    if upstream not in _BASE_SYNC_JOBS:
+        return
+    with _BATCH_LOCK:
+        batch = _SYNC_BATCHES.get(batch_id)
+        statuses = {item["job_id"]: item.get("status") for item in (batch or {}).get("jobs", [])}
+    for later_id in job_ids[index + 1:]:
+        if not _depends_on(later_id, upstream) or statuses.get(later_id) == "skipped":
+            continue
+        _update_batch_job(
+            batch_id,
+            later_id,
+            {
+                "status": "skipped",
+                "finished_at": _utc_now_iso(),
+                "message": f"上游 {upstream} 失败，跳过",
+                "stage": "跳过",
+            },
+        )
+        _increment_batch(batch_id, completed=1, skipped=1)
 
 
 def _run_sync_batch(
@@ -3483,6 +3508,7 @@ def _run_sync_batch(
                     rows_read=rows_read,
                     rows_written=rows_written,
                 )
+                _skip_downstream_after_failure(batch_id, job_ids, index)
                 continue
             _update_batch_job(
                 batch_id,
@@ -3520,21 +3546,7 @@ def _run_sync_batch(
                 },
             )
             _increment_batch(batch_id, completed=1, failed=1)
-            # A failed base job skips its downstream dependents, but the batch continues.
-            if job_id in _BASE_SYNC_JOBS:
-                for later_id in job_ids[index + 1:]:
-                    if _depends_on(later_id, job_id):
-                        _update_batch_job(
-                            batch_id,
-                            later_id,
-                            {
-                                "status": "skipped",
-                                "finished_at": _utc_now_iso(),
-                                "message": f"上游 {job_id} 失败，跳过",
-                                "stage": "跳过",
-                            },
-                        )
-                        _increment_batch(batch_id, completed=1, skipped=1)
+            _skip_downstream_after_failure(batch_id, job_ids, index)
             continue
 
         with _BATCH_LOCK:
@@ -4857,7 +4869,9 @@ def _run_scheduled_jobs(window_start: datetime | None = None) -> None:
         cron = row.get("cron")
         if not cron:
             continue
-        recently_started = _recently_started(row)
+        # 分钟实时扫描只防同分钟重入;其余批次保留 30 分钟防补偿连环触发。
+        throttle_seconds = 55 if str(row.get("id")) == "short_term_live_scan" else 1800
+        recently_started = _recently_started(row, within_seconds=throttle_seconds)
         if recently_started:
             continue
         try:

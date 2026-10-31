@@ -108,6 +108,43 @@ def _first_jump_status(entry: dict[str, object], auction_pct: float,
     return None
 
 
+def _point_after_auction(
+    entry: dict[str, object],
+    auction_pct: float,
+    *,
+    weak_ok: bool,
+    point: str,
+) -> tuple[str, str]:
+    """竞价定型后的点位/级别重归属;盘中扫描与盘后漏扫补建共用。"""
+    real_weak = None
+    if weak_ok:
+        real_weak = pool_mod.tag_weak(
+            str(entry.get("group4")), entry.get("b1_open"),
+            entry.get("b2_open"), entry.get("b3_open"),
+            auction_pct=auction_pct, b1_turn=entry.get("b1_turn"),
+            b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
+            foundation_chg=entry.get("foundation_chg"),
+            prev_wave60=entry.get("prev_wave60"),
+            dist_h60=entry.get("dist_h60"))
+    real_point = str(real_weak["no"]) if real_weak else None
+    if real_point is None:
+        # 弱市窗不含今开(如 both 双开落在强市窗)→ 强市复核兜底
+        real_point = pool_mod.tag_point(
+            str(entry.get("group4")), entry.get("b1_open"),
+            entry.get("b2_open"), entry.get("b3_open"),
+            auction_pct=auction_pct,
+            b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
+            foundation_chg=entry.get("foundation_chg"),
+            pre10_pct=entry.get("pre10_pct"),
+            foundation_pose=entry.get("foundation_pose"),
+            anchor_pos=entry.get("anchor_pos"),
+            anchor_dist=entry.get("anchor_dist"),
+            dist_ma10=entry.get("dist_ma10"))
+    level = ("A" if str(real_point).startswith("K")
+             else contracts.POINT_LEVELS.get(real_point, "—"))
+    return real_point, level
+
+
 def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dict[str, object]:
     from alphaagent.data_sources.akshare_adapter import (AkShareAdapter,
     count_fresh_spot_items)
@@ -184,38 +221,11 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
                     auction_skipped += 1
                     writes.append((vt, patch))
                     continue
-                # 在窗:按今开重算点位归属——盘前标是链首过点,今开定型后归首窗
-                # 命中者(与回测一致);弱市组启用时归 tag_weak(双命中归 K 系),
-                # 强市组照旧 tag_point(v7.1 起池条目带 b3_turn,三板换手窗可复核)
-                from alphaagent.server.services.high_relay import pool as pool_mod
-                real_weak = None
-                if weak_ok:
-                    real_weak = pool_mod.tag_weak(
-                        str(entry.get("group4")), entry.get("b1_open"),
-                        entry.get("b2_open"), entry.get("b3_open"),
-                        auction_pct=auction_pct, b1_turn=entry.get("b1_turn"),
-                        b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
-                        foundation_chg=entry.get("foundation_chg"),
-                        prev_wave60=entry.get("prev_wave60"),
-                        dist_h60=entry.get("dist_h60"))
-                real_point = str(real_weak["no"]) if real_weak else None
-                if real_point is None:
-                    # 弱市窗不含今开(如 both 双开落在强市窗)→ 强市复核兜底
-                    real_point = pool_mod.tag_point(
-                        str(entry.get("group4")), entry.get("b1_open"),
-                        entry.get("b2_open"), entry.get("b3_open"),
-                        auction_pct=auction_pct,
-                        b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
-                        foundation_chg=entry.get("foundation_chg"),
-                        pre10_pct=entry.get("pre10_pct"),
-                        foundation_pose=entry.get("foundation_pose"),
-                        anchor_pos=entry.get("anchor_pos"),
-                        anchor_dist=entry.get("anchor_dist"),
-                        dist_ma10=entry.get("dist_ma10"))
-                if real_point != point:
-                    patch["point"] = real_point
-                    patch["level"] = ("A" if str(real_point).startswith("K")
-                                      else contracts.POINT_LEVELS.get(real_point, "—"))
+                point, level = _point_after_auction(
+                    entry, auction_pct, weak_ok=weak_ok, point=point,
+                )
+                patch["point"] = point
+                patch["level"] = level
 
         if status == "watching":
             # 触板即买:现价首次 ≥ 涨停价 → 按涨停价打(链式研究口径,无时间窗)
