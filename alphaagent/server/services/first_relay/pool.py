@@ -1,23 +1,20 @@
-"""一接二池计算:T-1 收盘后给次日「首板票」打 G1/S1 候选标(判定唯一真源)。
+"""一接二 j12-v2.0 实时候选池与统一事件字段。
 
-口径 = 量化因子研究/一接二/一接二规则.md v1.1:
-- 池 = 昨日恰好 1 板(孤立首板,涨停且前日不涨停)的主板非ST票(全量,雷达)
-- 地基日 = 首板前一天;判定维度全部前一晚可知(阴/距MA20/距60高/前10日/换手/底盘)
-- 命中 = G1(阴×今开7.5~9.5) / S1(阳×前10<-3×今开7.5~8.5);今开窗由竞价定型后复核
-- 静态回避 = 贴顶(地基距60高0~10%)
-- 行号语义与 j12_research.py 一致: p1=首板日, p2=地基日, p3=地基前一日
-公共件(宇宙/派生列)复用 high_relay.pool, 保证两个产品同口径。
+池为 data_date 恰好孤立首板的主板非 ST 票。T-1 盘后只做静态候选，
+F3/F6/F9 的今开窗由竞价数据复核；F1~F10 任一命中即出手，同票同日复核去重。
+公共日线与静态字段复用 high_relay.pool，入场价格复用 execution。
 """
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import date
 
 import numpy as np
 import pandas as pd
 
 from alphaagent.server.db.session import get_engine
-from alphaagent.server.services.first_relay import contracts
+from alphaagent.server.services.first_relay import contracts, execution
 from alphaagent.server.services.high_relay import pool as hpr_pool
 
 logger = logging.getLogger(__name__)
@@ -36,47 +33,101 @@ def board_type_b1(o: float, h: float, l: float, c: float) -> str:
     return "下影" if (lo - l) / (c / 1.10) * 100 >= LSHADOW_TH else "实体"
 
 
-def tag_point(foundation_yang: bool | None, dist_h60: float | None,
-              pre10_pct: float | None,
-              pre20_pct: float | None = None) -> tuple[str, str, str | None, str | None, bool]:
-    """判定唯一真源: 返回 (point, level, avoid_static, gate串, actionable)。
+def tag_point(
+    fields: Mapping[str, object],
+    check_gate: bool = True,
+) -> tuple[str, str, str | None, str | None, bool]:
+    """按 F1~F10 顺序判定，返回 (主点, 级别, 回避, 今开窗, 是否出手)。
 
-    规则顺序: 贴顶毒格 → 死水毒格(v1.2) → G1(阴) → S1(阳×前10<-3) → 不命中。
-    gate = "lo_hi"(今开窗, 含lo不含hi);盘中等竞价定型后按 gate 复核。
+    check_gate=False 用于 T-1 盘后静态候选，只跳过规则自带的今开窗。
+    若同时命中无窗规则，则不再需要今开窗；否则返回全部命中窗口的并集
+    （相邻/重叠窗口合并，不相邻窗口用 | 连接）。
     """
-    if dist_h60 is not None and dist_h60 == dist_h60 and 0 <= dist_h60 <= 10:
-        return "—", "—", contracts.AVOID_TOP_RIM, None, False
-    if pre20_pct is not None and pre20_pct == pre20_pct and -8 <= pre20_pct < 0:
-        return "—", "—", contracts.AVOID_DEAD_WATER, None, False
-    if foundation_yang is False:
-        lo, hi = contracts.POINTS["G1"]["gate"]
-        return "G1", "A", None, f"{lo}_{hi}", True
-    if foundation_yang is True and pre10_pct is not None and pre10_pct == pre10_pct \
-            and pre10_pct < -3:
-        lo, hi = contracts.POINTS["S1"]["gate"]
-        return "S1", "B", None, f"{lo}_{hi}", True
-    return "—", "—", None, None, False
+    hits = contracts.match_points(fields, check_gate=check_gate)
+    if not hits:
+        return "—", "—", None, None, False
+    gate = None
+    if all(contracts.POINTS[rule_id]["gate"] is not None for rule_id in hits):
+        intervals: list[tuple[float, float]] = sorted({
+            contracts.POINTS[rule_id]["gate"] for rule_id in hits
+        })  # type: ignore[assignment]
+        merged: list[tuple[float, float]] = []
+        for lo, hi in intervals:
+            if merged and lo <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+            else:
+                merged.append((lo, hi))
+        gate = "|".join(f"{lo}_{hi}" for lo, hi in merged)
+    return hits[0], "A", None, gate, True
 
 
-def bonus_tags(b1_turn: float | None, pre20_pct: float | None,
-               b1_open_pct: float | None) -> str | None:
-    """纯特征标签(v1.2 仓位二值化后仅供看盘参考):锁板/动量深坑/秒板。"""
-    tags: list[str] = []
-    if b1_turn is not None and b1_turn == b1_turn and b1_turn < 8:
-        tags.append(contracts.BONUS_LOCKED)
-    if pre20_pct is not None and pre20_pct == pre20_pct and pre20_pct < -5:
-        tags.append(contracts.BONUS_MOM_DEEP)
-    if b1_open_pct is not None and b1_open_pct == b1_open_pct and b1_open_pct >= 5:
-        tags.append(contracts.BONUS_FAST)
-    return ",".join(tags) if tags else None
+def event_fields(
+    bars: pd.DataFrame,
+    ctx: dict[str, object],
+    i_last: int,
+) -> dict[str, object] | None:
+    """生成首板事件的统一静态字段；i_last 为首板日 p1。
+
+    bars 必须先过 hpr_pool.derive_daily，ctx 必须由同一批 bars 一次性 make_ctx。
+    判定数值沿用研究口径：static_fields 已舍入的字段保持原值，其余不在判定前舍入。
+    """
+    static = hpr_pool.static_fields(ctx, i_last, 1)
+    if static is None:
+        return None
+    rec = dict(static)
+    p1, p2 = i_last, i_last - 1
+    sid = int(bars["sid"].iat[p1])
+
+    f2o = float(bars["open_price"].iat[p2])
+    f2h = float(bars["high_price"].iat[p2])
+    f2l = float(bars["low_price"].iat[p2])
+    f2c = float(bars["close_price"].iat[p2])
+    f2_prev = float(bars["prev_close"].iat[p2])
+    f2_turn = float(bars["turnover_rate"].iat[p2])
+    f2_h60 = bars["h60"].iat[p2]
+
+    c5_i = p2 - 5
+    if c5_i >= 0 and int(bars["sid"].iat[c5_i]) == sid:
+        c5 = float(bars["close_price"].iat[c5_i])
+        rec["pre5_pct"] = (f2c / c5 - 1) * 100 if c5 > 0 else None
+    else:
+        rec["pre5_pct"] = None
+    rec["foundation_amplitude"] = (f2h - f2l) / f2_prev * 100 if f2_prev > 0 else np.nan
+    rec["foundation_body"] = (f2c / f2o - 1) * 100 if f2o > 0 else np.nan
+    rec["foundation_vol_rel5"] = float(bars["vol_rel5"].iat[p2])
+    rec["foundation_turn"] = f2_turn
+
+    p1o = float(bars["open_price"].iat[p1])
+    p1h = float(bars["high_price"].iat[p1])
+    p1l = float(bars["low_price"].iat[p1])
+    p1c = float(bars["close_price"].iat[p1])
+    p1_limit = float(bars["limit_price"].iat[p1])
+    b1_turn = static.get("b1_turn")
+    rec["b1_gap"] = (p1_limit - p1l) / f2c * 100
+    rec["b1_vol_rel5"] = float(bars["vol_rel5"].iat[p1])
+    rec["b1_turn_change"] = float(b1_turn) - f2_turn if b1_turn is not None else np.nan
+    rec["b1_break60"] = bool(p1c > f2_h60) if pd.notna(f2_h60) else None
+    rec["b1_type"] = board_type_b1(p1o, p1h, p1l, p1c)
+
+    # 二板日执行价格：昨收是首板收盘，不是地基收盘。
+    rec["prev_close"] = p1c
+    rec["limit_price"] = execution.limit_10pct(p1c)
+    rec["trigger_price"] = execution.trigger_9pct(p1c)
+
+    # 现有看盘字段；chassis 所需的板史列由 compute_pool 预先补入。
+    rec["dist_ma20"] = static.get("foundation_ma20_gap")
+    lc60 = bars["lim_cnt60"].iat[p1] if "lim_cnt60" in bars else np.nan
+    ms60 = bars["max_streak60"].iat[p1] if "max_streak60" in bars else np.nan
+    rec["chassis"] = (
+        "纯底盘" if lc60 == 0 else ("孤立板" if ms60 == 1 else "前波连板")
+    ) if pd.notna(lc60) and pd.notna(ms60) else None
+    rec["lim_cnt60"] = int(lc60) if pd.notna(lc60) else None
+    rec["max_streak60"] = int(ms60) if pd.notna(ms60) else None
+    return rec
 
 
 def compute_pool(data_date: date) -> dict[str, object]:
-    """data_date(=首板日 T-1)收盘后算 T 日执行池。
-
-    事件口径 = streak==1(T-1 恰好孤立首板);全量入池做雷达,
-    命中/回避由 tag_point 判定。返回 entries + 统计。
-    """
+    """data_date(首板日 T-1)收盘后计算 T 日综合候选池。"""
     engine = get_engine()
     universe = hpr_pool.load_universe(engine)
     name_map = universe.set_index("vt_symbol")["name"].to_dict()
@@ -88,50 +139,33 @@ def compute_pool(data_date: date) -> dict[str, object]:
         engine, parse_dates=["trade_date"])
     bars = bars[bars["vt_symbol"].isin(set(universe["vt_symbol"]))].copy()
     bars = hpr_pool.derive_daily(bars)
-    # 板史(不含当日): 60日涨停次数 + 窗口内最大连板
+
+    # 板史仅用于 chassis/UI；最终规则字段统一由 event_fields 生成。
     lim_i = bars["is_lim"].astype("int8")
-    g = bars.groupby("sid", sort=False)
     bars["lim_cnt60"] = lim_i.groupby(bars["sid"], sort=False)\
         .transform(lambda s: s.rolling(60, min_periods=20).sum()).shift(1)
     bars["max_streak60"] = bars["streak"].groupby(bars["sid"], sort=False)\
         .transform(lambda s: s.rolling(60, min_periods=20).max()).shift(1)
-    gc = g["close_price"]
-    bars["c10"] = gc.shift(10)
-    bars["c20"] = gc.shift(20)
-    mkt_lim_tm1 = int(bars.loc[bars["trade_date"] == data_date, "is_lim"].sum())
+    ctx = hpr_pool.make_ctx(bars)
 
+    mkt_lim_tm1 = int(bars.loc[bars["trade_date"] == data_date, "is_lim"].sum())
     last = bars[bars["trade_date"] == pd.Timestamp(data_date)].copy()
-    ev = last[last["streak"] == 1]        # T-1 恰好孤立首板
+    ev = last[last["streak"] == 1]
     entries: list[dict[str, object]] = []
-    stats = {"pool": len(ev), "actionable": 0, "act_G1": 0, "act_S1": 0, "avoid": 0}
+    stats = {"pool": len(ev), "actionable": 0, "avoid": 0}
+    stats.update({f"act_F{i}": 0 for i in range(1, 11)})
+    actionable_symbols: set[str] = set()
+
     for i in ev.index.to_numpy():
         i = int(i)
-        p2, p3 = i - 1, i - 2          # 地基日 / 地基前一日
-        if p2 < 0:
+        fields = event_fields(bars, ctx, i)
+        if fields is None:
             continue
         vsym = str(bars["vt_symbol"].iat[i])
-        f2c = float(bars["close_price"].iat[p2])
-        f3c = float(bars["close_price"].iat[p3]) if p3 >= 0 else np.nan
-        f2_h60 = bars["h60"].iat[p2]
-        f2_ma20 = bars["ma20"].iat[p2]
-        dist_h60 = (f2c / f2_h60 - 1) * 100 if f2_h60 == f2_h60 else None
-        dist_ma20 = (f2c / f2_ma20 - 1) * 100 if f2_ma20 == f2_ma20 else None
-        pre10 = (f2c / bars["c10"].iat[p2] - 1) * 100 if bars["c10"].iat[p2] == bars["c10"].iat[p2] else None
-        pre20 = (f2c / bars["c20"].iat[p2] - 1) * 100 if bars["c20"].iat[p2] == bars["c20"].iat[p2] else None
-        f_yang = bool(f2c >= float(bars["open_price"].iat[p2])) if f2c == f2c else None
-        f_chg = (f2c / f3c - 1) * 100 if f3c == f3c else None
-        point, level, avoid, gate, actionable = tag_point(
-            f_yang, dist_h60, pre10, pre20)
-        p1o = float(bars["open_price"].iat[i])
-        p1c = float(bars["close_price"].iat[i])
-        p1_prevc = f2c
-        turn = bars["turnover_rate"].iat[i]
-        turn = float(turn) if turn == turn else None
-        lc60 = bars["lim_cnt60"].iat[i]
-        ms60 = bars["max_streak60"].iat[i]
-        chassis = ("纯底盘" if lc60 == 0 else ("孤立板" if ms60 == 1 else "前波连板")) \
-            if lc60 == lc60 else None
-        entries.append({
+        point, level, avoid, gate, actionable = tag_point(fields, check_gate=False)
+        hits = contracts.match_points(fields, check_gate=False)
+        entry = dict(fields)
+        entry.update({
             "vt_symbol": vsym,
             "name": str(name_map.get(vsym) or ""),
             "point": point,
@@ -140,30 +174,17 @@ def compute_pool(data_date: date) -> dict[str, object]:
             "avoid_static": avoid,
             "auction_gate": gate,
             "action_hint": contracts.POINTS[point]["hint"] if point in contracts.POINTS else None,
-            "bonus": bonus_tags(turn, dist_ma20, f_chg),
-            "prev_close": round(p1c, 2),
-            "limit_price": round(p1_prevc * 1.10 + 1e-9, 2) if p1_prevc == p1_prevc else None,
-            "foundation_yang": f_yang,
-            "foundation_chg": round(f_chg, 2) if f_chg == f_chg else None,
-            "dist_ma20": round(dist_ma20, 2) if dist_ma20 == dist_ma20 else None,
-            "dist_h60": round(dist_h60, 2) if dist_h60 == dist_h60 else None,
-            "pre10_pct": round(pre10, 2) if pre10 == pre10 else None,
-            "pre20_pct": round(pre20, 2) if pre20 is not None and pre20 == pre20 else None,
-            "b1_type": board_type_b1(p1o, float(bars["high_price"].iat[i]),
-                                     float(bars["low_price"].iat[i]), p1c),
-            "b1_open": round((p1o / p1_prevc - 1) * 100, 2) if p1_prevc == p1_prevc else None,
-            "b1_turn": round(turn, 2) if turn is not None else None,
-            "b1_gap": round((round(p1_prevc * 1.10 + 1e-9, 2) - float(bars["low_price"].iat[i]))
-                            / p1_prevc * 100, 2) if p1_prevc == p1_prevc else None,
-            "chassis": chassis,
-            "max_streak60": int(ms60) if ms60 == ms60 else None,
+            "rule_ids": "+".join(hits) if hits else None,
+            "bonus": "同中" + ",".join(hits[1:]) if len(hits) > 1 else None,
             "mkt_lim_tm1": mkt_lim_tm1,
         })
+        entries.append(entry)
         if actionable:
-            stats["actionable"] += 1
-            stats[f"act_{point}"] += 1
-        if avoid:
-            stats["avoid"] += 1
+            actionable_symbols.add(vsym)
+            for rule_id in hits:
+                stats[f"act_{rule_id}"] += 1
+
+    stats["actionable"] = len(actionable_symbols)
     exec_date = hpr_pool.next_weekday(data_date)
     return {"exec_date": exec_date.isoformat(), "entries": entries,
             "filter_stats": stats, "mkt_lim_tm1": mkt_lim_tm1}

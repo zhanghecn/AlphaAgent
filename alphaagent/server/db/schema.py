@@ -1388,11 +1388,10 @@ Index(
 )
 
 # ── 低位一接二(首板次日打二板, j12) ──
-# 策略口径 = 量化因子研究/一接二/一接二规则.md v1.1 定稿(2026-10-06):
-# 池 = 昨日恰好 1 板(孤立首板)的主板非ST票(全量,雷达);
-# G1 出手 = 阴地基×今开7.5~9.5; S1 观察 = 阳地基×前10日<-3%×今开7.5~8.5;
-# 毒格 = 地基贴60日高(0~10%)力竭 / 今开≥9.5顶格透支(命中也不买);
-# 卖 = 全套沿用 hpr v6.7(E3+D+2深开竞价卖+跌停口径)。
+# 策略口径 = j12-v2.0：昨日孤立首板的主板非 ST 票进入雷达池。
+# F1~F10 任一命中即可出手；F3/F6/F9 另需竞价窗复核，同票同日只保留一笔。
+# 买 = 开盘非涨停，盘中最高严格过昨收 +9% 后按触发价或更高的开盘价成交。
+# 卖 = 未封次日尾盘；封住持有至首次断板尾盘；一字跌停顺延，最长持有 15 日。
 
 j12_pool_entries = Table(
     "j12_pool_entries",
@@ -1400,21 +1399,23 @@ j12_pool_entries = Table(
     Column("trade_date", Date, primary_key=True),  # 执行日(池生效的交易日)
     Column("vt_symbol", String(32), primary_key=True),
     Column("name", String(80), nullable=False),
-    Column("point", String(4), nullable=False, server_default="—"),   # G1/S1/—
-    Column("level", String(2), nullable=False, server_default="—"),   # A出手/B观察/—
+    Column("point", String(4), nullable=False, server_default="—"),   # 主方案点 F1~F10/—
+    Column("level", String(2), nullable=False, server_default="—"),   # A出手/—
+    Column("rule_ids", String(64), nullable=True),           # 全部命中规则，如 F1+F10
     Column("actionable", Boolean, nullable=False, server_default="false"),
-    Column("avoid_static", String(160), nullable=True),   # 静态回避原因(贴顶力竭)
-    Column("auction_gate", String(32), nullable=True),    # 今开窗 "7.5_9.5"/"7.5_8.5"
+    Column("avoid_static", String(160), nullable=True),   # 兼容旧字段；v2 无静态回避
+    Column("auction_gate", String(32), nullable=True),    # F3/F6/F9 今开窗及并集
     Column("action_hint", String(64), nullable=True),     # 出手条件人话
-    Column("bonus", String(64), nullable=True),           # 信息层加分(锁板/深坑/大阴;只管仓位)
+    Column("bonus", String(64), nullable=True),           # 同中规则提示，不构成仓位指令
     Column("prev_close", Float, nullable=False),          # 首板收盘(T-1)
-    Column("limit_price", Float, nullable=False),         # 触发价 = 今日涨停价
+    Column("limit_price", Float, nullable=False),         # 二板日涨停价
+    Column("trigger_price", Float, nullable=True),        # 严格突破昨收 +9% 的触发价
     # 首板静态快照(T-1 口径, 全部前一晚可知)
     Column("foundation_yang", Boolean, nullable=True),    # 地基日(首板前一天)收阳
     Column("foundation_chg", Float, nullable=True),       # 地基涨跌 %
     Column("dist_ma20", Float, nullable=True),            # 地基收盘距MA20 %
-    Column("dist_h60", Float, nullable=True),             # 地基收盘距60日高 %(贴顶判定)
-    Column("pre10_pct", Float, nullable=True),            # 地基前10日涨幅 %(S1 判定)
+    Column("dist_h60", Float, nullable=True),             # 地基收盘距60日高 %(F10 判定)
+    Column("pre10_pct", Float, nullable=True),            # 地基前10日涨幅 %
     Column("pre20_pct", Float, nullable=True),
     Column("b1_type", String(8), nullable=True),          # 首板板型 一字/T字/实体/下影
     Column("b1_open", Float, nullable=True),              # 首板开盘 %
@@ -1430,7 +1431,7 @@ j12_pool_entries = Table(
 Index("ix_j12_pool_entries_date", j12_pool_entries.c.trade_date)
 
 # 盘中触发信号(与 hpr_signals 同状态机): watching→entered/holding/pending_exit/closed/
-# skipped_auction(顶格毒)/no_trigger(今开不在窗); EOD 定版封板/退出, 兼作交割单。
+# skipped_auction(竞价窗不符)/no_trigger(未严格过 +9%); EOD 定版封板/退出, 兼作交割单。
 j12_signals = Table(
     "j12_signals",
     metadata,
@@ -1444,7 +1445,7 @@ j12_signals = Table(
     Column("prev_close", Float, nullable=False),
     Column("limit_price", Float, nullable=False),
     Column("touched_at", DateTime(timezone=True), nullable=True),
-    Column("entry_price", Float, nullable=True),      # 买入价 = 涨停价
+    Column("entry_price", Float, nullable=True),      # 买入价 = +9% 触发价；高开越过则取开盘价
     Column("entry_time", DateTime(timezone=True), nullable=True),
     Column("last_price", Float, nullable=True),
     Column("change_pct", Float, nullable=True),
@@ -1452,7 +1453,7 @@ j12_signals = Table(
     Column("sealed", Boolean, nullable=True),
     Column("exit_date", Date, nullable=True),
     Column("exit_price", Float, nullable=True),
-    Column("exit_reason", String(24), nullable=True),  # break_day_close/break_close/d2_deep_open_sell/...
+    Column("exit_reason", String(24), nullable=True),  # break_day_close/break_close/limit_down_defer/...
     Column("ret_pct", Float, nullable=True),
     Column("rules_version", String(80), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -1762,6 +1763,9 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS foundation_pose VARCHAR(8)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS anchor_pos INTEGER",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS anchor_dist INTEGER",
+        # j12-v2.0：保存严格 +9% 触发价和全部命中规则；已有库幂等补列。
+        "ALTER TABLE j12_pool_entries ADD COLUMN IF NOT EXISTS trigger_price FLOAT",
+        "ALTER TABLE j12_pool_entries ADD COLUMN IF NOT EXISTS rule_ids VARCHAR(64)",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS rise_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS fall_count INTEGER",
         "ALTER TABLE sector_fund_flow_snapshots ADD COLUMN IF NOT EXISTS flat_count INTEGER",

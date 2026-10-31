@@ -1,21 +1,19 @@
-"""一接二全量回放:事件构建(2021-01 起) + E3 退出(v6.7 逐行取自 hpr) + 报告物化。
+"""一接二 j12-v2.0 全量回放：严格 +9% 入场 + 纯断板尾盘退出 + 报告物化。
 
-- 判定唯一真源 = pool.tag_point(实时/回测同函数, 零漂移)
-- 事件 = 昨日恰好 1 板 × 当日触板 × 非一字; 主板非ST; 涨停=昨收×1.10四舍五入
-- E3 算法逐行取自产品 high_relay/backtest.py(v6.4 D+2 深开竞价卖 + v6.7 跌停口径)
-- 报告 = 全段(2021-01~今) + 主窗(2023-01起)/样本外(2021-2022)分段成绩卡
-  + 分年 + 按月 + 毒格/未命中对照 + 信息层分解
+- 判定唯一真源 = contracts.match_points，静态字段与实时池共用 pool.event_fields
+- 事件 = 昨日孤立首板 × 当日最高严格过 +9% × 开盘非涨停，不要求之后触板
+- 兼容报告字段 E3% 在 v2 中只表示纯 tail 收益，不再使用旧 E3 深开竞价卖
+- 旧 _e3_exit 原样保留，仅供既有研究脚本调用
 """
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 import numpy as np
 import pandas as pd
 
 from alphaagent.server.db.session import get_engine
-from alphaagent.server.services.first_relay import contracts, pool as pool_mod, repository
+from alphaagent.server.services.first_relay import contracts, execution, pool as pool_mod, repository
 
 logger = logging.getLogger(__name__)
 
@@ -25,125 +23,150 @@ MAIN_START = pd.Timestamp("2023-01-01")
 MAX_K = 15                     # 持有兜底天数(对齐 hpr)
 
 
-def build_events() -> pd.DataFrame:
-    """全量事件回放;返回逐笔明细 E(含判定/收益/分段)。"""
-    engine = get_engine()
-    universe = pool_mod.hpr_pool.load_universe(engine)
-    name_map = universe.set_index("vt_symbol")["name"].to_dict()
+def build_events(
+    bars: pd.DataFrame | None = None,
+    name_map: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """全量事件回放；注入 bars 时完全离线，否则只读数据库与股票宇宙。"""
+    if bars is None:
+        engine = get_engine()
+        universe = pool_mod.hpr_pool.load_universe(engine)
+        if name_map is None:
+            name_map = universe.set_index("vt_symbol")["name"].to_dict()
+        bars = pd.read_sql(
+            "select vt_symbol, trade_date, open_price, high_price, low_price, close_price, "
+            f"volume, turnover_rate from stock_daily_bars where trade_date >= '{START_BARS}'",
+            engine, parse_dates=["trade_date"])
+        bars = bars[bars["vt_symbol"].isin(set(universe["vt_symbol"]))].copy()
 
-    bars = pd.read_sql(
-        "select vt_symbol, trade_date, open_price, high_price, low_price, close_price, "
-        f"volume, turnover_rate from stock_daily_bars where trade_date >= '{START_BARS}'",
-        engine, parse_dates=["trade_date"])
-    bars = bars[bars["vt_symbol"].isin(set(universe["vt_symbol"]))].copy()
-    bars = pool_mod.hpr_pool.derive_daily(bars)
-    lim_i = bars["is_lim"].astype("int8")
-    bars["lim_cnt60"] = lim_i.groupby(bars["sid"], sort=False)\
+    daily = pool_mod.hpr_pool.derive_daily(bars)
+    lim_i = daily["is_lim"].astype("int8")
+    daily["lim_cnt60"] = lim_i.groupby(daily["sid"], sort=False)\
         .transform(lambda s: s.rolling(60, min_periods=20).sum()).shift(1)
-    bars["max_streak60"] = bars["streak"].groupby(bars["sid"], sort=False)\
+    daily["max_streak60"] = daily["streak"].groupby(daily["sid"], sort=False)\
         .transform(lambda s: s.rolling(60, min_periods=20).max()).shift(1)
-    gc = bars.groupby("sid", sort=False)["close_price"]
-    bars["c10"] = gc.shift(10)
-    bars["c20"] = gc.shift(20)
-    g = bars.groupby("sid", sort=False)
+
+    grouped = daily.groupby("sid", sort=False)
+    future: dict[str, pd.Series] = {}
+    source_fields = {
+        "close": "close_price", "open": "open_price", "high": "high_price",
+        "low": "low_price", "is_lim": "is_lim",
+    }
     for k in range(1, MAX_K + 1):
-        bars[f"n{k}_close"] = g["close_price"].shift(-k)
-        bars[f"n{k}_open"] = g["open_price"].shift(-k)
-        bars[f"n{k}_high"] = g["high_price"].shift(-k)
-        bars[f"n{k}_low"] = g["low_price"].shift(-k)
-        bars[f"n{k}_is_lim"] = g["is_lim"].shift(-k)
+        for field, source in source_fields.items():
+            future[f"n{k}_{field}"] = grouped[source].shift(-k)
+    daily = pd.concat([daily, pd.DataFrame(future, index=daily.index)], axis=1)
+    ctx = pool_mod.hpr_pool.make_ctx(daily)
 
-    # 二板开盘即一字(开盘=涨停价, 含盘中砸开的T字)不参与: 买不进/接炸板(主人2026-10-06拍板)
-    open_ow = (bars["open_price"] - bars["limit_price"]).abs() <= 1e-6
-    ev_mask = (bars["streak_prev"] == 1) & bars["touch"] & \
-              (bars["trade_date"] >= START_EVT) & (~bars["one_word"]) & (~open_ow)
-    ev = bars[ev_mask]
+    trigger = daily["prev_close"].map(
+        lambda value: execution.trigger_9pct(value) if pd.notna(value) and value > 0 else np.nan)
+    event_mask = (
+        daily["streak_prev"].eq(1)
+        & daily["trade_date"].ge(START_EVT)
+        & daily["high_price"].ge(trigger - 1e-9)
+        & daily["open_price"].lt(daily["limit_price"] - 1e-9)
+    )
 
-    cols = {c: bars[c].to_numpy() for c in
-            ["vt_symbol", "trade_date", "close_price", "open_price", "prev_close",
-             "limit_price", "is_lim", "turnover_rate", "ma20", "h60", "c10", "c20",
-             "pos"]}
     rows: list[dict[str, object]] = []
-    for i in ev.index.to_numpy():
+    seen: set[tuple[str, pd.Timestamp]] = set()
+    for i in daily.index[event_mask].to_numpy():
         i = int(i)
-        p1, p2, p3 = i - 1, i - 2, i - 3      # 首板日 / 地基日 / 地基前一日
-        if cols["pos"][p1] < 2:
+        symbol = str(daily["vt_symbol"].iat[i])
+        trade_date = pd.Timestamp(daily["trade_date"].iat[i])
+        event_key = (symbol, trade_date)
+        if event_key in seen:
             continue
-        vsym = str(bars["vt_symbol"].iat[i])
-        buy = round(float(cols["limit_price"][i]), 2)
-        # 竞价涨幅四舍五入两位再判窗(与研究/问财显示口径一致, 避免边缘丝差)
-        buy_open = round((float(cols["open_price"][i]) / float(cols["prev_close"][i]) - 1) * 100, 2)
-        sealed = bool(cols["is_lim"][i])
+        seen.add(event_key)
 
-        # 判定字段(与 pool.compute_pool 同口径)
-        f2c = float(cols["close_price"][p2])
-        f3c = float(cols["close_price"][p3])
-        f2_h60 = cols["h60"][p2]
-        f2_ma20 = cols["ma20"][p2]
-        dist_h60 = (f2c / f2_h60 - 1) * 100 if f2_h60 == f2_h60 else None
-        dist_ma20 = (f2c / f2_ma20 - 1) * 100 if f2_ma20 == f2_ma20 else None
-        pre10 = (f2c / cols["c10"][p2] - 1) * 100 if cols["c10"][p2] == cols["c10"][p2] else None
-        pre20 = (f2c / cols["c20"][p2] - 1) * 100 if cols["c20"][p2] == cols["c20"][p2] else None
-        f_yang = bool(f2c >= float(cols["open_price"][p2]))
-        f_chg = (f2c / f3c - 1) * 100 if f3c == f3c else None
-        turn = float(cols["turnover_rate"][p1])
-        point, level, avoid, gate, _actionable = pool_mod.tag_point(
-            f_yang, dist_h60, pre10, pre20)
-        p1_open_pct = (float(cols["open_price"][p1]) / f2c - 1) * 100 if f2c == f2c else None
-        bonus = pool_mod.bonus_tags(turn if turn == turn else None, pre20, p1_open_pct)
-        # 竞价复核(回放口径直接判, 实时端由扫描判): 今开 ≥9.5=顶格毒;
-        # 不在 gate 窗 = no_trigger(池命中但今开不配合, 不出手)
-        if point in ("G1", "S1"):
-            lo, hi = contracts.POINTS[point]["gate"]  # type: ignore[assignment]
-            if buy_open >= 9.5:
-                avoid = contracts.AVOID_AUCTION_CAP
-                point, level, gate = "—", "—", None
-            elif not (lo <= buy_open < hi):
-                point, level, gate = "—", "—", None
+        prev_close = float(daily["prev_close"].iat[i])
+        buy = execution.open9_entry(
+            float(daily["open_price"].iat[i]),
+            float(daily["high_price"].iat[i]),
+            prev_close,
+        )
+        if buy is None:
+            continue
+        p1 = i - 1
+        fields = pool_mod.event_fields(daily, ctx, p1)
+        if fields is None:
+            continue
 
-        # E0 持有到断板(15 日兜底)
-        exit_e0, hold_days, exit_idx, capped = np.nan, None, None, False
-        for k in range(1, MAX_K + 1):
-            v = bars[f"n{k}_is_lim"].iat[i]
-            c = bars[f"n{k}_close"].iat[i]
-            if c != c:
-                break
-            if not bool(v):
-                exit_e0, hold_days, exit_idx = c, k, i + k
-                break
-        if exit_e0 != exit_e0 and bars[f"n{MAX_K}_close"].iat[i] == bars[f"n{MAX_K}_close"].iat[i]:
-            exit_e0, hold_days, exit_idx = bars[f"n{MAX_K}_close"].iat[i], MAX_K, i + MAX_K
-            capped = True
-        unfinished = exit_e0 != exit_e0
-        exit_e3, e3_i, e3_reason = (np.nan, None, None) if unfinished else \
-            _e3_exit(bars, i, sealed, exit_e0, hold_days, exit_idx, capped)
+        today_open = round((float(daily["open_price"].iat[i]) / prev_close - 1) * 100, 2)
+        fields["today_open"] = today_open
+        hits = contracts.match_points(fields, check_gate=True)
+        point = hits[0] if hits else "—"
+        level = str(contracts.POINTS[point]["level"]) if hits else "—"
+        bonus = "同中" + ",".join(hits[1:]) if len(hits) > 1 else None
+        sealed = bool(daily["is_lim"].iat[i])
 
-        e3_exit_date = None
-        if not unfinished and e3_i is not None:
-            e3_exit_date = pd.Timestamp(bars["trade_date"].iat[e3_i]).date().isoformat()
+        # E0 只在封住时预扫描首次断板；未封买日由 T+1 尾盘规则直接退出。
+        exit_e0, e0_hold_days, e0_exit_idx, capped = np.nan, None, None, False
+        if sealed:
+            for k in range(1, MAX_K + 1):
+                next_close = daily[f"n{k}_close"].iat[i]
+                if pd.isna(next_close):
+                    break
+                if not bool(daily[f"n{k}_is_lim"].iat[i]):
+                    exit_e0 = float(next_close)
+                    e0_hold_days, e0_exit_idx = k, i + k
+                    break
+            if pd.isna(exit_e0) and pd.notna(daily[f"n{MAX_K}_close"].iat[i]):
+                exit_e0 = float(daily[f"n{MAX_K}_close"].iat[i])
+                e0_hold_days, e0_exit_idx, capped = MAX_K, i + MAX_K, True
+
+        tail_price, tail_i, tail_reason = _tail_exit(
+            daily, i, sealed, exit_e0, e0_hold_days, e0_exit_idx, capped)
+        unfinished = tail_i is None or pd.isna(tail_price)
+        tail_exit_date = None
+        hold_days = None
+        if tail_i is not None:
+            tail_exit_date = pd.Timestamp(daily["trade_date"].iat[tail_i]).date().isoformat()
+            hold_days = int(tail_i - i)
+
+        def finite_number(key: str) -> float | None:
+            value = fields.get(key)
+            return float(value) if value is not None and pd.notna(value) else None
+
+        dist_ma20 = finite_number("dist_ma20")
+        dist_h60 = finite_number("dist_h60")
+        pre10 = finite_number("pre10_pct")
+        pre20 = finite_number("pre20_pct")
+        turn = finite_number("b1_turn")
+        bad_gap = any(
+            (value := fields.get(key)) is not None
+            and pd.notna(value)
+            and abs(float(value)) > 11
+            for key in ("today_open", "b1_open", "foundation_chg")
+        )
         rows.append({
-            "代码": vsym,
-            "名称": str(name_map.get(vsym) or ""),
-            "买入日": pd.Timestamp(cols["trade_date"][i]),
-            "段": "主窗" if cols["trade_date"][i] >= MAIN_START else "样本外",
-            "方案点": point if avoid is None else "—",
-            "级别": level if avoid is None else "—",
-            "回避": avoid,
+            "代码": symbol,
+            "名称": str((name_map or {}).get(symbol) or ""),
+            "买入日": trade_date,
+            "段": "主窗" if trade_date >= MAIN_START else "样本外",
+            "方案点": point,
+            "级别": level,
+            "规则IDs": "+".join(hits),
+            "回避": None,
             "加分": bonus,
-            "地基阴阳": "阳" if f_yang else "阴",
-            "今开%": round(buy_open, 2),
-            "首板换手%": round(turn, 2) if turn is not None and turn == turn else None,
-            "距MA20%": round(dist_ma20, 2) if dist_ma20 is not None and dist_ma20 == dist_ma20 else None,
-            "距60高%": round(dist_h60, 2) if dist_h60 is not None and dist_h60 == dist_h60 else None,
-            "前10日%": round(pre10, 2) if pre10 is not None and pre10 == pre10 else None,
-            "前20日%": round(pre20, 2) if pre20 is not None and pre20 == pre20 else None,
+            "地基阴阳": "阳" if fields.get("foundation_yang") else "阴",
+            "今开%": today_open,
+            "首板换手%": round(turn, 2) if turn is not None else None,
+            "距MA20%": round(dist_ma20, 2) if dist_ma20 is not None else None,
+            "距60高%": round(dist_h60, 2) if dist_h60 is not None else None,
+            "前10日%": round(pre10, 2) if pre10 is not None else None,
+            "前20日%": round(pre20, 2) if pre20 is not None else None,
             "买价": buy,
+            "触发价": execution.trigger_9pct(prev_close),
             "封住": sealed,
-            "E3%": round((exit_e3 / buy - 1) * 100, 2) if not unfinished else np.nan,
-            "E3退出日": e3_exit_date,
-            "E3原因": e3_reason if not unfinished else None,
+            "触板": bool(daily["touch"].iat[i]),
+            "数据异常": bool(bad_gap),
+            # v2 兼容字段：E3%/退出日/原因均来自纯 tail，绝不是旧 E3 收益。
+            "E3%": round((tail_price / buy - 1) * 100, 2) if not unfinished else np.nan,
+            "E3退出日": tail_exit_date,
+            "E3原因": tail_reason if not unfinished else None,
+            "断板天数": int(e0_hold_days) if sealed and e0_hold_days is not None else None,
             "持有天数": hold_days,
-            "持有到断板%": round((exit_e0 / buy - 1) * 100, 2) if not unfinished else np.nan,
+            "持有到断板%": round((exit_e0 / buy - 1) * 100, 2) if pd.notna(exit_e0) else np.nan,
             "未完": unfinished,
         })
     E = pd.DataFrame(rows)
@@ -151,6 +174,41 @@ def build_events() -> pd.DataFrame:
         E["月"] = E["买入日"].dt.strftime("%Y-%m")
         E["年"] = E["买入日"].dt.strftime("%Y")
     return E
+
+
+def _tail_exit(daily, i, sealed, exit_e0, hold_days, exit_idx, capped):
+    """纯断板尾盘退出：不用D+2深开卖；一字跌停顺延，持续锁死保持未完。"""
+    if not sealed:
+        return _e3_exit(daily, i, sealed, exit_e0, hold_days, exit_idx, capped)
+    if hold_days is None:
+        return np.nan, None, None
+    reason = "next_close_fail" if hold_days == 1 else (
+        "max_hold_close" if capped else "break_close")
+    hd0 = int(hold_days)
+    previous_close = float(daily[f"n{hd0 - 1}_close"].iat[i]) if hd0 > 1 \
+        else float(daily["limit_price"].iat[i])
+    day_open = float(daily[f"n{hd0}_open"].iat[i])
+    day_high = float(daily[f"n{hd0}_high"].iat[i])
+    day_low = float(daily[f"n{hd0}_low"].iat[i])
+    if (float(exit_e0) <= previous_close * 0.905 + 0.011
+            and day_open == day_high == day_low
+            and abs(day_open - float(exit_e0)) <= 0.011):
+        previous = float(exit_e0)
+        for j in range(hd0 + 1, MAX_K + 1):
+            next_open = float(daily[f"n{j}_open"].iat[i])
+            if pd.isna(next_open):
+                break
+            next_high = float(daily[f"n{j}_high"].iat[i])
+            next_low = float(daily[f"n{j}_low"].iat[i])
+            next_close = float(daily[f"n{j}_close"].iat[i])
+            if next_open == next_high == next_low == next_close \
+                    and (next_close / previous - 1) <= -0.095:
+                previous = next_close
+                continue
+            return next_open, i + j, "limit_down_defer"
+        # 连续一字跌停锁死到最长持有窗仍无法成交：保留未完，不伪造退出价。
+        return np.nan, None, None
+    return float(exit_e0), exit_idx, reason
 
 
 def _e3_exit(bars, i, sealed, exit_e0, hold_days, exit_idx, capped):
@@ -205,12 +263,47 @@ def _e3_exit(bars, i, sealed, exit_e0, hold_days, exit_idx, capped):
 
 # ── 统计与物化 ──
 
+def _trim3(values: pd.Series) -> float | None:
+    """去掉收益最高的三笔后求均值；不超过三笔时不伪造统计量。"""
+    if len(values) <= 3:
+        return None
+    trimmed = values.sort_values(ascending=False).iloc[3:]
+    return round(float(trimmed.mean()), 2)
+
+
+def _empty_agg() -> dict[str, object]:
+    return {
+        "n": 0, "win": None, "e3": None, "med": None, "worst": None,
+        "seal": None, "trim3": None, "by_year": {}, "allpos": False,
+    }
+
+
 def _agg(sub: pd.DataFrame) -> dict[str, object]:
-    done = sub[~sub["未完"]]
+    if "E3%" not in sub:
+        return _empty_agg()
+    if "未完" in sub:
+        done = sub[~sub["未完"].fillna(True).astype(bool)].copy()
+    else:
+        done = sub.copy()
+    done["E3%"] = pd.to_numeric(done["E3%"], errors="coerce")
+    done = done[np.isfinite(done["E3%"])]
     if not len(done):
-        return {"n": 0}
-    yr = done.groupby("年")["E3%"].agg(["count", "mean"])
-    yr_med = done.groupby("年")["E3%"].median()
+        return _empty_agg()
+
+    by_year: dict[str, dict[str, object]] = {}
+    raw_year_means: list[float] = []
+    if "年" in done:
+        for year, group in done.groupby("年", sort=True):
+            mean = float(group["E3%"].mean())
+            raw_year_means.append(mean)
+            by_year[str(year)] = {
+                "n": int(len(group)),
+                "e3": round(mean, 2),
+                "win": round(float((group["E3%"] > 0).mean() * 100), 1),
+                "med": round(float(group["E3%"].median()), 2),
+                "sum_pct": round(float(group["E3%"].sum()), 1),
+                "trim3": _trim3(group["E3%"]),
+            }
     return {
         "n": int(len(done)),
         "win": round(float((done["E3%"] > 0).mean() * 100), 1),
@@ -218,67 +311,96 @@ def _agg(sub: pd.DataFrame) -> dict[str, object]:
         "med": round(float(done["E3%"].median()), 2),
         "worst": round(float(done["E3%"].min()), 1),
         "seal": round(float(done["封住"].mean() * 100), 1),
-        "by_year": {str(y): {"n": int(r["count"]), "e3": round(float(r["mean"]), 2),
-                             "win": round(float((done[done["年"] == y]["E3%"] > 0).mean() * 100), 1),
-                             "med": round(float(yr_med[y]), 2),
-                             "sum_pct": round(float(done[done["年"] == y]["E3%"].sum()), 1)}
-                    for y, r in yr.iterrows()},
-        "allpos": bool(all(yr["mean"] > 0)),
+        "trim3": _trim3(done["E3%"]),
+        "by_year": by_year,
+        "allpos": bool(raw_year_means) and all(mean > 0 for mean in raw_year_means),
     }
 
 
 def assemble_report(E: pd.DataFrame) -> dict[str, object]:
-    done = E[~E["未完"]]
-    hit = done[done["方案点"].isin(["G1", "S1"])]
+    work = E.copy()
+    defaults = {
+        "代码": "", "名称": "", "买入日": pd.NaT, "段": "", "方案点": "—",
+        "规则IDs": "", "回避": None, "今开%": np.nan, "E3%": np.nan,
+        "未完": False, "数据异常": False, "封住": False, "持有天数": np.nan,
+        "断板天数": np.nan, "月": "", "年": "",
+    }
+    for column, default in defaults.items():
+        if column not in work:
+            work[column] = default
+
+    # 最终账本先清洗：未完、异常及非有限收益均不得进入命中或对照组。
+    unfinished = work["未完"].fillna(True).astype(bool)
+    bad_data = work["数据异常"].fillna(True).astype(bool)
+    cleaned = work[~unfinished & ~bad_data].copy()
+    cleaned["E3%"] = pd.to_numeric(cleaned["E3%"], errors="coerce")
+    cleaned = cleaned[np.isfinite(cleaned["E3%"])]
+
+    hit_mask = cleaned["方案点"].isin(contracts.POINTS)
+    hit = cleaned[hit_mask].drop_duplicates(["代码", "买入日"], keep="first").copy()
+    miss = cleaned[~hit_mask].copy()
     main = hit[hit["段"] == "主窗"]
     oos = hit[hit["段"] == "样本外"]
 
-    def by_point(sub):
-        return {p: _agg(sub[sub["方案点"] == p]) for p in ("G1", "S1")}
+    def by_point(sub: pd.DataFrame) -> dict[str, dict[str, object]]:
+        # F1 不能靠字符串前缀匹配，否则会误收 F10；重叠票按成员资格进入多条规则。
+        memberships = {
+            point: sub["规则IDs"].fillna("").astype(str).map(
+                lambda value: point in value.split("+"))
+            for point in contracts.POINTS
+        }
+        return {point: _agg(sub[memberships[point]]) for point in contracts.POINTS}
 
-    # 对照: 未命中(非毒)与毒格
-    miss = done[(done["方案点"] == "—") & (done["回避"].isna())]
-    poison = done[done["回避"].notna()]
+    def tail_structure(sub: pd.DataFrame) -> dict[str, dict[str, object]]:
+        sealed = sub["封住"].fillna(False).astype(bool)
+        break_days = pd.to_numeric(sub["断板天数"], errors="coerce")
+        groups = {
+            "未封": ~sealed,
+            "次日断": sealed & break_days.eq(1),
+            "连板尾": sealed & break_days.ge(2),
+        }
+        result = {}
+        for label, mask in groups.items():
+            stats = _agg(sub[mask])
+            result[label] = {
+                "n": stats["n"],
+                "share": round(float(stats["n"] / len(sub) * 100), 1) if len(sub) else 0.0,
+                "win": stats["win"],
+                "e3": stats["e3"],
+            }
+        return result
+
     months = hit.groupby("月").size()
-    # 信息层分解(主窗命中票)
-    g1m = main[main["方案点"] == "G1"]
-    info = {}
-    for tag, m in [("锁板(换手<8)", g1m["加分"].str.contains("锁板", na=False)),
-                   ("动量深坑(前20日<-5)", g1m["加分"].str.contains("动量深坑", na=False)),
-                   ("秒板(首板开≥5)", g1m["加分"].str.contains("秒板", na=False))]:
-        s = g1m[m]
-        if len(s):
-            info[tag] = {"n": int(len(s)), "win": round(float((s["E3%"] > 0).mean() * 100), 1),
-                         "e3": round(float(s["E3%"].mean()), 2)}
-    # 月度交割
     ledger_days = []
-    for m, sub in hit.groupby("月"):
+    for month, sub in hit.groupby("月"):
         ledger_days.append({
-            "month": str(m),
+            "month": str(month),
             "n": int(len(sub)),
-            "win": round(float((sub["E3%"] > 0).mean() * 100), 1) if len(sub) else None,
-            "e3": round(float(sub["E3%"].mean()), 2) if len(sub) else None,
-            "sum_pct": round(float(sub["E3%"].sum()), 1) if len(sub) else None,
-            "worst": round(float(sub["E3%"].min()), 1) if len(sub) else None,
+            "win": round(float((sub["E3%"] > 0).mean() * 100), 1),
+            "e3": round(float(sub["E3%"].mean()), 2),
+            "sum_pct": round(float(sub["E3%"].sum()), 1),
+            "worst": round(float(sub["E3%"].min()), 1),
         })
-    # 一年的成绩(hpr 同款口径): 复利=按时间序连乘(每笔全仓押一票); 固定1份=相加
+
+    # 一年的成绩：复利按时间序连乘；固定一份为逐笔相加；trim3 去掉当年最好三笔。
     yearly_totals = []
-    for y, sub in hit.groupby("年"):
+    for year, sub in hit.groupby("年"):
         seq = sub.sort_values("买入日")["E3%"]
         compound = ((1 + seq / 100).prod() - 1) * 100
         yearly_totals.append({
-            "year": str(y), "n": int(len(sub)),
+            "year": str(year), "n": int(len(sub)),
             "avg_pct": round(float(sub["E3%"].mean()), 2),
             "win": round(float((sub["E3%"] > 0).mean() * 100), 1),
             "med": round(float(sub["E3%"].median()), 2),
+            "trim3": _trim3(sub["E3%"]),
             "compound_pct": round(float(compound), 1),
             "sum_pct": round(float(sub["E3%"].sum()), 1),
         })
-    # 最好/最差案例
+
     def _cases(sub, n=5, largest=True):
-        s = sub.nlargest(n, "E3%") if largest else sub.nsmallest(n, "E3%")
+        ordered = sub.nlargest(n, "E3%") if largest else sub.nsmallest(n, "E3%")
         return [{"date": str(r["买入日"].date()), "name": r["名称"], "point": r["方案点"],
-                 "open": r["今开%"], "e3": r["E3%"]} for _, r in s.iterrows()]
+                 "open": r["今开%"], "e3": r["E3%"]} for _, r in ordered.iterrows()]
 
     return {
         "window": {"start": START_EVT.date().isoformat(),
@@ -288,12 +410,18 @@ def assemble_report(E: pd.DataFrame) -> dict[str, object]:
         "oos": _agg(oos),
         "by_point": {"main": by_point(main), "oos": by_point(oos), "all": by_point(hit)},
         "miss_control": _agg(miss),
-        "poison": {"n": int(len(poison)),
-                   "e3": round(float(poison["E3%"].mean()), 2) if len(poison) else None},
-        "supply": {"months": int(len(months)), "per_month": round(float(months.mean()), 1)},
+        # 仅为旧 API 保留字段；v2 没有毒格分组。
+        "poison": {"n": 0, "e3": None},
+        "supply": {"months": int(len(months)),
+                   "per_month": round(float(months.mean()), 1) if len(months) else 0.0},
         "yearly_totals": yearly_totals,
-        "info_layer": info,
-        "note_binary": "仓位二值化:命中且非毒格=满仓打;死水/贴顶/顶格=空仓。",
+        "info_layer": {},
+        "tail_structure": {
+            "all": tail_structure(hit),
+            "main": tail_structure(main),
+            "oos": tail_structure(oos),
+        },
+        "note_binary": "同票同日只计一笔；多规则命中不重复计算，不含额外仓位指令。",
         "ledger_days": ledger_days,
         "best": _cases(main),
         "worst": _cases(main, largest=False),

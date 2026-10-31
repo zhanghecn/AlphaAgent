@@ -289,7 +289,7 @@ DEFAULT_JOBS: tuple[JobDefinition, ...] = (
     JobDefinition(
         id="j12_eod_finalize",
         name="一接二盘后定版",
-        description="一接二(首板次日打二板)次日盘前池计算:首板池×G1/S1两分支候选标(竞价门7.5~9.5/7.5~8.5)+贴顶回避;口径见 first_relay.contracts(j12-v1.1)。",
+        description="一接二(首板次日打二板)次日盘前池计算:孤立首板池×F1~F10综合规则,任一命中即候选,F3/F6/F9竞价窗复核;口径见 first_relay.contracts(j12-v2.0)。",
         source_id="alphaagent_local",
         target_table="j12_pool_entries",
         default_params={},
@@ -1513,7 +1513,7 @@ class DataSyncRunner:
 
 
     def _run_j12_eod_finalize(self, params: dict[str, Any]) -> dict[str, Any]:
-        """一接二盘后定版:次日首板池计算(G1/S1两分支候选标)。"""
+        """一接二盘后定版:次日孤立首板池计算(F1~F10 综合候选)。"""
         del params
         from alphaagent.server.services.first_relay import service as j12_service
 

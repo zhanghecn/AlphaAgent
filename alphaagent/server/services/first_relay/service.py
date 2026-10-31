@@ -52,9 +52,11 @@ def run_eod_finalize() -> dict[str, object]:
     exec_date = date.fromisoformat(str(result["exec_date"]))
     saved = repository.save_pool(exec_date, entries, contracts.J12_RULES_VERSION)
     stats = result["filter_stats"]
-    message = (f"j12 eod: 首板池 {saved} 票(出手 {stats.get('actionable')}: "
-               f"G1 {stats.get('act_G1')}/S1 {stats.get('act_S1')}, "
-               f"贴顶回避 {stats.get('avoid')})")
+    rule_counts = "/".join(
+        f"{point} {int(stats.get(f'act_{point}') or 0)}" for point in contracts.POINTS
+    )
+    message = (f"j12 eod: 首板池 {saved} 票(出手 {int(stats.get('actionable') or 0)}: "
+               f"{rule_counts})")
     logger.info(message)
     return {"status": "ok", "exec_date": exec_date.isoformat(),
             "pool": saved, "stats": stats, "message": message}
@@ -66,15 +68,16 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
     """今日池 × 触发状态;?date= 可回看。"""
     now = datetime.now(SHANGHAI)
     target = trade_date or now.date()
-    pool = repository.load_pool(target)
+    pool = repository.load_pool(target, rules_version=contracts.J12_RULES_VERSION)
     stale = False
     if trade_date is None:
-        latest = repository.latest_pool_date()
+        latest = repository.latest_pool_date(rules_version=contracts.J12_RULES_VERSION)
         if not pool and latest is not None:
-            pool = repository.load_pool(latest)
+            pool = repository.load_pool(latest, rules_version=contracts.J12_RULES_VERSION)
             target = latest
             stale = True
-    signals = repository.load_signal_map(target)
+    signals = repository.load_signal_map(
+        target, rules_version=contracts.J12_RULES_VERSION)
     entries = []
     for e in pool:
         sig = signals.get(str(e["vt_symbol"]))
@@ -86,15 +89,19 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
                 if sig.get(k) is not None:
                     row[f"sig_{k}"] = sig[k]
         entries.append(row)
-    # 命中的排前面, 阴在前; 未命中(雷达)按名称
+    # 可出手票在前；各组内部按 F1~F10 主点顺序和名称排序。
+    point_order = {point: index for index, point in enumerate(contracts.POINTS)}
     entries.sort(key=lambda r: (0 if r.get("actionable") else 1,
-                                0 if r.get("point") == "G1" else 1,
+                                point_order.get(str(r.get("point")), len(point_order)),
                                 str(r.get("name") or "")))
     counts = {"pool": len(pool),
               "actionable": sum(1 for e in pool if e.get("actionable")),
               "signals": len(signals)}
-    for p in ("G1", "S1"):
-        counts[f"act_{p}"] = sum(1 for e in pool if e.get("point") == p)
+    for point in contracts.POINTS:
+        counts[f"act_{point}"] = sum(
+            1 for e in pool
+            if point in str(e.get("rule_ids") or e.get("point") or "").split("+")
+        )
     return {
         "status": "ok",
         "trade_date": target.isoformat(),
@@ -109,7 +116,7 @@ def get_live(trade_date: date | None = None) -> dict[str, object]:
 
 
 def get_live_dates() -> list[str]:
-    return repository.list_pool_dates()
+    return repository.list_pool_dates(rules_version=contracts.J12_RULES_VERSION)
 
 
 # ── 回测 ──

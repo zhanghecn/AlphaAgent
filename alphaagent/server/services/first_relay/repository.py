@@ -29,6 +29,7 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]],
                 name=str(e.get("name") or ""),
                 point=str(e.get("point") or "—"),
                 level=str(e.get("level") or "—"),
+                rule_ids=e.get("rule_ids"),
                 actionable=bool(e.get("actionable")),
                 avoid_static=e.get("avoid_static"),
                 auction_gate=e.get("auction_gate"),
@@ -36,6 +37,7 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]],
                 bonus=e.get("bonus"),
                 prev_close=e.get("prev_close"),
                 limit_price=e.get("limit_price"),
+                trigger_price=e.get("trigger_price"),
                 foundation_yang=e.get("foundation_yang"),
                 foundation_chg=e.get("foundation_chg"),
                 dist_ma20=e.get("dist_ma20"),
@@ -54,33 +56,43 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]],
     return len(entries)
 
 
-def load_pool(trade_date: date) -> list[dict[str, object]]:
+def load_pool(
+    trade_date: date,
+    rules_version: str | None = None,
+) -> list[dict[str, object]]:
     schema.ensure_schema_once(get_engine())
+    statement = select(schema.j12_pool_entries).where(
+        schema.j12_pool_entries.c.trade_date == trade_date)
+    if rules_version is not None:
+        statement = statement.where(schema.j12_pool_entries.c.rules_version == rules_version)
+    statement = statement.order_by(schema.j12_pool_entries.c.vt_symbol)
     with session_scope() as session:
-        rows = session.execute(
-            select(schema.j12_pool_entries)
-            .where(schema.j12_pool_entries.c.trade_date == trade_date)
-            .order_by(schema.j12_pool_entries.c.vt_symbol)
-        ).mappings().all()
+        rows = session.execute(statement).mappings().all()
     return [dict(r) for r in rows]
 
 
-def latest_pool_date() -> date | None:
+def latest_pool_date(rules_version: str | None = None) -> date | None:
     schema.ensure_schema_once(get_engine())
+    statement = select(func.max(schema.j12_pool_entries.c.trade_date))
+    if rules_version is not None:
+        statement = statement.where(schema.j12_pool_entries.c.rules_version == rules_version)
     with session_scope() as session:
-        value = session.execute(
-            select(func.max(schema.j12_pool_entries.c.trade_date))).scalar_one_or_none()
+        value = session.execute(statement).scalar_one_or_none()
     return value if isinstance(value, date) else None
 
 
-def list_pool_dates(limit: int = 250) -> list[str]:
+def list_pool_dates(
+    limit: int = 250,
+    rules_version: str | None = None,
+) -> list[str]:
     schema.ensure_schema_once(get_engine())
+    statement = select(schema.j12_pool_entries.c.trade_date)
+    if rules_version is not None:
+        statement = statement.where(schema.j12_pool_entries.c.rules_version == rules_version)
+    statement = statement.group_by(schema.j12_pool_entries.c.trade_date).order_by(
+        desc(schema.j12_pool_entries.c.trade_date)).limit(limit)
     with session_scope() as session:
-        rows = session.execute(
-            select(schema.j12_pool_entries.c.trade_date)
-            .group_by(schema.j12_pool_entries.c.trade_date)
-            .order_by(desc(schema.j12_pool_entries.c.trade_date))
-            .limit(limit)).all()
+        rows = session.execute(statement).all()
     return [r[0].isoformat() for r in rows]
 
 
@@ -96,12 +108,17 @@ def upsert_signal(trade_date: date, vt_symbol: str, **fields: object) -> None:
         session.execute(stmt)
 
 
-def load_signal_map(trade_date: date) -> dict[str, dict[str, object]]:
+def load_signal_map(
+    trade_date: date,
+    rules_version: str | None = None,
+) -> dict[str, dict[str, object]]:
     schema.ensure_schema_once(get_engine())
+    statement = select(schema.j12_signals).where(
+        schema.j12_signals.c.trade_date == trade_date)
+    if rules_version is not None:
+        statement = statement.where(schema.j12_signals.c.rules_version == rules_version)
     with session_scope() as session:
-        rows = session.execute(
-            select(schema.j12_signals)
-            .where(schema.j12_signals.c.trade_date == trade_date)).mappings().all()
+        rows = session.execute(statement).mappings().all()
     return {str(r["vt_symbol"]): dict(r) for r in rows}
 
 

@@ -15,7 +15,7 @@ router = APIRouter(prefix="/first-relay", tags=["first-relay"])
 
 @router.get("/live", response_model=None)
 def live(trade_date: date | None = Query(default=None, alias="date")):
-    """实时推荐:今日首板池 × G1/S1 触发状态(?date= 回看历史)。"""
+    """实时推荐:今日首板池 × F1~F10 触发状态(?date= 回看历史)。"""
     try:
         return ok(service.get_live(trade_date))
     except Exception as exc:  # noqa: BLE001
@@ -70,7 +70,7 @@ def backtest_rebuild():
 
 @router.get("/rules", response_model=None)
 def rules():
-    """规则契约:口诀/分支定义/毒格/信息层文案。"""
+    """规则契约:十条综合规则、执行口径与研究限制。"""
     return ok(service.get_rules())
 
 
