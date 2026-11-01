@@ -436,11 +436,8 @@ export function QuizRunner({
           />
           <InfoCell label="首板前20日" value={fmtSigned(d.pre20_pct)} fail={failSet.has("首板前20日")} />
           <InfoCell label="首板前10日" value={fmtSigned(d.pre10_pct)} fail={failSet.has("首板前10日")} />
-          {d.chain_lower_sum != null ? (
-            <InfoCell label="下影合计" value={`${d.chain_lower_sum.toFixed(2)}%`} fail={failSet.has("下影合计")} />
-          ) : null}
-          {d.pre20_max_drawdown != null ? (
-            <InfoCell label="前20日回撤" value={`${d.pre20_max_drawdown.toFixed(2)}%`} fail={failSet.has("前20日回撤")} />
+          {d.b1_f_turn_ratio != null ? (
+            <InfoCell label="一板/地基换手" value={d.b1_f_turn_ratio.toFixed(2)} fail={failSet.has("一板/地基换手")} />
           ) : null}
           {d.dist_ma10 != null ? (
             // v7.19 A2 站线腿判定格:地基收盘距十日线(≥0=站上十日线)

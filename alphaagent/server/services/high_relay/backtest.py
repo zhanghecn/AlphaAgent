@@ -292,8 +292,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             foundation_pose=rec.get("foundation_pose"),
             dist_ma10=rec.get("dist_ma10"),
             anchor_pos=rec.get("anchor_pos"), anchor_dist=rec.get("anchor_dist"),
-            chain_lower_sum=rec.get("chain_lower_sum"),
-            pre20_max_drawdown=rec.get("pre20_max_drawdown"))
+            b1_f_turn_ratio=rec.get("b1_f_turn_ratio"))
         point = str(scheme["no"]) if scheme else "—"
         point_sub = str(scheme.get("sub") or "") if scheme else ""
         weak = pool_mod.tag_weak(
@@ -450,8 +449,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "锚位%": rec.get("anchor_pos"),      # 地基收盘距前20日最近涨停高点(v6.8 C2腿)
             "锚距": rec.get("anchor_dist"),
             "换手梯度": rec["turn_grad"],
-            "下影合计%": rec.get("chain_lower_sum"),
-            "前20日最大回撤%": rec.get("pre20_max_drawdown"),
+            "一板/地基换手": rec.get("b1_f_turn_ratio"),
             "昨日涨停家数": int(cols["mkt_prev"][i]) if cols["mkt_prev"][i] == cols["mkt_prev"][i] else None,
         })
     E = pd.DataFrame(rows)
