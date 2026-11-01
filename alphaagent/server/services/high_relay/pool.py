@@ -326,12 +326,9 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
             if ((alo <= anchor_pos < ahi and anchor_dist is not None and anchor_dist <= adist)
                     or anchor_pos >= aover):
                 continue  # 贴断板锚不涨=没能量 / 超前期涨停锚≥5%=妖顶透支(v6.8 C2)
-        bcl = s.get("block_chain_lower")
-        if bcl is not None and chain_lower_sum is not None and bcl[0] <= chain_lower_sum < bcl[1]:
-            continue  # 平开链条的连续深分歧回避(v7.21 A1·平开等温开)
         bdd = s.get("block_pre20_drawdown")
         if bdd is not None and pre20_max_drawdown is not None and bdd[0] <= pre20_max_drawdown < bdd[1]:
-            continue  # 启动前回撤承接不足回避(v7.21 C2)
+            continue  # 中等回撤承接不足回避(v7.22 C2)
         if auction_pct is None:
             return s
         lo, hi = s["today"]
@@ -517,12 +514,9 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
             if ((alo <= anchor_pos < ahi and anchor_dist is not None and anchor_dist <= adist)
                     or anchor_pos >= aover):
                 continue  # 锚点腿(v6.8 C2;镜像 tag_point)
-        bcl = s.get("block_chain_lower")
-        if bcl is not None and chain_lower_sum is not None and bcl[0] <= chain_lower_sum < bcl[1]:
-            continue  # 下影分歧腿(v7.21 A1·平开等温开;镜像 tag_point)
         bdd = s.get("block_pre20_drawdown")
         if bdd is not None and pre20_max_drawdown is not None and bdd[0] <= pre20_max_drawdown < bdd[1]:
-            continue  # 前20日回撤腿(v7.21 C2;镜像 tag_point)
+            continue  # 前20日回撤腿(v7.22 C2;镜像 tag_point)
         out.append(s)
     return out
 

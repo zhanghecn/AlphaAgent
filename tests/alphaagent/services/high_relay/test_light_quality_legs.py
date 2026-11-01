@@ -1,4 +1,4 @@
-"""hpr-v7.21 轻量质量腿：分支边界、字段同源与镜像一致性。"""
+"""hpr-v7.22 轻量质量字段：判定已撤回，字段保留、不再过滤。"""
 
 from __future__ import annotations
 
@@ -28,12 +28,11 @@ def _c2(**overrides):
     return pool.tag_scheme("三接四阳", **kwargs)
 
 
-def test_a1_warm_branch_rejects_only_lower_shadow_band():
-    assert _a1_warm(chain_lower_sum=4.75) is None
-    assert _a1_warm(chain_lower_sum=5.336146) is None
-    assert _a1_warm(chain_lower_sum=5.5)["sub"] == "平开等温开"
-    assert _a1_warm(chain_lower_sum=4.749)["sub"] == "平开等温开"
-    assert _a1_warm(chain_lower_sum=None)["sub"] == "平开等温开"
+def test_a1_warm_branch_ignores_withdrawn_lower_shadow_band():
+    # v7.22: 下影合计字段保留，但不再参与 A1·平开等温开判定。
+    for value in (4.75, 5.336146, 5.5, 4.749, None):
+        hit = _a1_warm(chain_lower_sum=value)
+        assert hit is not None and hit["sub"] == "平开等温开"
 
 
 def test_a1_low_open_branch_is_not_constrained_by_warm_branch_leg():
@@ -61,16 +60,18 @@ def test_c3_is_not_constrained_by_c2_drawdown_leg():
     assert hit["no"] == "C3"
 
 
-def test_match_schemes_and_entry_candidates_apply_same_legs():
-    assert pool.match_schemes("二接三阳", 1.0, 0.0, None, b2_turn=5.0,
-                              chain_lower_sum=5.2) == []
-    assert pool.match_schemes("三接四阳", 0.0, 0.0, 0.0, b3_turn=15.0,
-                              pre20_max_drawdown=-6.0) == []
+def test_match_schemes_and_entry_candidates_apply_only_c2_leg():
+    assert pool.match_schemes(
+        "二接三阳", 1.0, 0.0, None, b2_turn=5.0, chain_lower_sum=5.2,
+    )
+    assert not pool.match_schemes(
+        "三接四阳", 0.0, 0.0, 0.0, b3_turn=15.0, pre20_max_drawdown=-6.0,
+    )
     entry = {
         "group4": "二接三阳", "b1_open": 1.0, "b2_open": 0.0, "b3_open": None,
         "b2_turn": 5.0, "chain_lower_sum": 5.2,
     }
-    assert pool.entry_candidates(entry) == []
+    assert pool.entry_candidates(entry)
 
 
 def _stock_bars() -> pd.DataFrame:
@@ -118,20 +119,29 @@ def test_static_fields_computes_new_features_from_past_bars_only():
     assert pool.static_fields(pool.make_ctx(changed), i_last, 2) == rec
 
 
-def test_quiz_nearest_line_explains_new_legs():
-    _, near_hit, fail_fields, _ = quiz._nearest_scheme_line(
-        "二接三阳", 1.0, 0.0, None, 5.0, None, 4.0, chain_lower_sum=5.2)
-    assert near_hit is True
-    assert "下影合计" in fail_fields
+def test_quiz_explains_only_c2_drawdown_leg():
+    reasons, _, fail_fields, _ = quiz.explain_miss(
+        n_board=2, yang=True, group4="二接三阳",
+        b1_open=1.0, b2_open=0.0, b3_open=None,
+        b2_turn=15.0, b3_turn=None, buy_open=4.0,
+        pre20_pct=5.0, foundation_chg=0.0, chain_lower_sum=5.2,
+    )
+    assert "下影合计" not in fail_fields
+    assert not any("下影合计" in line for line in reasons)
 
-    _, near_hit, fail_fields, _ = quiz._nearest_scheme_line(
-        "三接四阳", 0.0, 0.0, 0.0, None, 15.0, 6.0, pre20_max_drawdown=-6.0)
-    assert near_hit is True
+    reasons, _, fail_fields, _ = quiz.explain_miss(
+        n_board=3, yang=True, group4="三接四阳",
+        b1_open=0.0, b2_open=0.0, b3_open=0.0,
+        b2_turn=10.0, b3_turn=15.0, buy_open=6.0,
+        pre20_pct=5.0, pre10_pct=5.0, foundation_chg=0.0,
+        pre20_max_drawdown=-6.0,
+    )
     assert "前20日回撤" in fail_fields
+    assert any("前20日回撤" in line for line in reasons)
 
 
 def test_light_quality_version_and_schema_columns():
-    assert contracts.HPR_RULES_VERSION == "hpr-v7.21"
-    assert quiz.QUIZ_CONTENT_VERSION == 54
+    assert contracts.HPR_RULES_VERSION == "hpr-v7.22"
+    assert quiz.QUIZ_CONTENT_VERSION == 55
     assert "chain_lower_sum" in schema.hpr_pool_entries.c
     assert "pre20_max_drawdown" in schema.hpr_pool_entries.c

@@ -138,7 +138,7 @@ def baseline_report(events: pd.DataFrame, include_final: bool) -> list[dict[str,
 
 
 AUXILIARY_LEGS = {
-    "A1": ("vol2",), "A1·平开等温开": ("block_chain_lower",),
+    "A1": ("vol2",),
     "A2": ("vol2_when_b1_low", "block_pre10", "dist_ma10_min"),
     "B1·转温": ("vol2",),
     "B2·双低": ("foundation_pose_ok",), "B2·承接": ("foundation_pose_ok",),
@@ -317,8 +317,8 @@ def open_entry_report(events: pd.DataFrame) -> dict[str, object]:
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "baseline"
-    if contracts.HPR_RULES_VERSION != "hpr-v7.21":
-        raise SystemExit(f"研究基线仅适用于 hpr-v7.21，当前为 {contracts.HPR_RULES_VERSION}，请重建事件数据")
+    if contracts.HPR_RULES_VERSION != "hpr-v7.22":
+        raise SystemExit(f"研究基线仅适用于 hpr-v7.22，当前为 {contracts.HPR_RULES_VERSION}，请重建事件数据")
     data_path = Path("/tmp/hpr_hidden_range_events.csv")
     all_day_path = Path("/tmp/hpr_all_day_events.csv")
     if command == "build":
