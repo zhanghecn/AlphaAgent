@@ -20,7 +20,7 @@ import pandas as pd
 
 from alphaagent.server.services.high_relay import contracts, pool as pool_mod
 
-QUIZ_CONTENT_VERSION = 53  # v53:B1·转温分支级通用组(hpr-v7.20)——weak月转温命中题从miss翻该买(南方精工/征和工业/江苏索普/海联金汇/第一医药/岩山科技),续强题仍不买;题库与回测统一contracts.dyn_take_point,strong_sub随事件下发,hit_scheme在转温通用月也重算;# v52:讲解最近邻行并列 tie-break(主人2026-10-23做题撞欢瑞世纪2026-09-03「错的不明不白」——讲解文引C3「今开6~9.5」,对照表格却发C2行「今天开5~9」,今开+5.2在表内、口诀文又说<6不能打自相矛盾;根因=C2/C3各差一腿并列按SCHEMES顺序C2先到先得)——_nearest_scheme_line打分改元组(-差腿数, 链非None腿数),并列时链约束更具体者赢,一字链题对照行C2→C3(二板一字行:换手3~5/今开6~9.5/6笔胜100%),红列与题面红格(今开)对齐;纯展示层判定/锚点/题库零漂移,实体链C2题不回归(单测2例);# v51:B2速查表拆行数字纠偏(9/3→6/6,与RULES正文/题库12笔逐笔一致:双低6笔83%+10.0/承接6笔67%+8.6——讲解卡scheme_row随行更新)+口径对齐批随物化;判定/锚点/题库标签零漂移纯呈现;# v50:K4换手讲解拆两把尺(12~20与三换<二换)并归回速查表三板列——主人做题撞天音控股「没有看到任何不对」:旧文案只写14.3≥4.2=放量没承接,没说14.3已经过了第一把尺、卡在第二把尺;判定/锚点/题库标签零漂移纯呈现;# v49:v7.19 A2两腿校准——透支阈值10→20(pre10∈[10,20)∩站线的命中题从miss翻该买:正和生态+6.2/中超控股+5.8/新里程+1.4等2024+段;讲解「≥10%」→「≥20%」数字随动)+地基站线腿新增(dist_ma10<0的A2形态题新讲解:「启动前一天收盘在十日均线下方——地基还在阴跌里,这种一字更像诱多」;fail标签「距MA10」;石基/赛象/天威/黄山等破线题改miss);金安国纪(pre10=25.7)仍不买;# v48:v7.18文案尾巴(旧版本残留清理)——miss讲解两处B1旧窗同步:二板8.5~9.5剧强段提示「今开6~9.5」→「今开6~9」+B1续强口诀引用「今天开6~9.5」→「6~9」(判定/标签零漂移纯文案,与速查表对齐防做题撞冲突);# v47:today窗校准(hpr-v7.18,主人2026-10-14拍板)——C2/K2/B1上界9.5→9(9~9.5段命中题改标miss:中马传动/航天晨光/盈新发展/海南海药/云煤能源C2五题+声迅/飞马/多氟多B1三题+清源K2一题=2023+段9题翻miss,2020-22段7题同翻)+B3下界3→1(开盘1~3命中题从miss翻该买:保变电气+8.0/东百集团+19.8/华电辽能+56.1/超声电子+0.9四题+粤传媒-4.3亏损票也该买=纪律照做);K5及九条口诀零漂移;# v46:K5常驻(hpr-v7.17,主人2026-10-13拍板)——strong月K5命中题从miss翻该买(睿能科技24-02+31.8/圣阳股份26-04+43.7/传智教育26-07+36.7/江钨装备/中马传动/华远控股/正虹科技/申华控股/华映科技该买,东方中科-10/李子园-16也该买=常驻纪律照做);strong月也算tag_weak(K5题自检/讲解需要)+判定格(前波60日)对K5题下发;weak/both月题零变化;# v45:动态组判据v7.15(剔3/9月/门槛3)随rebuild题标签变——2023-06~08从weak月变strong月(中马传动A1/迪生力B1/国创高新A1/我乐家居B1等该买=强市组,国芳K2/塞力K2/百洋K9改miss),2020-03~07从both暖机变weak月(暖机题下线范围自动缩到2020-01~02,题数回补);双开miss话术去「近12月」字样(窗已9月);# v44:K4 miss讲解「一字缩量链」改「缩量没放量」(主人2026-10-09做题撞跃岭题——一板开+1.0的实体缩量板被讲解叫「一字」,与题面板型链直接打架;「要放量实体板」同句混淆,实体已满足差的只是放量;一字票同句覆盖:锁死=极致缩量;判定零漂移纯文案);# v43:题面判定数字统一两位小数(hpr-v7.11精度纠偏,20.5→20.48显示=判定同源,边界争议消除);# v42:K2限阴+K4限阳(hpr-v7.10阴阳分流:K2地基要阴/K4地基要阳,三换12~15重叠段阴阳各走各路;金种子酒类冲突题——地基大阳K三换14.9原误按K2窗判,现直接归K4买入——结构性消除;K2阳地基题/K4阴地基题改标miss,弱市组50→40笔78%+13.20);# v41:K4速查表拆两行+讲解按(no,sub)匹配(hpr-v7.9);# v40:综合卷排除暖机双开月八条「该买」题18道(2020-01~07实测38%/-3.88,历史数据不足的代价,练它没价值);双开提示改主人人话「暖机期·历史数据不足」+实测胜率;v7.8c 再拍板「暖机期题不用出题了」——暖机月(2020-01~07)全部题下线:综合卷/月度题/overview月份格三处同步过滤,选题处整月不显示;# v39:动态组判定改上月末口径(hpr-v7.8,2020-07/2023-08两个月题标签变);# v38:K7退役(hpr-v7.7,弱市组五条,K7命中题改标miss);# v37:K2更名C2四板换手·弱市版(hpr-v7.6呈现归族,判定/锚点/标签零漂移,讲解文案随速查表行更新);# v36:逐月动态组切换(主人2026-10-06拍板「按照当前题所属月自动切换口诀集」,起因=主人审计「做2025年的题拿的是2024年还是未来函数2025年本身」——查实题库原用年切(2023-01硬编码分界)与动态组月滚切换史(2023-07才weak→strong)有7个月错位:2023-01~06题库标强市题但当时真实启用弱市组(八条命中10笔被标该买,按当时纪律不该出手);2020-01~06暖机双开段仅八条命中10笔(厦门信达C3/日出东方B1等)被标不该买,双开纪律下是该买——合计18题标签与「当时真实启用组」不一致;v36改法=_dyn_month_states逐月复现动态组(判据与service._dyn_group_state同源:该月末为止近DYN_GROUP_WINDOW个交易月两组各自命中笔E3均值高者启用,样本不足8笔/均非正=双开;每月只用当月及之前数据,无未来函数;实测2020-01~06 both/2020-07~2023-06 weak/2023-08起strong,2023-07无出手月继承weak),题目该买=当月启用组命中(weak月=K系·八条命中只是雷达;strong月=八条;both月=两组任一,双命中取强市编号),miss讲解按月状态选组(weak/both月=弱市最近邻,both月reasons注明双开;strong月=强市最近邻),弱市判定格(一板换手/前波60/距新高)下发条件从「2023前」改为「当月弱市组启用」(weak/both月),payload新增dyn_state字段(题所属月组状态)供前端chip/徽章渲染,repository overview按年聚合dyn_states(2023年=切组年,前端年份chip蓝紫渐变标注);无未来函数:判某月状态只用该月及之前11个交易月;# v35:题库扩弱市组(主人2026-10-06拍板动态组全链路联动):事件回放起点2023-01→2020-01(弱市组K系定型样本入题库),2020-22段题目该买=K系命中(tag_weak判定;弱市时代强市八条不启用——命中也只是雷达,与动态组纪律一致),2023+段照旧强市组;命中讲解=弱市速查表行(WEAK_CHEAT_ROWS)+K系子项全名;miss讲解=弱市版两阶段最近邻(_nearest_weak_line:链全符差腿→形态接近/链形不沾边),阴阳反串题=tag_weak对面组完整命中(K5/K7/K9只打阴·K3只打阳);题面新增弱市组判定格:一板换手(K4/K7腿)/前波60日(K5命根)/距60日新高(K3贴顶),题面可判原则;综合挑战卷好票池自动含K系六条(by_point 泛化);弱市miss对照行=同期全池1934笔35%/-1.34;# v34:miss题讲解配「错误口诀」表格+红列(主人2026-10-05「错误的口诀也应该给出表格,把错误的某一列标记红色提示哪里没有匹配上」):explain_miss 四元组加 scheme_row(毒段/形态接近题=最接近口诀的速查表行,链形不沾边=None),下发 row_fails 列键(题面格子标签映射:换手归板位列/地基日各腿归地基日列/半山腰无列丢弃);阴阳反串题表格=对面口诀行,红列只标「组」(对面全符唯一错阴阳,原组腿标签不进对面行防误导);hit 题对称下发 row_fails=[];# v33:hpr-v6.11 C2一拆二——四板便捷退役:实体板归C2四板换手/一字锁仓归C3一字换手(主人「这明显不是一个口诀,口诀分界线没弄明白」),判定集合零漂移纯编号手术,题库重打标C2 66→56+C3 10;讲解口诀名同步(【C2·四板换手】【C3·一字换手】);# v32:C2口诀直白化+判分红格(主人2026-10-05「读不懂/前后矛盾/哪里不符合标红」):C2两条腿弃研究黑话(先手小阳/锚点)改直白句式,「首板前日」统一叫「地基日」与题面格子同名;速查表「附加」列改「地基日」列(腿全部进主列正常字号);miss讲解加fail_fields(题面格子标签,前端判分后红格标出不符合的腿);题面地基日涨幅数字单源(display.foundation_chg下发,修前端拿K线c/o重算与判定字段两口径+1.7/+1.8裂开);判定零漂移;# v31:命中讲解卡与规则页速查表统一(主人2026-10-05「答题这里没有统一」):scheme_name 改子项全名(A1 双平贴零·低开等强开式,tag_scheme 定位分支),讲解改表格行(scheme_row=速查表命中行:地基/一板/二板/三板/今天开/附加/成绩),删话术字段(scheme_desc/psycho/hold_note/case_note/half_mountain/today_window——「不需要其他多余的话术」);判定零漂移(tag_scheme=tag_point 原逻辑拆壳);# v30:hpr-v6.10——弱票地基腿换K线姿态尺(站线上/骑线=接,贴线/掉线下=不接),题面「地基距20日线」数值格改「地基姿态」标签,B2 7→11笔/B3 5→7笔(信隆+51/东百+31.8回归,神雾-25.9/新乡-18.3挡外);# v29:A1口诀文案人话化(主人反馈「低开→6~9.5/平开→3~6」箭头式读不懂,改「一板低开(<0)的,等今天强开6~9.5」句式,判定零漂移仅文案);# v28:hpr-v6.9——A1交叉反转双分支(一板低开<0等强开6~9.5/一板平开0~3等温开3~6,题库重打标:长白山归miss/津药·滨海·国创等10笔入A1);# v27:hpr-v6.8——C2锚点腿(前期涨停高点贴着没过/超5%不碰)+A3退役(题库重打标,利君/京能/万安归miss)+题面补「距前涨停高」格;# v26:题面补「地基距20日线」格(v6.6弱票腿判定字段上题面,做题可判,主人2026-10-04做题撞出)+修讲解「不能打,不能打」重复;# v25:跌停口径修正(hpr-v6.7):仅一字死封顺延,其余按跌停价卖出;# v24:弱票三口诀加地基腿(hpr-v6.6):A3/B2/B3地基距MA20<5%不命中;# v23:退出价口径升级(hpr-v6.5):E3改纯收盘价+跌停顺延,去v4.3中间价美化(尾盘只有收盘价);收益列随v6.5重算
+QUIZ_CONTENT_VERSION = 54  # v54:hpr-v7.21轻量质量腿——A1·平开等温开下影合计4.75~5.5回避、C2地基前20日最大回撤-7.5~-5回避;题面补下影合计与前20日回撤,最近邻讲解同步;# v53:B1·转温分支级通用组(hpr-v7.20)——weak月转温命中题从miss翻该买(南方精工/征和工业/江苏索普/海联金汇/第一医药/岩山科技),续强题仍不买;题库与回测统一contracts.dyn_take_point,strong_sub随事件下发,hit_scheme在转温通用月也重算;# v52:讲解最近邻行并列 tie-break(主人2026-10-23做题撞欢瑞世纪2026-09-03「错的不明不白」——讲解文引C3「今开6~9.5」,对照表格却发C2行「今天开5~9」,今开+5.2在表内、口诀文又说<6不能打自相矛盾;根因=C2/C3各差一腿并列按SCHEMES顺序C2先到先得)——_nearest_scheme_line打分改元组(-差腿数, 链非None腿数),并列时链约束更具体者赢,一字链题对照行C2→C3(二板一字行:换手3~5/今开6~9.5/6笔胜100%),红列与题面红格(今开)对齐;纯展示层判定/锚点/题库零漂移,实体链C2题不回归(单测2例);# v51:B2速查表拆行数字纠偏(9/3→6/6,与RULES正文/题库12笔逐笔一致:双低6笔83%+10.0/承接6笔67%+8.6——讲解卡scheme_row随行更新)+口径对齐批随物化;判定/锚点/题库标签零漂移纯呈现;# v50:K4换手讲解拆两把尺(12~20与三换<二换)并归回速查表三板列——主人做题撞天音控股「没有看到任何不对」:旧文案只写14.3≥4.2=放量没承接,没说14.3已经过了第一把尺、卡在第二把尺;判定/锚点/题库标签零漂移纯呈现;# v49:v7.19 A2两腿校准——透支阈值10→20(pre10∈[10,20)∩站线的命中题从miss翻该买:正和生态+6.2/中超控股+5.8/新里程+1.4等2024+段;讲解「≥10%」→「≥20%」数字随动)+地基站线腿新增(dist_ma10<0的A2形态题新讲解:「启动前一天收盘在十日均线下方——地基还在阴跌里,这种一字更像诱多」;fail标签「距MA10」;石基/赛象/天威/黄山等破线题改miss);金安国纪(pre10=25.7)仍不买;# v48:v7.18文案尾巴(旧版本残留清理)——miss讲解两处B1旧窗同步:二板8.5~9.5剧强段提示「今开6~9.5」→「今开6~9」+B1续强口诀引用「今天开6~9.5」→「6~9」(判定/标签零漂移纯文案,与速查表对齐防做题撞冲突);# v47:today窗校准(hpr-v7.18,主人2026-10-14拍板)——C2/K2/B1上界9.5→9(9~9.5段命中题改标miss:中马传动/航天晨光/盈新发展/海南海药/云煤能源C2五题+声迅/飞马/多氟多B1三题+清源K2一题=2023+段9题翻miss,2020-22段7题同翻)+B3下界3→1(开盘1~3命中题从miss翻该买:保变电气+8.0/东百集团+19.8/华电辽能+56.1/超声电子+0.9四题+粤传媒-4.3亏损票也该买=纪律照做);K5及九条口诀零漂移;# v46:K5常驻(hpr-v7.17,主人2026-10-13拍板)——strong月K5命中题从miss翻该买(睿能科技24-02+31.8/圣阳股份26-04+43.7/传智教育26-07+36.7/江钨装备/中马传动/华远控股/正虹科技/申华控股/华映科技该买,东方中科-10/李子园-16也该买=常驻纪律照做);strong月也算tag_weak(K5题自检/讲解需要)+判定格(前波60日)对K5题下发;weak/both月题零变化;# v45:动态组判据v7.15(剔3/9月/门槛3)随rebuild题标签变——2023-06~08从weak月变strong月(中马传动A1/迪生力B1/国创高新A1/我乐家居B1等该买=强市组,国芳K2/塞力K2/百洋K9改miss),2020-03~07从both暖机变weak月(暖机题下线范围自动缩到2020-01~02,题数回补);双开miss话术去「近12月」字样(窗已9月);# v44:K4 miss讲解「一字缩量链」改「缩量没放量」(主人2026-10-09做题撞跃岭题——一板开+1.0的实体缩量板被讲解叫「一字」,与题面板型链直接打架;「要放量实体板」同句混淆,实体已满足差的只是放量;一字票同句覆盖:锁死=极致缩量;判定零漂移纯文案);# v43:题面判定数字统一两位小数(hpr-v7.11精度纠偏,20.5→20.48显示=判定同源,边界争议消除);# v42:K2限阴+K4限阳(hpr-v7.10阴阳分流:K2地基要阴/K4地基要阳,三换12~15重叠段阴阳各走各路;金种子酒类冲突题——地基大阳K三换14.9原误按K2窗判,现直接归K4买入——结构性消除;K2阳地基题/K4阴地基题改标miss,弱市组50→40笔78%+13.20);# v41:K4速查表拆两行+讲解按(no,sub)匹配(hpr-v7.9);# v40:综合卷排除暖机双开月八条「该买」题18道(2020-01~07实测38%/-3.88,历史数据不足的代价,练它没价值);双开提示改主人人话「暖机期·历史数据不足」+实测胜率;v7.8c 再拍板「暖机期题不用出题了」——暖机月(2020-01~07)全部题下线:综合卷/月度题/overview月份格三处同步过滤,选题处整月不显示;# v39:动态组判定改上月末口径(hpr-v7.8,2020-07/2023-08两个月题标签变);# v38:K7退役(hpr-v7.7,弱市组五条,K7命中题改标miss);# v37:K2更名C2四板换手·弱市版(hpr-v7.6呈现归族,判定/锚点/标签零漂移,讲解文案随速查表行更新);# v36:逐月动态组切换(主人2026-10-06拍板「按照当前题所属月自动切换口诀集」,起因=主人审计「做2025年的题拿的是2024年还是未来函数2025年本身」——查实题库原用年切(2023-01硬编码分界)与动态组月滚切换史(2023-07才weak→strong)有7个月错位:2023-01~06题库标强市题但当时真实启用弱市组(八条命中10笔被标该买,按当时纪律不该出手);2020-01~06暖机双开段仅八条命中10笔(厦门信达C3/日出东方B1等)被标不该买,双开纪律下是该买——合计18题标签与「当时真实启用组」不一致;v36改法=_dyn_month_states逐月复现动态组(判据与service._dyn_group_state同源:该月末为止近DYN_GROUP_WINDOW个交易月两组各自命中笔E3均值高者启用,样本不足8笔/均非正=双开;每月只用当月及之前数据,无未来函数;实测2020-01~06 both/2020-07~2023-06 weak/2023-08起strong,2023-07无出手月继承weak),题目该买=当月启用组命中(weak月=K系·八条命中只是雷达;strong月=八条;both月=两组任一,双命中取强市编号),miss讲解按月状态选组(weak/both月=弱市最近邻,both月reasons注明双开;strong月=强市最近邻),弱市判定格(一板换手/前波60/距新高)下发条件从「2023前」改为「当月弱市组启用」(weak/both月),payload新增dyn_state字段(题所属月组状态)供前端chip/徽章渲染,repository overview按年聚合dyn_states(2023年=切组年,前端年份chip蓝紫渐变标注);无未来函数:判某月状态只用该月及之前11个交易月;# v35:题库扩弱市组(主人2026-10-06拍板动态组全链路联动):事件回放起点2023-01→2020-01(弱市组K系定型样本入题库),2020-22段题目该买=K系命中(tag_weak判定;弱市时代强市八条不启用——命中也只是雷达,与动态组纪律一致),2023+段照旧强市组;命中讲解=弱市速查表行(WEAK_CHEAT_ROWS)+K系子项全名;miss讲解=弱市版两阶段最近邻(_nearest_weak_line:链全符差腿→形态接近/链形不沾边),阴阳反串题=tag_weak对面组完整命中(K5/K7/K9只打阴·K3只打阳);题面新增弱市组判定格:一板换手(K4/K7腿)/前波60日(K5命根)/距60日新高(K3贴顶),题面可判原则;综合挑战卷好票池自动含K系六条(by_point 泛化);弱市miss对照行=同期全池1934笔35%/-1.34;# v34:miss题讲解配「错误口诀」表格+红列(主人2026-10-05「错误的口诀也应该给出表格,把错误的某一列标记红色提示哪里没有匹配上」):explain_miss 四元组加 scheme_row(毒段/形态接近题=最接近口诀的速查表行,链形不沾边=None),下发 row_fails 列键(题面格子标签映射:换手归板位列/地基日各腿归地基日列/半山腰无列丢弃);阴阳反串题表格=对面口诀行,红列只标「组」(对面全符唯一错阴阳,原组腿标签不进对面行防误导);hit 题对称下发 row_fails=[];# v33:hpr-v6.11 C2一拆二——四板便捷退役:实体板归C2四板换手/一字锁仓归C3一字换手(主人「这明显不是一个口诀,口诀分界线没弄明白」),判定集合零漂移纯编号手术,题库重打标C2 66→56+C3 10;讲解口诀名同步(【C2·四板换手】【C3·一字换手】);# v32:C2口诀直白化+判分红格(主人2026-10-05「读不懂/前后矛盾/哪里不符合标红」):C2两条腿弃研究黑话(先手小阳/锚点)改直白句式,「首板前日」统一叫「地基日」与题面格子同名;速查表「附加」列改「地基日」列(腿全部进主列正常字号);miss讲解加fail_fields(题面格子标签,前端判分后红格标出不符合的腿);题面地基日涨幅数字单源(display.foundation_chg下发,修前端拿K线c/o重算与判定字段两口径+1.7/+1.8裂开);判定零漂移;# v31:命中讲解卡与规则页速查表统一(主人2026-10-05「答题这里没有统一」):scheme_name 改子项全名(A1 双平贴零·低开等强开式,tag_scheme 定位分支),讲解改表格行(scheme_row=速查表命中行:地基/一板/二板/三板/今天开/附加/成绩),删话术字段(scheme_desc/psycho/hold_note/case_note/half_mountain/today_window——「不需要其他多余的话术」);判定零漂移(tag_scheme=tag_point 原逻辑拆壳);# v30:hpr-v6.10——弱票地基腿换K线姿态尺(站线上/骑线=接,贴线/掉线下=不接),题面「地基距20日线」数值格改「地基姿态」标签,B2 7→11笔/B3 5→7笔(信隆+51/东百+31.8回归,神雾-25.9/新乡-18.3挡外);# v29:A1口诀文案人话化(主人反馈「低开→6~9.5/平开→3~6」箭头式读不懂,改「一板低开(<0)的,等今天强开6~9.5」句式,判定零漂移仅文案);# v28:hpr-v6.9——A1交叉反转双分支(一板低开<0等强开6~9.5/一板平开0~3等温开3~6,题库重打标:长白山归miss/津药·滨海·国创等10笔入A1);# v27:hpr-v6.8——C2锚点腿(前期涨停高点贴着没过/超5%不碰)+A3退役(题库重打标,利君/京能/万安归miss)+题面补「距前涨停高」格;# v26:题面补「地基距20日线」格(v6.6弱票腿判定字段上题面,做题可判,主人2026-10-04做题撞出)+修讲解「不能打,不能打」重复;# v25:跌停口径修正(hpr-v6.7):仅一字死封顺延,其余按跌停价卖出;# v24:弱票三口诀加地基腿(hpr-v6.6):A3/B2/B3地基距MA20<5%不命中;# v23:退出价口径升级(hpr-v6.5):E3改纯收盘价+跌停顺延,去v4.3中间价美化(尾盘只有收盘价);收益列随v6.5重算
 BARS_BEFORE = 60          # 决策日前窗口上限(含MA暖机;前端默认只显末~30根)
 
 # v7.3 逐月动态组状态:单一事实源=contracts.dyn_month_states(报告物化
@@ -111,6 +111,8 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame,
         b2_turn, b3_turn = _f(r["b2换手%"]), _f(r["b3换手%"])
         pre20 = _f(r["前20日涨幅%"])
         pre10 = _f(r["前10日涨幅%"])
+        chain_lower_sum = _f(r.get("下影合计%"))
+        pre20_max_drawdown = _f(r.get("前20日最大回撤%"))
         foundation_chg = _f(r["地基涨跌%"])
         ret = _f(r["E3%"])
         d_date = pd.Timestamp(r["买入日"]).date()
@@ -144,7 +146,9 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame,
                                              foundation_pose=(r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
                                              anchor_pos=_f(r["锚位%"]),
                                              anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None),
-                                             dist_ma10=_f(r["距MA10%"]))
+                                             dist_ma10=_f(r["距MA10%"]),
+                                             chain_lower_sum=chain_lower_sum,
+                                             pre20_max_drawdown=pre20_max_drawdown)
         if should_buy:
             if point.startswith("K"):
                 if not hit_weak or str(hit_weak["no"]) != point:
@@ -243,7 +247,9 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame,
                     foundation_pose=(r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
                                         anchor_pos=_f(r["锚位%"]),
                                         anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None),
-                                        dist_ma10=_f(r["距MA10%"]))
+                                        dist_ma10=_f(r["距MA10%"]),
+                                        chain_lower_sum=chain_lower_sum,
+                                        pre20_max_drawdown=pre20_max_drawdown)
                 # 阴阳反串:链形完整命中对面地基组的某条口诀(跨阴阳铁律陷阱,
                 # 教学标签最鲜明,覆盖 near/toxic/plain),讲解首位说明
                 opp_scheme = pool_mod.tag_scheme(
@@ -253,7 +259,9 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame,
                     foundation_pose=(r["地基姿态"] if r["地基姿态"] == r["地基姿态"] else None),
                                         anchor_pos=_f(r["锚位%"]),
                                         anchor_dist=(int(r["锚距"]) if r["锚距"] == r["锚距"] and r["锚距"] is not None else None),
-                                        dist_ma10=_f(r["距MA10%"]))
+                                        dist_ma10=_f(r["距MA10%"]),
+                                        chain_lower_sum=chain_lower_sum,
+                                        pre20_max_drawdown=pre20_max_drawdown)
                 opp_point = str(opp_scheme["no"]) if opp_scheme else "—"
                 row_fails = _row_fails(fail_fields)
                 if opp_point != "—":
@@ -291,6 +299,8 @@ def build_questions(E: pd.DataFrame, bars: pd.DataFrame,
                 "b1_open": b1_open, "b2_open": b2_open, "b3_open": b3_open,
                 "b2_turn": b2_turn, "b3_turn": b3_turn,
                 "pre20_pct": pre20, "pre10_pct": pre10,
+                "chain_lower_sum": chain_lower_sum,
+                "pre20_max_drawdown": pre20_max_drawdown,
                 # v6.10 弱票腿判定字段(B2/B3 地基K线姿态):口诀第四行要求的数据
                 # 必须上题面,否则做题人拿隐藏变量被毙(主人2026-10-04做题撞出);
                 # v6.10 起显示姿态标签(站线上/骑线/贴线/掉线下),数值留参考
@@ -351,7 +361,8 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
                  b1_open, b2_open, b3_open, b2_turn, b3_turn,
                  buy_open: float, pre20_pct, foundation_chg=None,
                  pre10_pct=None, foundation_pose=None,
-                 anchor_pos=None, anchor_dist=None, dist_ma10=None) -> tuple[list[str], str, list[str], dict | None]:
+                 anchor_pos=None, anchor_dist=None, dist_ma10=None,
+                 chain_lower_sum=None, pre20_max_drawdown=None) -> tuple[list[str], str, list[str], dict | None]:
     """未命中题的「为什么不该买」:按优先级产 1~3 条人话理由(全部正常中文)。
     返回 (reasons, trap_kind, fail_fields, scheme_row):
     fail_fields=不符合的腿对应的题面格子标签(前端判分后红格标出,主人2026-10-05
@@ -395,6 +406,14 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
                 "地基还在阴跌里挣扎,这种一字更像诱多不是启动"
                 "——一字转强只接地基站上十日线的(涨势里歇脚)")
             ffails.append("距MA10")
+        # 3d. 平开等温开的下影分歧腿(v7.21 A1):连续深分歧不是干净锁仓
+        if (chain_lower_sum is not None and 4.75 <= chain_lower_sum < 5.5
+                and b1_open is not None and 0 <= b1_open < 3
+                and b2_open is not None and b2_open < 1 and 3 <= buy_open < 6):
+            reasons.append(
+                f"口诀【A1·平开等温开】要求下影合计不在4.75~5.5——这题首二板下影合计"
+                f"{chain_lower_sum:.2f}%:平开链却连续出现较深盘中分歧,不是干净锁仓,不能打")
+            ffails.append("下影合计")
         # 4/5. 二板死段/剧强段(阳组研究结论)
         if b2_open is not None and 1 <= b2_open < 3:
             reasons.append(f"二板开{_pct(b2_open)}落在1~3死段:阳组换手大小都救不动,"
@@ -486,6 +505,13 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
                     f"不碰」——这题已超前期涨停高点{anchor_pos:+.1f}%"
                     "=连板妖顶透支接最后一棒,不能打")
                 ffails.append("距前涨停高")
+        # 10. 前20日回撤腿(v7.21 C2):中等回撤后的承接结构不足
+        if (pre20_max_drawdown is not None and -7.5 <= pre20_max_drawdown < -5.0
+                and b3_turn is not None and 10 <= b3_turn < 20 and 5 <= buy_open < 9):
+            reasons.append(
+                f"口诀【C2·四板换手】新增回避「地基前20日回撤-7.5~-5%」——这题回撤"
+                f"{pre20_max_drawdown:.2f}%:上方仍有套牢压力,四板接力容易断,不能打")
+            ffails.append("前20日回撤")
     if reasons:
         # 毒段题也配最接近口诀行(链全符差一腿,主人「错误的口诀也应该给出表格」);
         # 链形不沾边 → 行 None(无错误口诀可对照)
@@ -493,14 +519,16 @@ def explain_miss(*, n_board: int, yang: bool, group4: str,
             group4, b1_open, b2_open, b3_open,
             b2_turn, b3_turn, buy_open,
             foundation_chg, pre10_pct,
-            foundation_pose, anchor_pos, anchor_dist, dist_ma10)
+            foundation_pose, anchor_pos, anchor_dist, dist_ma10,
+            chain_lower_sum, pre20_max_drawdown)
         return reasons[:3], "toxic", ffails[:4], row
     # 9. 兜底:形态接近(链全符差差条件) 或 链形不沾边(含本组口诀清单),恒非 None
     nearest, near_hit, near_ffails, row = _nearest_scheme_line(
         group4, b1_open, b2_open, b3_open,
         b2_turn, b3_turn, buy_open,
         foundation_chg, pre10_pct,
-        foundation_pose, anchor_pos, anchor_dist)
+        foundation_pose, anchor_pos, anchor_dist, dist_ma10,
+        chain_lower_sum, pre20_max_drawdown)
     return [nearest, _MISS_WIN_LINE], ("near" if near_hit else "plain"), near_ffails, row
 
 
@@ -508,7 +536,8 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
                          b2_turn, b3_turn, buy_open: float,
                          foundation_chg=None, pre10_pct=None,
                          foundation_pose=None, anchor_pos=None,
-                         anchor_dist=None, dist_ma10=None) -> tuple[str, bool, list[str], dict | None]:
+                         anchor_dist=None, dist_ma10=None,
+                         chain_lower_sum=None, pre20_max_drawdown=None) -> tuple[str, bool, list[str], dict | None]:
     """「为什么不买」的兜底讲解(复刻 tag_point 判定收集明细,只讲解不打标)。
     返回 (文案, 是否形态接近, fail格子标签, 最接近口诀的速查表行)。
 
@@ -589,6 +618,16 @@ def _nearest_scheme_line(group4: str, b1_open, b2_open, b3_open,
             elif anchor_pos >= aover:
                 fails.append(f"已超前期涨停高点{anchor_pos:+.1f}%=妖顶透支接最后一棒")
                 tags.append("距前涨停高")
+        bcl = s.get("block_chain_lower")
+        if bcl is not None and chain_lower_sum is not None and bcl[0] <= chain_lower_sum < bcl[1]:
+            fails.append(f"首二板下影合计{chain_lower_sum:.2f}%,"
+                         f"平开等温开要求避开{_fmt_range(bcl)}的连续深分歧")
+            tags.append("下影合计")
+        bdd = s.get("block_pre20_drawdown")
+        if bdd is not None and pre20_max_drawdown is not None and bdd[0] <= pre20_max_drawdown < bdd[1]:
+            fails.append(f"地基前20日最大回撤{pre20_max_drawdown:.2f}%,"
+                         f"四板换手要求避开{_fmt_range(bdd)}的承接不足区")
+            tags.append("前20日回撤")
         lo, hi = s["today"]  # type: ignore[misc]
         if not (lo <= buy_open < hi):
             fails.append(f"今开{_pct(buy_open)},口诀要求{_fmt_range((lo, hi))}")
@@ -746,6 +785,7 @@ def _nearest_weak_line(group4: str, b1_open, b2_open, b3_open,
 _FIELD_TO_COL = {"阴阳": "yang", "一板开": "b1", "二板开": "b2", "三板开": "b3",
                  "今开": "today", "地基日": "ground", "地基姿态": "ground",
                  "距前涨停高": "ground", "首板前10日": "ground",
+                 "下影合计": "ground", "前20日回撤": "ground",
                  "一板换手": "b1", "前波60日": "ground", "距新高": "ground"}
 
 

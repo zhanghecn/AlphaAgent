@@ -139,7 +139,9 @@ def _point_after_auction(
             foundation_pose=entry.get("foundation_pose"),
             anchor_pos=entry.get("anchor_pos"),
             anchor_dist=entry.get("anchor_dist"),
-            dist_ma10=entry.get("dist_ma10"))
+            dist_ma10=entry.get("dist_ma10"),
+            chain_lower_sum=entry.get("chain_lower_sum"),
+            pre20_max_drawdown=entry.get("pre20_max_drawdown"))
     level = ("A" if str(real_point).startswith("K")
              else contracts.POINT_LEVELS.get(real_point, "—"))
     return real_point, level

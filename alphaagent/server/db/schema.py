@@ -1271,6 +1271,8 @@ hpr_pool_entries = Table(
     Column("b2_turn", Float, nullable=True),             # 二板换手 %
     Column("b3_turn", Float, nullable=True),             # 三板换手 %(2026-09-28)
     Column("turn_grad", Float, nullable=True),           # 换手梯度 b2-b1
+    Column("chain_lower_sum", Float, nullable=True),     # 首板至末板下影合计 %(v7.21 A1平开等温开)
+    Column("pre20_max_drawdown", Float, nullable=True),  # 地基前20日最大回撤 %(v7.21 C2)
     # 判定腿补充快照(实时候选重算用:A2透支/B2·B3姿态/C2锚点腿)
     Column("pre10_pct", Float, nullable=True),           # 首板前10日涨幅 %(A2 透支腿)
     Column("foundation_pose", String(8), nullable=True), # 地基姿态 站线上/骑线/线下(B2·B3 姿态腿)
@@ -1763,6 +1765,9 @@ def _apply_compatible_schema_patches(engine) -> None:
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS foundation_pose VARCHAR(8)",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS anchor_pos INTEGER",
         "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS anchor_dist INTEGER",
+        # v7.21 轻量质量腿：A1 下影合计与 C2 前 20 日回撤的实时判定输入。
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS chain_lower_sum FLOAT",
+        "ALTER TABLE hpr_pool_entries ADD COLUMN IF NOT EXISTS pre20_max_drawdown FLOAT",
         # j12-v2.0：保存严格 +9% 触发价和全部命中规则；已有库幂等补列。
         "ALTER TABLE j12_pool_entries ADD COLUMN IF NOT EXISTS trigger_price FLOAT",
         "ALTER TABLE j12_pool_entries ADD COLUMN IF NOT EXISTS rule_ids VARCHAR(64)",

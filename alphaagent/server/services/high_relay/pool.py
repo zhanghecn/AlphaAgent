@@ -202,9 +202,11 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
         rec["prior_gap"] = None
     # 接力链: 首板~末板逐板
     types: list[str] = []
+    rec["chain_lower_sum"] = 0.0
     for k in range(1, n_board + 1):
         j = i_last - n_board + k
         bt = board_type(bool(cols["one_word"][j]), float(cols["lshadow"][j]))
+        rec["chain_lower_sum"] += float(cols["lshadow"][j])
         og = (float(cols["open_price"][j]) / float(cols["prev_close"][j]) - 1) * 100
         turn = cols["turnover_rate"][j]
         rec[f"b{k}_type"] = bt
@@ -224,6 +226,12 @@ def static_fields(ctx: dict[str, object], i_last: int, n_board: int) -> dict[str
     # 首板前20日涨幅(阳组半山腰毒档5~15%判定/答题信息面板用;与 relay_research 同口径)
     c20 = cols["c20"][f]
     rec["pre20_pct"] = round((fc / c20 - 1) * 100, 2) if c20 == c20 and c20 > 0 else None
+    pre20_close = cols["close_price"][max(start, f - 19):f + 1]
+    if len(pre20_close) and np.isfinite(pre20_close).all():
+        running_high = np.maximum.accumulate(pre20_close)
+        rec["pre20_max_drawdown"] = float(np.min(pre20_close / running_high - 1) * 100)
+    else:
+        rec["pre20_max_drawdown"] = None
     c10 = cols["c10"][f]
     rec["pre10_pct"] = round((fc / c10 - 1) * 100, 2) if c10 == c10 and c10 > 0 else None
     # 锚点(v6.8 C2腿): 地基日收盘 vs 地基前20日内最近涨停日最高价
@@ -245,7 +253,7 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
                auction_pct=None, b2_turn=None, b3_turn=None,
                foundation_chg=None, pre10_pct=None,
                foundation_pose=None, anchor_pos=None, anchor_dist=None,
-               dist_ma10=None):
+               dist_ma10=None, chain_lower_sum=None, pre20_max_drawdown=None):
     """打板口诀卡八条打标·分支版(判定逻辑唯一实现,tag_point 是它的编号薄壳):
     返回命中的 SCHEMES 条目本身——多分支口诀(A1/B1/B2/C2)定位到具体分支,
     答题讲解取子项名/速查表行用(q31);未命中返回 None。
@@ -318,6 +326,12 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
             if ((alo <= anchor_pos < ahi and anchor_dist is not None and anchor_dist <= adist)
                     or anchor_pos >= aover):
                 continue  # 贴断板锚不涨=没能量 / 超前期涨停锚≥5%=妖顶透支(v6.8 C2)
+        bcl = s.get("block_chain_lower")
+        if bcl is not None and chain_lower_sum is not None and bcl[0] <= chain_lower_sum < bcl[1]:
+            continue  # 平开链条的连续深分歧回避(v7.21 A1·平开等温开)
+        bdd = s.get("block_pre20_drawdown")
+        if bdd is not None and pre20_max_drawdown is not None and bdd[0] <= pre20_max_drawdown < bdd[1]:
+            continue  # 启动前回撤承接不足回避(v7.21 C2)
         if auction_pct is None:
             return s
         lo, hi = s["today"]
@@ -429,7 +443,7 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
               auction_pct=None, b2_turn=None, b3_turn=None,
               foundation_chg=None, pre10_pct=None,
               foundation_pose=None, anchor_pos=None, anchor_dist=None,
-              dist_ma10=None) -> str:
+              dist_ma10=None, chain_lower_sum=None, pre20_max_drawdown=None) -> str:
     """强市八条口诀编号打标(以 contracts.SCHEMES 为唯一判定定义)。
     tag_scheme 的薄壳:返回命中条目的编号(如「A1」),未命中「—」;
     判定细节/各腿语义见 tag_scheme docstring。"""
@@ -438,7 +452,8 @@ def tag_point(group4: str, b1_open, b2_open, b3_open,
                    foundation_chg=foundation_chg, pre10_pct=pre10_pct,
                    foundation_pose=foundation_pose,
                    anchor_pos=anchor_pos, anchor_dist=anchor_dist,
-                   dist_ma10=dist_ma10)
+                   dist_ma10=dist_ma10, chain_lower_sum=chain_lower_sum,
+                   pre20_max_drawdown=pre20_max_drawdown)
     return str(s["no"]) if s else "—"
 
 
@@ -446,7 +461,7 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
                   b2_turn=None, b3_turn=None,
                   foundation_chg=None, pre10_pct=None,
                   foundation_pose=None, anchor_pos=None, anchor_dist=None,
-                  dist_ma10=None) -> list[dict]:
+                  dist_ma10=None, chain_lower_sum=None, pre20_max_drawdown=None) -> list[dict]:
     """按链条件(不含今开)定位全部链全过分支,按 SCHEMES 优先级序返回。
 
     多分支口诀(捡尸/便捷一字系档)共享编号,且存在跨方案链重叠
@@ -502,6 +517,12 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
             if ((alo <= anchor_pos < ahi and anchor_dist is not None and anchor_dist <= adist)
                     or anchor_pos >= aover):
                 continue  # 锚点腿(v6.8 C2;镜像 tag_point)
+        bcl = s.get("block_chain_lower")
+        if bcl is not None and chain_lower_sum is not None and bcl[0] <= chain_lower_sum < bcl[1]:
+            continue  # 下影分歧腿(v7.21 A1·平开等温开;镜像 tag_point)
+        bdd = s.get("block_pre20_drawdown")
+        if bdd is not None and pre20_max_drawdown is not None and bdd[0] <= pre20_max_drawdown < bdd[1]:
+            continue  # 前20日回撤腿(v7.21 C2;镜像 tag_point)
         out.append(s)
     return out
 
@@ -574,7 +595,8 @@ def entry_candidates(entry: Mapping[str, object]) -> list[dict]:
         pre10_pct=entry.get("pre10_pct"),
         foundation_pose=entry.get("foundation_pose"),
         anchor_pos=entry.get("anchor_pos"), anchor_dist=entry.get("anchor_dist"),
-        dist_ma10=entry.get("dist_ma10"))
+        dist_ma10=entry.get("dist_ma10"), chain_lower_sum=entry.get("chain_lower_sum"),
+        pre20_max_drawdown=entry.get("pre20_max_drawdown"))
     return [_cand_row(s) for s in brs]
 
 
@@ -662,7 +684,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                           pre10_pct=rec.get("pre10_pct"),
                           foundation_pose=rec.get("foundation_pose"),
                           anchor_pos=rec.get("anchor_pos"),
-                          anchor_dist=rec.get("anchor_dist"), dist_ma10=rec.get("dist_ma10"))
+                          anchor_dist=rec.get("anchor_dist"), dist_ma10=rec.get("dist_ma10"),
+                          chain_lower_sum=rec.get("chain_lower_sum"),
+                          pre20_max_drawdown=rec.get("pre20_max_drawdown"))
         avoid = static_avoid(point, group4, rec.get("b1_open"),
                              rec.get("b2_open"), rec.get("pre3_pct"))
         actionable = point != "—" and not avoid
@@ -678,7 +702,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                                  pre10_pct=rec.get("pre10_pct"),
                                  foundation_pose=rec.get("foundation_pose"),
                                  anchor_pos=rec.get("anchor_pos"),
-                                 anchor_dist=rec.get("anchor_dist"), dist_ma10=rec.get("dist_ma10")) if point != "—" else []
+                                 anchor_dist=rec.get("anchor_dist"), dist_ma10=rec.get("dist_ma10"),
+                                 chain_lower_sum=rec.get("chain_lower_sum"),
+                                 pre20_max_drawdown=rec.get("pre20_max_drawdown")) if point != "—" else []
         wins = [s["today"] for s in branches]
         gate = ",".join(f"today_{w[0]:g}_{w[1]:g}" for w in wins) or None
         # 弱市组候选(v7.1 动态口诀组):链级打标,当前组=weak/both 时才出手
@@ -737,6 +763,8 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             # 此前池条目没存→C2/C3 复核时 vol3 拿不到被误判「—」
             "b3_turn": rec.get("b3_turn"),
             "turn_grad": rec["turn_grad"],
+            "chain_lower_sum": rec.get("chain_lower_sum"),
+            "pre20_max_drawdown": rec.get("pre20_max_drawdown"),
             "pre3_pct": rec.get("pre3_pct"),
             "pre20_pct": rec.get("pre20_pct"),
             "pre10_pct": rec.get("pre10_pct"),

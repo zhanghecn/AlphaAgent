@@ -92,6 +92,8 @@ def save_pool(exec_date: date, entries: list[Mapping[str, object]], rules_versio
                     b2_turn=e.get("b2_turn"),
                     b3_turn=e.get("b3_turn"),
                     turn_grad=e.get("turn_grad"),
+                    chain_lower_sum=e.get("chain_lower_sum"),
+                    pre20_max_drawdown=e.get("pre20_max_drawdown"),
                     pre10_pct=e.get("pre10_pct"),
                     foundation_pose=e.get("foundation_pose"),
                     anchor_pos=e.get("anchor_pos"),
