@@ -6,7 +6,12 @@ import { describe, expect, it } from "vitest";
 import { ThemeProvider } from "@/theme/ThemeProvider";
 import { ShortTermResearchPage } from "./ShortTermResearchPage";
 import { HPR_LIVE_REFRESH_INTERVAL_MS } from "./HighRelayPage";
-import type { HprLivePayload, HprQuizQuestion } from "@/api/highRelay";
+import type { HprKoujueTrade, HprLivePayload, HprQuizQuestion } from "@/api/highRelay";
+import {
+  filterKoujueTrades,
+  HprKoujueTradesPanel,
+  summarizeKoujueTrades,
+} from "@/features/highRelay/HprKoujueTradesPanel";
 import { HprLedgerView } from "@/features/highRelay/HprLedgerView";
 import { HprLiveView } from "@/features/highRelay/HprLiveView";
 import * as HighRelayGuide from "@/features/highRelay/HprGuideView";
@@ -277,7 +282,7 @@ describe("HprLiveView", () => {
 });
 
 describe("HprLedgerView", () => {
-  it("renders E3 exit reason labels and E0 comparison column", () => {
+  it("renders E3 exit reason labels and single E3 return column", () => {
     const html = renderToStaticMarkup(
       withProviders(
         <HprLedgerView
@@ -306,7 +311,6 @@ describe("HprLedgerView", () => {
                   exit_price: 18.58,
                   exit_reason: "break_close",
                   ret_pct: 12.6,
-                  ret_e0: 12.6,
                   touch: "09:45",
                 },
               ],
@@ -318,7 +322,7 @@ describe("HprLedgerView", () => {
     expect(html).toContain("断板日卖");
     expect(html).toContain("2板");
     expect(html).toContain("B1");
-    expect(html).toContain("对照E0");
+    expect(html).not.toContain("对照E0");
     expect(html).toContain("炸板次日走");
   });
 
@@ -351,7 +355,6 @@ describe("HprLedgerView", () => {
                   exit_price: 8.05,
                   exit_reason: "break_close",
                   ret_pct: 5.0,
-                  ret_e0: 5.0,
                   touch: "09:45",
                   overlap: false,
                 },
@@ -369,7 +372,6 @@ describe("HprLedgerView", () => {
                   exit_price: 9.1,
                   exit_reason: "break_close",
                   ret_pct: 18.7,
-                  ret_e0: 18.7,
                   touch: "09:45",
                   overlap: true,  // 同票持仓中,真实买不进
                 },
@@ -933,5 +935,71 @@ describe("KoujueHealthList 分支健康度", () => {
 
     expect(html).toContain("B1 强开系·转温");
     expect(html).toContain("B1 强开系·续强");
+  });
+});
+
+const KOUJUE_TRADES: HprKoujueTrade[] = [
+  {
+    d: "2024-01-05", m: "2024-01", code: "002.SZSE", name: "强中",
+    g: "strong", p: "B1", s: "转温", g4: "二接三阴", n: 2,
+    ep: 20, ap: 3.2, sealed: false, hold: 1,
+    xd: "2024-01-08", xp: 19, xr: "break_day_close", r: -5.0, ov: false,
+    st: "strong", tk: true, tp: "B1",
+    b1o: -1, b2o: 2, b3o: null, b1t: 5, b2t: 8, b3t: null,
+    fc: -2, fp: "贴线", dh: -20, ch: "下影→实体",
+  },
+  {
+    d: "2023-07-10", m: "2023-07", code: "001.SZSE", name: "弱市参考",
+    g: "strong", p: "A1", s: "低开等强开", g4: "二接三阳", n: 2,
+    ep: 10, ap: 1.5, sealed: true, hold: 2,
+    xd: "2023-07-14", xp: 11, xr: "break_close", r: 10.0, ov: true,
+    st: "weak", tk: false, tp: null,
+    b1o: 2, b2o: 5, b3o: null, b1t: 4, b2t: 6, b3t: null,
+    fc: 1.2, fp: "站线上", dh: -12.3, ch: "实体→实体",
+  },
+];
+
+describe("HprKoujueTradesPanel 口诀历史票", () => {
+  it("筛选与统计:成交/参考分开,持仓重叠不计入均值", () => {
+    expect(
+      filterKoujueTrades(KOUJUE_TRADES, { year: "all", scope: "taken", keyword: "" }),
+    ).toHaveLength(1);
+    expect(
+      filterKoujueTrades(KOUJUE_TRADES, { year: "2023", scope: "all", keyword: "弱市" }),
+    ).toHaveLength(1);
+
+    const summary = summarizeKoujueTrades(KOUJUE_TRADES);
+    expect(summary.n).toBe(2);
+    expect(summary.nExec).toBe(1);
+    expect(summary.avg).toBe(-5);
+    expect(summary.win).toBe(0);
+  });
+
+  it("渲染年份、状态徽章、条件明细与股票链接", () => {
+    const html = renderToStaticMarkup(
+      withProviders(
+        <HprKoujueTradesPanel
+          point="B1"
+          sub="转温"
+          label="B1 强开系·转温"
+          data={{ status: "ok", rules_version: "hpr-v7.23", trades: KOUJUE_TRADES }}
+          isLoading={false}
+          isError={false}
+          onRetry={() => undefined}
+          onClose={() => undefined}
+        />,
+      ),
+    );
+    expect(html).toContain("B1 强开系·转温");
+    expect(html).toContain("回测事件重放动态计算");
+    expect(html).toContain("2024 年 · 1笔");
+    expect(html).toContain("成交");
+    expect(html).toContain("参考");
+    expect(html).toContain("持仓重叠");
+    expect(html).toContain("强中");
+    expect(html).toContain("转温");
+    expect(html).toContain("下影→实体");
+    expect(html).toContain("/stocks/002.SZSE");
+    expect(html).toContain("炸板次日卖");
   });
 });

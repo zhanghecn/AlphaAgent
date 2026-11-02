@@ -674,6 +674,32 @@ def get_current_koujue() -> dict[str, object]:
     }
 
 
+def get_koujue_trades(point: str, sub: str | None = None) -> dict[str, object]:
+    """规则页点口诀下钻:该口诀的全部历史命中逐笔(股票/买卖/收益/条件)。
+
+    数据源=回测物化 payload["koujue_trades"](每次重建回测由事件表动态重算,
+    不是静态清单);旧物化无此键 → unavailable,提示重建。
+    sub 为空=该编号全部分支;指定分支(B1·转温)=只取该子项。
+    """
+    row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
+    trades = list((row or {}).get("koujue_trades") or [])
+    if not trades:
+        return {"status": "unavailable",
+                "rules_version": contracts.HPR_RULES_VERSION,
+                "point": point, "sub": sub,
+                "reason": "回测物化未生成口诀逐笔明细,请在「回测」页点「重新计算」"}
+    key = str(sub or "")
+    scoped = [
+        t for t in trades
+        if str(t.get("p") or "") == point
+        and (not key or str(t.get("s") or "") == key)
+    ]
+    return {"status": "ok", "rules_version": contracts.HPR_RULES_VERSION,
+            "built_at": (row or {}).get("built_at"),
+            "point": point, "sub": sub or None,
+            "count": len(scoped), "trades": scoped}
+
+
 def get_rules() -> dict[str, object]:
     # 姿态案例K线窗随物化 payload 出(v6.10 规则页四宫格图解;旧物化无此键→空表)
     pose_cases: list[dict[str, object]] = []

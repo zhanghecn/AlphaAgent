@@ -253,10 +253,8 @@ export interface HprLedgerTrade {
   exit_reason:
     | "break_day_close" | "next_close_fail" | "break_close" | "max_hold_close"
     | null;
-  /** E3 收益(产品卖出纪律) */
+  /** E3 收益(产品卖出纪律,与规则说明一致) */
   ret_pct: number | null;
-  /** E0 收益(研究持有到断板口径,对照) */
-  ret_e0: number | null;
   /** 首触板15分钟K周期末刻(如"09:45"=首刻段); null=无分钟数据(2024-08前) */
   touch: string | null;
   /** 同票持仓重叠(v6.1):前笔 E3 未退真实买不进,行保留展示但不进收益汇总 */
@@ -391,6 +389,62 @@ export interface HprKoujueCurrent {
 
 export function fetchHprKoujueCurrent() {
   return apiClient.get<HprKoujueCurrent>("/high-relay/koujue/current");
+}
+
+// ── 规则页「点口诀看历史票」(v7.24):回测物化 koujue_trades 的逐笔下钻 ──
+// 每次重建回测由事件表动态重算,不是静态清单;双命中股票在弱/强两组各出一行,
+// tk=该口诀当月是否被动态组采用,tk=false 为未启用时代的参考命中。
+export interface HprKoujueTrade {
+  d: string;                 // 买入日
+  m: string;                 // 月(YYYY-MM)
+  code: string;
+  name: string;
+  g: "weak" | "strong";
+  p: HprAnyPoint;
+  s: string;                 // 子项;空=该编号整条
+  g4: HprGroup4;
+  n: number;                 // 昨日连板数(2/3)
+  ep: number | null;         // 买入价
+  ap: number | null;         // 今开%
+  sealed: boolean;
+  hold: number;              // 持有板数
+  xd: string | null;         // 卖出日
+  xp: number | null;         // 卖出价
+  xr: string | null;         // 卖出原因
+  r: number | null;          // E3 收益%
+  ov: boolean;               // 同票持仓重叠(真实买不进)
+  st: HprDynGroup;           // 当月动态组状态
+  tk: boolean;               // 该口诀当月是否成交
+  tp: HprAnyPoint | null;    // 实际成交口诀(双命中时可能不是本行)
+  b1o: number | null;        // 一板开盘%
+  b2o: number | null;        // 二板开盘%
+  b3o: number | null;        // 三板开盘%
+  b1t: number | null;        // 一板换手%
+  b2t: number | null;        // 二板换手%
+  b3t: number | null;        // 三板换手%
+  fc: number | null;         // 地基日涨跌%
+  fp: string | null;         // 地基姿态
+  dh: number | null;         // 距60日新高%
+  ch: string | null;         // 板型链
+}
+
+export interface HprKoujueTradesPayload {
+  status: "ok" | "unavailable";
+  rules_version: string;
+  built_at?: string | null;
+  point?: string;
+  sub?: string | null;
+  count?: number;
+  trades?: HprKoujueTrade[];
+  reason?: string;
+}
+
+export function fetchHprKoujueTrades(point: string, sub?: string) {
+  const params = new URLSearchParams({ point });
+  if (sub) params.set("sub", sub);
+  return apiClient.get<HprKoujueTradesPayload>(
+    `/high-relay/koujue/trades?${params.toString()}`,
+  );
 }
 
 export function fetchHprLiveDates() {

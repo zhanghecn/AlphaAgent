@@ -75,7 +75,7 @@ export function HprLedgerView({
     <section aria-label="高位接力历史交割单" className="rounded-lg border">
       <div className="border-b px-4 py-2 text-xs text-muted-foreground">
         回测模拟口径(非实盘):<span className="text-foreground">动态口诀组纪律——每月自动切换启用组(近一年哪组赚得多用哪组),当月未启用组的命中不成交</span>(2020-01~07 双开期两组都出手/2020-08~2023-08 弱市组 K 系/2023-09 起强市组八条)
-        ;成交笔触板买涨停价,炸板次日走(T+1)/封住→断板日卖(15日兜底,E3口径);收益列=E3,对照列E0=持有到断板;不限仓位。同票持仓未退时的新信号标「持仓中」——真实买不进(T+1+一票一份),显示但不进收益汇总。实时前推成交随产品上线逐日沉淀。
+        ;成交笔触板买涨停价,炸板次日走(T+1)/封住→断板日卖(15日兜底);收益=E3卖出纪律口径(与规则说明一致);不限仓位。同票持仓未退时的新信号标「持仓中」——真实买不进(T+1+一票一份),显示但不进收益汇总。实时前推成交随产品上线逐日沉淀。
       </div>
 
       <PointSummaryBar summaries={pointSummaries} />
@@ -142,8 +142,7 @@ export function HprLedgerView({
                 <th className="px-3 py-2 text-right font-medium">卖出日</th>
                 <th className="px-3 py-2 text-left font-medium">卖出原因</th>
                 <th className="px-3 py-2 text-right font-medium">持有板数</th>
-                <th className="px-3 py-2 text-right font-medium">收益E3</th>
-                <th className="px-3 py-2 text-right font-medium">对照E0</th>
+                <th className="px-3 py-2 text-right font-medium">收益(E3)</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -199,9 +198,6 @@ function LedgerRow({ day, trade }: { day: string; trade: HprLedgerTrade }) {
       </td>
       <td className={cn("px-3 py-2 text-right font-mono tabular-nums font-medium", tone(trade.ret_pct))}>
         {trade.ret_pct == null ? "--" : formatPct(trade.ret_pct)}
-      </td>
-      <td className={cn("px-3 py-2 text-right font-mono tabular-nums text-muted-foreground", tone(trade.ret_e0))}>
-        {trade.ret_e0 == null ? "--" : formatPct(trade.ret_e0)}
       </td>
     </tr>
   );

@@ -136,6 +136,13 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     # both月=两组任一;对照=全开(两组并集全时段)
     month_states = contracts.dyn_month_states(dyn_trades)
     payload["dyn_month_states"] = month_states
+    # v7.24 规则页口诀下钻:每笔命中一只历史票(含条件字段/当月组状态/是否成交)。
+    # 与 dyn_trades 的轻表不同,这里保留代码/名称/买卖价/收益和判定条件,
+    # 供规则页点口诀直接排查;未启用组的命中保留并以 tk=False 标注为参考。
+    hit_frame = done_all[(done_all["方案点"] != "—")
+                         | (done_all["弱口诀"] != "—")].copy()
+    hit_frame["同票持仓重叠"] = _mark_overlap_any(hit_frame)
+    payload["koujue_trades"] = _koujue_trades(hit_frame, month_states)
 
     def _dyn_take(row) -> str:
         """按当月组与通用整点/分支决定是否出手;切换判定轻表不受常驻影响。"""
@@ -195,6 +202,70 @@ def _dyn_trades(done: pd.DataFrame) -> list[dict[str, object]]:
         elif pt != "—":
             out.append({"m": str(r["月"]), "g": "strong", "p": pt,
                         "s": str(r.get("方案子项") or ""), "r": round(float(e3), 2)})
+    return out
+
+
+def _mark_overlap_any(hit: pd.DataFrame) -> pd.Series:
+    """全组命中的同票持仓重叠标记(弱市组优先),供口诀逐笔明细用。
+
+    _mark_overlap 只认「方案点」列;弱口诀命中在事件表里方案点可能为「—」,
+    这里先把弱口诀覆盖到方案点再复用同一套一票一份模拟(只改副本,不动原表)。
+    """
+    work = hit.copy()
+    weak = work["弱口诀"].fillna("—").astype(str)
+    work["方案点"] = weak.where(weak != "—", work["方案点"].astype(str))
+    _mark_overlap(work)
+    return work["同票持仓重叠"]
+
+
+def _koujue_trades(done: pd.DataFrame,
+                   month_states: dict[str, str]) -> list[dict[str, object]]:
+    """规则页「点口诀看历史票」逐笔明细(v7.24)。
+
+    每笔命中输出一行;双命中(弱口诀+强方案点)= 两条行,便于按口诀分别排查。
+    字段:d 买入日 / m 月 / code,name / g 组(weak/strong)/ p 口诀 / s 子项 /
+    g4 四组 / n 板数 / ep 买价 / ap 今开% / sealed 封住 / hold 持有板数 /
+    xd,xp,xr 退出日/价/原因 / r E3% / ov 同票重叠 / st 当月动态组状态 /
+    tk 该口诀当月是否成交 / tp 实际成交口诀 / b1o,b2o,b3o 板链开盘% /
+    b1t,b2t,b3t 板链换手% / fc 地基涨跌% / fp 地基姿态 / dh 距60日新高% /
+    ch 板型链。tk=false 的命中=当月未启用该组,保留为研究参考。
+    """
+    out: list[dict[str, object]] = []
+    for _, r in done.iterrows():
+        e3 = r.get("E3%")
+        if e3 is None or pd.isna(e3):
+            continue
+        month = str(r["月"])
+        state = contracts.dyn_state_at(month_states, month)
+        weak_no = _text(r.get("弱口诀")) or "—"
+        strong_no = _text(r.get("方案点")) or "—"
+        sub = _text(r.get("方案子项")) or ""
+        weak_sub = _text(r.get("弱子项")) or sub
+        take = contracts.dyn_take_point(state, strong_no, weak_no, sub)
+        base: dict[str, object] = {
+            "d": _date_str(r["买入日"]), "m": month,
+            "code": str(r["代码"]), "name": str(r["名称"]),
+            "g4": str(r["四组"]), "n": int(r["N"]),
+            "ep": _sr(r["买价"], 3), "ap": _sr(r["买入开盘%"], 2),
+            "sealed": bool(r["封住"]),
+            "hold": int(r["持有天数"]) if pd.notna(r["持有天数"]) else 0,
+            "xd": _text(r.get("E3退出日")), "xp": _sr(r.get("E3退出价"), 3),
+            "xr": _text(r.get("E3原因")), "r": _sr(r["E3%"], 2),
+            "ov": bool(r["同票持仓重叠"]), "st": state,
+            "b1o": _sr(r.get("b1开盘%"), 2), "b2o": _sr(r.get("b2开盘%"), 2),
+            "b3o": _sr(r.get("b3开盘%"), 2),
+            "b1t": _sr(r.get("b1换手%"), 2), "b2t": _sr(r.get("b2换手%"), 2),
+            "b3t": _sr(r.get("b3换手%"), 2),
+            "fc": _sr(r.get("地基涨跌%"), 2), "fp": _text(r.get("地基姿态")),
+            "dh": _sr(r.get("距60日新高%"), 2), "ch": _text(r.get("链")),
+        }
+        if weak_no != "—":
+            out.append({**base, "s": weak_sub, "g": "weak", "p": weak_no,
+                        "tk": take == weak_no, "tp": take or None})
+        if strong_no != "—":
+            out.append({**base, "s": sub, "g": "strong", "p": strong_no,
+                        "tk": take == strong_no, "tp": take or None})
+    out.sort(key=lambda t: str(t.get("d") or ""), reverse=True)
     return out
 
 
@@ -411,6 +482,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "方案点": point,
             "方案子项": point_sub,
             "弱口诀": str(weak["no"]) if weak else "—",
+            "弱子项": str(weak.get("sub") or "") if weak else "",
             "回避": avoid,
             "买价": buy,
             "买入开盘%": buy_open,
@@ -644,12 +716,12 @@ def _ledger_days(trades: pd.DataFrame, touch_map: dict | None = None) -> list[di
 
     退出 = 产品卖出纪律(E3):炸板次日走/封住→断板日(15日兜底),退出价=退出日收盘价
     (v6.5 去中间价美化;收盘跌停仅一字死封顺延、其余按跌停价,v6.7);
-    ret_e0 = 研究主算法(持有到断板)收益,对照列。
+    收益=E3单一口径(与规则说明一致,不再下发研究口径E0)。
     touch: {(vt_symbol, 买入日): 'HH:MM'} 首触板15分钟末刻;无数据=None(2024-08前)。
     overlap = 同票持仓重叠(前笔 E3 未退,真实买不进):行保留展示,收益汇总不计入(v6.1)。
     """
     touch_map = touch_map or {}
-    e = trades.dropna(subset=["E3%", "持有到断板%"]).copy()
+    e = trades.dropna(subset=["E3%"]).copy()
     if not len(e):
         return []
     e["entry_day"] = e["买入日"].dt.date
@@ -671,7 +743,6 @@ def _ledger_days(trades: pd.DataFrame, touch_map: dict | None = None) -> list[di
             "exit_price": _sr(r["E3退出价"], 3),
             "exit_reason": r["E3原因"],
             "ret_pct": _sr(r["E3%"], 2),
-            "ret_e0": _sr(r["持有到断板%"], 2),
             "touch": touch_map.get((str(r["代码"]), r["entry_day"])),
             "overlap": bool(r["同票持仓重叠"]),
         } for _, r in g_.iterrows()]
@@ -687,6 +758,14 @@ def _ledger_days(trades: pd.DataFrame, touch_map: dict | None = None) -> list[di
     return out
 
 
+def _text(value: object) -> str | None:
+    """空值/NaN -> None;其余转去空白字符串(口诀逐笔字段用)。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text and text.lower() not in {"nan", "nat", "none"} else None
+
+
 def _date_str(value: object) -> str | None:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
@@ -697,5 +776,7 @@ def _sr(value: object, ndigits: int) -> float | None:
     try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
         return None
     return round(number, ndigits) if math.isfinite(number) else None

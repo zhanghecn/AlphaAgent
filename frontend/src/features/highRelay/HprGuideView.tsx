@@ -1,8 +1,15 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchHprKoujueCurrent, fetchHprRules, type HprKoujueHealth } from "@/api/highRelay";
+import {
+  fetchHprKoujueCurrent,
+  fetchHprKoujueTrades,
+  fetchHprRules,
+  type HprCheatRow,
+  type HprKoujueHealth,
+} from "@/api/highRelay";
 import { CheatTableRow } from "@/features/highRelay/CheatTableRow";
+import { HprKoujueTradesPanel } from "@/features/highRelay/HprKoujueTradesPanel";
 import { PoseCaseChart } from "@/features/highRelay/PoseCaseChart";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
@@ -34,12 +41,20 @@ const POINT_ORDER = ["A1", "A2", "A3", "B2", "B1", "B3", "C1", "C2", "C3"] as co
 
 /** 规则说明:渲染自后端 /rules 契约(单一事实源,前端不维护副本;
  * 速查表也随后端 cheat_rows 下发,答题讲解卡取同一份命中行)。 */
+interface SelectedKoujue {
+  no: string;
+  sub?: string;
+  label: string;
+}
+
 export function HprGuideView() {
   const query = useQuery({
     queryKey: ["hprRules"],
     queryFn: fetchHprRules,
     staleTime: 300_000,
   });
+  // 点口诀名 → 下方展开该口诀的历史命中票(懒加载,不拖慢规则页首屏)
+  const [selected, setSelected] = useState<SelectedKoujue | null>(null);
   // 动态口诀组(v7.0):用户点「获取最新口诀」才拉取——数字动态计算,1分钟内不重复请求
   const [koujueOpen, setKoujueOpen] = useState(false);
   const koujue = useQuery({
@@ -48,6 +63,38 @@ export function HprGuideView() {
     enabled: koujueOpen,
     staleTime: 60_000,
   });
+  const target = selected;
+  const koujueTrades = useQuery({
+    queryKey: ["hprKoujueTrades", target?.no ?? "", target?.sub ?? ""],
+    queryFn: () => fetchHprKoujueTrades(target!.no, target!.sub),
+    enabled: target !== null,
+    staleTime: 300_000,
+  });
+  const selectScheme = (next: SelectedKoujue) => {
+    setSelected((prev) =>
+      prev && prev.no === next.no && (prev.sub ?? "") === (next.sub ?? "")
+        ? null
+        : next,
+    );
+  };
+  const renderCheatRow = (row: HprCheatRow, badge?: string) => {
+    const scheme: SelectedKoujue = {
+      no: String(row.no),
+      sub: row.sub,
+      label: row.name,
+    };
+    const isSelected =
+      selected?.no === scheme.no && (selected?.sub ?? "") === (scheme.sub ?? "");
+    return (
+      <CheatTableRow
+        key={row.name}
+        row={row}
+        badge={badge}
+        selected={isSelected}
+        onSelect={() => selectScheme(scheme)}
+      />
+    );
+  };
   if (query.isLoading && !query.data) return <LoadingState rows={6} />;
   if (query.isError || !query.data) {
     return <ErrorState message="规则契约暂时不可用" onRetry={() => void query.refetch()} />;
@@ -156,6 +203,7 @@ export function HprGuideView() {
         <div className="mb-2 text-xs text-muted-foreground">
           昨天恰好 2/3 连板、今天冲下一板——两组口诀按行情自动切换（看上方「动态口诀组」）；
           用法：看地基阴阳 → 看板位 → 对照今天开。
+          <span className="ml-1 font-medium text-primary">点口诀名可展开该口诀的历史票。</span>
         </div>
         {/* v7.10 三板换手池分流总纲(阴阳分流版):第一判据=地基K线阴体阳体(K2/K5 要阴、
             K4 要阳),第二判据=今天开;阴阳各走各路(主人 2026-10-07 撞金种子酒判定冲突后定稿) */}
@@ -184,27 +232,34 @@ export function HprGuideView() {
                 强市组（A1~C3 八条，B1·转温单列通用组）
               </td>
             </tr>
-            {rules.cheat_rows.map((r) => (
-              <CheatTableRow key={r.name} row={r} />
-            ))}
+            {rules.cheat_rows.map((r) => renderCheatRow(r))}
             <tr className="border-b-2 border-muted/40">
               <td className="py-1 pr-3 text-[11px] font-semibold text-violet-500/80" colSpan={8}>
                 弱市组（K 系四条，2020-22 弱市时代定型；2023 起参考成绩见回测页）
               </td>
             </tr>
-            {rules.weak_cheat_rows.map((r) => (
-              <CheatTableRow key={r.name} row={r} />
-            ))}
+            {rules.weak_cheat_rows.map((r) => renderCheatRow(r))}
             <tr className="border-b-2 border-muted/40">
               <td className="py-1 pr-3 text-[11px] font-semibold text-emerald-500/90" colSpan={8}>
                 通用组（K5 与 B1·转温跨时代常开；成绩仍计入原所属组参与切换）
               </td>
             </tr>
-            {(rules.common_cheat_rows ?? []).map((r) => (
-              <CheatTableRow key={r.name} row={r} badge="通用组" />
-            ))}
+            {(rules.common_cheat_rows ?? []).map((r) => renderCheatRow(r, "通用组"))}
           </tbody>
         </table>
+        {selected ? (
+          <HprKoujueTradesPanel
+            key={`${selected.no}-${selected.sub ?? ""}`}
+            point={selected.no}
+            sub={selected.sub}
+            label={selected.label}
+            data={koujueTrades.data}
+            isLoading={koujueTrades.isLoading}
+            isError={koujueTrades.isError}
+            onRetry={() => void koujueTrades.refetch()}
+            onClose={() => setSelected(null)}
+          />
+        ) : null}
         <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
           换手心法：二接三看二板换手（阳锁阴活），三接四先看三板换手，一板换手永远不用看；
           盘中首次触涨停价打（低吸类低开直接买），开盘≥9.5%顶格不命中；

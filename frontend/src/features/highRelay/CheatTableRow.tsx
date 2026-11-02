@@ -14,12 +14,16 @@ export function CheatTableRow({
   failCols,
   statText,
   badge,
+  onSelect,
+  selected = false,
 }: {
   row: HprCheatRow;
   showName?: boolean;
   failCols?: string[];
   statText?: string;   // 成绩列覆盖文本(动态口诀组传近窗动态成绩;缺省=row.stat研究锚定)
   badge?: string;      // 行名后小徽章(v7.17 通用组:跨时代口诀不论当月组都可出手)
+  onSelect?: () => void;  // 规则页:点口诀名展开该口诀历史票
+  selected?: boolean;
 }) {
   const fail = (col: string) => (failCols ?? []).includes(col);
   const yangCls = fail("yang")
@@ -30,10 +34,28 @@ export function CheatTableRow({
         ? "text-fall"
         : "text-muted-foreground";
   return (
-    <tr className="border-b border-muted/40">
+    <tr className={cn("border-b border-muted/40", selected && "bg-primary/5")}>
       {showName ? (
         <td className="py-1.5 pr-3 font-medium whitespace-nowrap">
-          {row.name}
+          {onSelect ? (
+            <button
+              type="button"
+              onClick={onSelect}
+              title="查看该口诀的历史票"
+              aria-expanded={selected}
+              className={cn(
+                "group/name inline-flex items-center gap-1 text-left underline decoration-dotted underline-offset-2 hover:text-primary",
+                selected && "text-primary",
+              )}
+            >
+              {row.name}
+              <span className="text-[10px] font-normal text-muted-foreground/70 group-hover/name:text-primary">
+                历史票
+              </span>
+            </button>
+          ) : (
+            row.name
+          )}
           {badge ? (
             <span className="ml-1.5 rounded border border-emerald-500/40 px-1 py-px text-[10px] font-normal text-emerald-500 align-middle">
               {badge}

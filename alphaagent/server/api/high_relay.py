@@ -48,7 +48,9 @@ def backtest():
     if payload is None:
         return ok({"status": "unavailable", "message": "高位接力回测尚未运行",
                    "rebuild": rebuild})
-    report = {k: v for k, v in payload.items() if k != "ledger_days"}
+    # 口诀逐笔明细单独走 /koujue/trades 懒加载,不塞进回测报告响应(体积)
+    report = {k: v for k, v in payload.items()
+              if k not in ("ledger_days", "koujue_trades")}
     return ok({"status": "ok", "is_backtest": True, "report": report,
                "rebuild": rebuild})
 
@@ -107,6 +109,20 @@ def koujue_current():
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=503, content=fail(
             "HPR_KOUJUE_UNAVAILABLE", "动态口诀组暂时不可用",
+            {"reason": exc.__class__.__name__}))
+
+
+@router.get("/koujue/trades", response_model=None)
+def koujue_trades(
+    point: str = Query(..., min_length=1, max_length=8),
+    sub: str | None = Query(default=None, max_length=20),
+):
+    """规则页点口诀:该口诀历史命中逐笔(回测事件动态重算,支持子项过滤)。"""
+    try:
+        return ok(service.get_koujue_trades(point, sub))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "HPR_KOUJUE_TRADES_UNAVAILABLE", "口诀历史票暂时不可用",
             {"reason": exc.__class__.__name__}))
 
 
