@@ -20,7 +20,26 @@ const DYN_STATE_LABELS: Record<string, string> = {
   both: "双开月",
 };
 
-export type KoujueTradeScope = "all" | "taken" | "ref";
+export type KoujueTradeScope = "all" | "taken" | "shared" | "off";
+
+export type KoujueTradeMode = "taken" | "shared" | "off";
+
+/** 逐笔三态(口诀存在共用区,区分「让位」与「未启用」):
+ * taken=本口诀执行;shared=本口诀当月有出手资格,但同票还命中其它启用口诀、
+ * 按纪律走了那条(如通用组 K5 优先)——共用票不是本口诀的错,也不是它的肉;
+ * off=当月动态组未启用本口诀所在组(强市口诀在弱市月/弱市口诀在强市月),时代参考。
+ * 常开通用组(K5/B1·转温)任何月都有资格,由 alwaysOn 名单(后端单源)判定。 */
+export function koujueTradeMode(
+  t: HprKoujueTrade,
+  alwaysOn: string[] = [],
+): KoujueTradeMode {
+  if (t.tk) return "taken";
+  const common =
+    alwaysOn.includes(t.p) || (t.s ? alwaysOn.includes(`${t.p}·${t.s}`) : false);
+  const eligible =
+    common || (t.g === "weak" ? t.st !== "strong" : t.st !== "weak");
+  return eligible && t.tp && t.tp !== t.p ? "shared" : "off";
+}
 
 export interface KoujueTradeSummary {
   n: number;
@@ -51,19 +70,24 @@ export function filterKoujueTrades(
     year,
     scope,
     keyword,
-  }: { year: string; scope: KoujueTradeScope; keyword: string },
+    alwaysOn,
+  }: {
+    year: string;
+    scope: KoujueTradeScope;
+    keyword: string;
+    alwaysOn?: string[];
+  },
 ): HprKoujueTrade[] {
   const kw = keyword.trim().toLowerCase();
   return trades.filter((t) => {
     if (year !== "all" && !t.m.startsWith(year)) return false;
-    if (scope === "taken" && !t.tk) return false;
-    if (scope === "ref" && t.tk) return false;
+    if (scope !== "all" && koujueTradeMode(t, alwaysOn) !== scope) return false;
     if (!kw) return true;
     return t.code.toLowerCase().includes(kw) || t.name.toLowerCase().includes(kw);
   });
 }
 
-/** 规则页点口诀后的历史逐笔面板:年份/成交状态/搜票筛选 + 逐票明细。 */
+/** 规则页点口诀后的历史逐笔面板:年份/三态(成交/共用/未启用)/搜票筛选 + 逐票明细。 */
 export function HprKoujueTradesPanel({
   point,
   sub,
@@ -73,6 +97,7 @@ export function HprKoujueTradesPanel({
   isError,
   onRetry,
   onClose,
+  alwaysOn = [],
 }: {
   point: string;
   sub?: string;
@@ -82,6 +107,7 @@ export function HprKoujueTradesPanel({
   isError: boolean;
   onRetry: () => void;
   onClose: () => void;
+  alwaysOn?: string[];
 }) {
   const rootRef = useRef<HTMLElement | null>(null);
   const [year, setYear] = useState("all");
@@ -98,13 +124,26 @@ export function HprKoujueTradesPanel({
     () => [...new Set(trades.map((t) => t.m.slice(0, 4)))].sort().reverse(),
     [trades],
   );
-  const takenCount = useMemo(() => trades.filter((t) => t.tk).length, [trades]);
+  const modeCounts = useMemo(() => {
+    const out = { taken: 0, shared: 0, off: 0 };
+    for (const t of trades) out[koujueTradeMode(t, alwaysOn)] += 1;
+    return out;
+  }, [trades, alwaysOn]);
   const visible = useMemo(
-    () => filterKoujueTrades(trades, { year, scope, keyword }),
-    [trades, year, scope, keyword],
+    () => filterKoujueTrades(trades, { year, scope, keyword, alwaysOn }),
+    [trades, year, scope, keyword, alwaysOn],
   );
-  const summary = useMemo(() => summarizeKoujueTrades(visible), [visible]);
-  const totalSummary = useMemo(() => summarizeKoujueTrades(trades), [trades]);
+  const takenTrades = useMemo(
+    () => trades.filter((t) => koujueTradeMode(t, alwaysOn) === "taken"),
+    [trades, alwaysOn],
+  );
+  const sharedTrades = useMemo(
+    () => trades.filter((t) => koujueTradeMode(t, alwaysOn) === "shared"),
+    [trades, alwaysOn],
+  );
+  // 头部只报本口诀真实成交:共用票的收益归执行口诀,不计入本口诀(否则会被别条赢家抬高)
+  const execSummary = useMemo(() => summarizeKoujueTrades(takenTrades), [takenTrades]);
+  const sharedSummary = useMemo(() => summarizeKoujueTrades(sharedTrades), [sharedTrades]);
 
   return (
     <section
@@ -172,8 +211,9 @@ export function HprKoujueTradesPanel({
               {(
                 [
                   ["all", `全部 ${trades.length}`],
-                  ["taken", `成交 ${takenCount}`],
-                  ["ref", `参考 ${trades.length - takenCount}`],
+                  ["taken", `成交 ${modeCounts.taken}`],
+                  ["shared", `共用 ${modeCounts.shared}`],
+                  ["off", `未启用 ${modeCounts.off}`],
                 ] as const
               ).map(([key, text]) => (
                 <button
@@ -203,41 +243,48 @@ export function HprKoujueTradesPanel({
             </label>
             <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-xs tabular-nums">
               <span className="text-muted-foreground">
-                当前 <span className="text-foreground">{summary.n}</span> 笔
+                成交 <span className="text-foreground">{execSummary.n}</span> 笔
               </span>
-              <span className="text-muted-foreground">
-                可执行 <span className="text-foreground">{summary.nExec}</span>
-              </span>
+              {execSummary.n > execSummary.nExec ? (
+                <span className="text-amber-600">
+                  {execSummary.n - execSummary.nExec} 笔重叠不计
+                </span>
+              ) : null}
               <span className="text-muted-foreground">
                 胜率{" "}
                 <span className="text-foreground">
-                  {summary.win == null ? "--" : `${Math.round(summary.win * 100)}%`}
+                  {execSummary.win == null ? "--" : `${Math.round(execSummary.win * 100)}%`}
                 </span>
               </span>
               <span className="text-muted-foreground">
                 均{" "}
-                <span className={cn(summary.avg != null && tone(summary.avg))}>
-                  {summary.avg == null ? "--" : formatPct(summary.avg)}
+                <span className={cn(execSummary.avg != null && tone(execSummary.avg))}>
+                  {execSummary.avg == null ? "--" : formatPct(execSummary.avg)}
                 </span>
               </span>
               <span className="text-muted-foreground">
                 合计{" "}
-                <span className={tone(summary.sum)}>{formatPct(summary.sum)}</span>
+                <span className={tone(execSummary.sum)}>{formatPct(execSummary.sum)}</span>
               </span>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-3 py-1.5 text-[11px] text-muted-foreground">
             <span>
-              全量 {totalSummary.n} 笔 · 成交 {takenCount} 笔 · 参考{" "}
-              {totalSummary.n - takenCount} 笔
+              全量 {trades.length} 笔 · 成交 {modeCounts.taken} · 共用{" "}
+              {modeCounts.shared} · 未启用 {modeCounts.off} · 当前筛选 {visible.length}
             </span>
-            {summary.nExec < summary.n ? (
+            {sharedSummary.n > 0 ? (
               <span className="text-amber-600">
-                {summary.n - summary.nExec} 笔同票持仓重叠,保留展示但不计入胜率/均值
+                共用 {sharedSummary.n} 笔 均{" "}
+                {sharedSummary.avg == null ? "--" : formatPct(sharedSummary.avg)}
+                (收益归执行口诀,不计入本口诀)
               </span>
             ) : null}
-            <span>「成交」= 当月动态组启用的口诀;「参考」= 当月未启用,仅供研究</span>
+            <span>
+              「成交」=本口诀执行;「共用」=同票命中多条口诀按纪律走了别条(收益归执行口诀,
+              非本口诀独立可买);「未启用」=当月动态组未启用本口诀所在组
+            </span>
             {data.built_at ? (
               <span className="ml-auto font-mono">物化 {data.built_at.slice(0, 10)}</span>
             ) : null}
@@ -269,7 +316,11 @@ export function HprKoujueTradesPanel({
                 </thead>
                 <tbody className="divide-y">
                   {visible.map((t, i) => (
-                    <KoujueTradeRow key={`${t.d}-${t.code}-${t.p}-${t.s}-${i}`} trade={t} />
+                    <KoujueTradeRow
+                      key={`${t.d}-${t.code}-${t.p}-${t.s}-${i}`}
+                      trade={t}
+                      alwaysOn={alwaysOn}
+                    />
                   ))}
                 </tbody>
               </table>
@@ -281,8 +332,15 @@ export function HprKoujueTradesPanel({
   );
 }
 
-function KoujueTradeRow({ trade: t }: { trade: HprKoujueTrade }) {
+function KoujueTradeRow({
+  trade: t,
+  alwaysOn,
+}: {
+  trade: HprKoujueTrade;
+  alwaysOn?: string[];
+}) {
   const stateLabel = DYN_STATE_LABELS[t.st] ?? t.st;
+  const mode = koujueTradeMode(t, alwaysOn);
   return (
     <tr className={cn("align-top", t.ov && "opacity-60")}>
       <td className="whitespace-nowrap px-2 py-2 font-mono text-xs tabular-nums text-muted-foreground">
@@ -344,13 +402,17 @@ function KoujueTradeRow({ trade: t }: { trade: HprKoujueTrade }) {
       </td>
       <td className="whitespace-nowrap px-2 py-2 text-xs">
         <div className="flex flex-wrap items-center gap-1">
-          {t.tk ? (
+          {mode === "taken" ? (
             <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600">
               成交
             </span>
+          ) : mode === "shared" ? (
+            <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+              共用·走{t.tp}
+            </span>
           ) : (
             <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              参考
+              未启用
             </span>
           )}
           {t.ov ? (
@@ -361,7 +423,7 @@ function KoujueTradeRow({ trade: t }: { trade: HprKoujueTrade }) {
         </div>
         <div className="mt-0.5 text-[10px] text-muted-foreground">
           {stateLabel}
-          {!t.tk && t.tp ? ` · 当月走${t.tp}` : ""}
+          {mode === "off" && t.tp ? ` · 当月走${t.tp}` : ""}
         </div>
       </td>
     </tr>

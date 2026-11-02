@@ -371,7 +371,9 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             rec.get("b3_open"), auction_pct=buy_open, b1_turn=rec.get("b1_turn"),
             b2_turn=rec.get("b2_turn"), b3_turn=rec.get("b3_turn"),
             foundation_chg=rec.get("foundation_chg"),
-            prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"))
+            prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"),
+            b1_type=rec.get("b1_type"), b2_type=rec.get("b2_type"),
+            b3_type=rec.get("b3_type"))
         avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
                                       rec.get("b2_open"), rec.get("pre3_pct"))
         sealed = bool(cols["is_lim"][i])

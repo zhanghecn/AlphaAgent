@@ -125,7 +125,9 @@ def _point_after_auction(
             b2_turn=entry.get("b2_turn"), b3_turn=entry.get("b3_turn"),
             foundation_chg=entry.get("foundation_chg"),
             prev_wave60=entry.get("prev_wave60"),
-            dist_h60=entry.get("dist_h60"))
+            dist_h60=entry.get("dist_h60"),
+            b1_type=entry.get("b1_type"), b2_type=entry.get("b2_type"),
+            b3_type=entry.get("b3_type"))
     real_point = str(real_weak["no"]) if real_weak else None
     if real_point is None:
         # 弱市窗不含今开(如 both 双开落在强市窗)→ 强市复核兜底

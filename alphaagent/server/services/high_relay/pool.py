@@ -251,6 +251,12 @@ def _blocked_by_b1_f_turn_ratio(scheme: dict, ratio) -> bool:
     return band is not None and ratio is not None and band[0] <= ratio < band[1]
 
 
+def _blocked_by_board_type(scheme: dict, key: str, board_type) -> bool:
+    """弱市板型质量腿(v7.24):指定板是实体/一字(没洗过)就不接。"""
+    blocked = scheme.get(key)
+    return blocked is not None and board_type is not None and board_type in blocked
+
+
 def tag_scheme(group4: str, b1_open, b2_open, b3_open,
                auction_pct=None, b2_turn=None, b3_turn=None,
                foundation_chg=None, pre10_pct=None,
@@ -319,6 +325,9 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
         ma10min = s.get("dist_ma10_min")
         if ma10min is not None and (dist_ma10 is None or dist_ma10 < ma10min):
             continue  # 地基破十日线=阴跌里挣扎,弱势一字诱多(v7.19 A2)
+        ma10max = s.get("dist_ma10_max")
+        if ma10max is not None and (dist_ma10 is None or dist_ma10 >= ma10max):
+            continue  # 地基已站上十日线=涨过一波,弱开是派发(v7.24 C1)
         if _blocked_by_b1_f_turn_ratio(s, b1_f_turn_ratio):
             continue  # 一板换手/地基日换手 1.45~1.75=中等扩张(v7.23 A2)
         fpok = s.get("foundation_pose_ok")
@@ -342,7 +351,8 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
 
 def tag_weak(group4: str, b1_open, b2_open, b3_open,
              auction_pct=None, b1_turn=None, b2_turn=None, b3_turn=None,
-             foundation_chg=None, prev_wave60=None, dist_h60=None):
+             foundation_chg=None, prev_wave60=None, dist_h60=None,
+             b1_type=None, b2_type=None, b3_type=None):
     """弱市口诀组打标(v7.0起,以 contracts.WEAK_SCHEMES 为唯一判定定义)。
 
     判定独立于 tag_scheme(强市组零回归):K系含缩量承接(三换<二换)/前波=0/
@@ -385,6 +395,10 @@ def tag_weak(group4: str, b1_open, b2_open, b3_open,
         dmin = s.get("dist_h60_min")
         if dmin is not None and (dist_h60 is None or dist_h60 < dmin):
             continue
+        if (_blocked_by_board_type(s, "block_b1_type", b1_type)
+                or _blocked_by_board_type(s, "block_b2_type", b2_type)
+                or _blocked_by_board_type(s, "block_b3_type", b3_type)):
+            continue  # 弱市板型质量腿(v7.24):实体/一字没洗过,不接
         if s.get("vol3_lt_vol2") and (b3_turn is None or b2_turn is None
                                       or b3_turn >= b2_turn):
             continue
@@ -395,7 +409,8 @@ def tag_weak(group4: str, b1_open, b2_open, b3_open,
 def match_weak_schemes(group4: str, b1_open, b2_open, b3_open,
                        b1_turn=None, b2_turn=None, b3_turn=None,
                        foundation_chg=None, prev_wave60=None,
-                       dist_h60=None) -> list[dict]:
+                       dist_h60=None, b1_type=None, b2_type=None,
+                       b3_type=None) -> list[dict]:
     """弱市组链级候选定位(v7.1,不含今开窗;镜像 tag_weak 的链段判定,
     改任何一处另一处必须同步)。返回链条件全过的 WEAK_SCHEMES 条目按优先级序——
     池打标/竞价门用(窗=全部候选条目 today 并集,竞价定型后归属=tag_weak 首窗命中者,
@@ -430,6 +445,10 @@ def match_weak_schemes(group4: str, b1_open, b2_open, b3_open,
         dmin = s.get("dist_h60_min")
         if dmin is not None and (dist_h60 is None or dist_h60 < dmin):
             continue
+        if (_blocked_by_board_type(s, "block_b1_type", b1_type)
+                or _blocked_by_board_type(s, "block_b2_type", b2_type)
+                or _blocked_by_board_type(s, "block_b3_type", b3_type)):
+            continue  # 弱市板型质量腿(v7.24;镜像 tag_weak)
         if s.get("vol3_lt_vol2") and (b3_turn is None or b2_turn is None
                                       or b3_turn >= b2_turn):
             continue
@@ -505,6 +524,9 @@ def match_schemes(group4: str, b1_open, b2_open, b3_open,
         ma10min = s.get("dist_ma10_min")
         if ma10min is not None and (dist_ma10 is None or dist_ma10 < ma10min):
             continue  # 地基破十日线诱多(v7.19 A2;镜像 tag_point)
+        ma10max = s.get("dist_ma10_max")
+        if ma10max is not None and (dist_ma10 is None or dist_ma10 >= ma10max):
+            continue  # 地基已站上十日线=派发(v7.24 C1;镜像 tag_point)
         if _blocked_by_b1_f_turn_ratio(s, b1_f_turn_ratio):
             continue  # 一板换手/地基日换手带(v7.23 A2;镜像 tag_point)
         fpok = s.get("foundation_pose_ok")
@@ -703,7 +725,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             group4, rec.get("b1_open"), rec.get("b2_open"), rec.get("b3_open"),
             b1_turn=rec.get("b1_turn"), b2_turn=rec.get("b2_turn"),
             b3_turn=rec.get("b3_turn"), foundation_chg=rec.get("foundation_chg"),
-            prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"))
+            prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"),
+            b1_type=rec.get("b1_type"), b2_type=rec.get("b2_type"),
+            b3_type=rec.get("b3_type"))
         weak_point = str(weak_branches[0]["no"]) if weak_branches else "—"
         weak_wins: list[tuple[float, float]] = []
         for s in weak_branches:

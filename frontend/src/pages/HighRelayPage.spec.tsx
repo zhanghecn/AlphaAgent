@@ -10,6 +10,7 @@ import type { HprKoujueTrade, HprLivePayload, HprQuizQuestion } from "@/api/high
 import {
   filterKoujueTrades,
   HprKoujueTradesPanel,
+  koujueTradeMode,
   summarizeKoujueTrades,
 } from "@/features/highRelay/HprKoujueTradesPanel";
 import { HprLedgerView } from "@/features/highRelay/HprLedgerView";
@@ -957,47 +958,85 @@ const KOUJUE_TRADES: HprKoujueTrade[] = [
     b1o: 2, b2o: 5, b3o: null, b1t: 4, b2t: 6, b3t: null,
     fc: 1.2, fp: "站线上", dh: -12.3, ch: "实体→实体",
   },
+  {
+    // 共用票:强市月 C2 与通用组 K5 双命中,按纪律走 K5(C2 视角非成交也非未启用)
+    d: "2026-07-30", m: "2026-07", code: "002460.SZSE", name: "江钨装备",
+    g: "strong", p: "C2", s: "四板换手", g4: "三接四阴", n: 3,
+    ep: 15, ap: 7.0, sealed: true, hold: 3,
+    xd: "2026-08-03", xp: 20.5, xr: "break_close", r: 36.7, ov: false,
+    st: "strong", tk: false, tp: "K5",
+    b1o: 2, b2o: 1, b3o: 10.0, b1t: 3, b2t: 2, b3t: 4,
+    fc: 0.5, fp: "骑线", dh: -9, ch: "实体→下影→一字",
+  },
 ];
 
 describe("HprKoujueTradesPanel 口诀历史票", () => {
-  it("筛选与统计:成交/参考分开,持仓重叠不计入均值", () => {
+  it("三态分类:成交/共用/未启用,共用=有资格但同票走了别条口诀", () => {
+    const modes = KOUJUE_TRADES.map((t) => koujueTradeMode(t, ["K5", "B1·转温"]));
+    expect(modes).toEqual(["taken", "off", "shared"]);
+    // 常开口诀任何月都有资格:K5 弱市月被弱市组优先也是共用而非未启用
+    const k5LetGo = {
+      ...KOUJUE_TRADES[0],
+      p: "K5" as const, g: "weak" as const, tk: false, tp: "K2" as const,
+      st: "weak" as const,
+    };
+    expect(koujueTradeMode(k5LetGo, ["K5"])).toBe("shared");
     expect(
-      filterKoujueTrades(KOUJUE_TRADES, { year: "all", scope: "taken", keyword: "" }),
+      koujueTradeMode({ ...KOUJUE_TRADES[1], tk: false, tp: null }, []),
+    ).toBe("off");
+  });
+
+  it("筛选与统计:三态筛选,持仓重叠不计入均值", () => {
+    expect(
+      filterKoujueTrades(KOUJUE_TRADES, {
+        year: "all", scope: "taken", keyword: "", alwaysOn: ["K5", "B1·转温"],
+      }),
     ).toHaveLength(1);
     expect(
-      filterKoujueTrades(KOUJUE_TRADES, { year: "2023", scope: "all", keyword: "弱市" }),
+      filterKoujueTrades(KOUJUE_TRADES, {
+        year: "all", scope: "shared", keyword: "", alwaysOn: ["K5", "B1·转温"],
+      }),
+    ).toHaveLength(1);
+    expect(
+      filterKoujueTrades(KOUJUE_TRADES, {
+        year: "2023", scope: "all", keyword: "弱市", alwaysOn: [],
+      }),
     ).toHaveLength(1);
 
     const summary = summarizeKoujueTrades(KOUJUE_TRADES);
-    expect(summary.n).toBe(2);
-    expect(summary.nExec).toBe(1);
-    expect(summary.avg).toBe(-5);
-    expect(summary.win).toBe(0);
+    expect(summary.n).toBe(3);
+    expect(summary.nExec).toBe(2);
+    expect(summary.avg).toBeCloseTo(15.85);
+    expect(summary.win).toBe(0.5);
   });
 
   it("渲染年份、状态徽章、条件明细与股票链接", () => {
     const html = renderToStaticMarkup(
       withProviders(
         <HprKoujueTradesPanel
-          point="B1"
-          sub="转温"
-          label="B1 强开系·转温"
-          data={{ status: "ok", rules_version: "hpr-v7.23", trades: KOUJUE_TRADES }}
+          point="C2"
+          sub="四板换手"
+          label="C2 四板换手"
+          data={{ status: "ok", rules_version: "hpr-v7.25", trades: KOUJUE_TRADES }}
           isLoading={false}
           isError={false}
           onRetry={() => undefined}
           onClose={() => undefined}
+          alwaysOn={["K5", "B1·转温"]}
         />,
       ),
     );
-    expect(html).toContain("B1 强开系·转温");
+    expect(html).toContain("C2 四板换手");
     expect(html).toContain("回测事件重放动态计算");
     expect(html).toContain("2024 年 · 1笔");
     expect(html).toContain("成交");
-    expect(html).toContain("参考");
+    expect(html).toContain("共用·走K5");
+    expect(html).toContain("未启用");
     expect(html).toContain("持仓重叠");
+    expect(html).toContain("共用 1 笔");
+    expect(html).toContain("收益归执行口诀");
     expect(html).toContain("强中");
-    expect(html).toContain("转温");
+    expect(html).toContain("江钨装备");
     expect(html).toContain("下影→实体");
     expect(html).toContain("/stocks/002.SZSE");
     expect(html).toContain("炸板次日卖");

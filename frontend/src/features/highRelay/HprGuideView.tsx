@@ -258,6 +258,7 @@ export function HprGuideView() {
             isError={koujueTrades.isError}
             onRetry={() => void koujueTrades.refetch()}
             onClose={() => setSelected(null)}
+            alwaysOn={query.data?.dyn_always_on ?? []}
           />
         ) : null}
         <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
