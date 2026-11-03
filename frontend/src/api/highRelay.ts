@@ -514,6 +514,7 @@ export interface HprQuizDisplay {
   foundation_pose: string | null; // 地基K线姿态(v6.10弱票腿B2/B3判定:站线上/骑线/贴线/掉线下)
   foundation_ma20: number | null; // 地基日收盘距20日线%(v6.10起仅参考)
   anchor_pos: number | null;      // 地基日收盘距前期涨停高点%(v6.8 C2锚点腿:贴着-2~0/超5%不碰)
+  anchor_pose?: string | null;    // 锚腿姿态(v7.29 判定同源):贴板/超板/离板/无前板(无前板=这条免看)
   auction_pct: number;          // 今开%(决策日竞价)
   prev_close: number;
   limit_price: number | null;   // 涨停价(打板买入价)

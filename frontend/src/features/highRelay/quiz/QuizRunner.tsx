@@ -385,7 +385,17 @@ export function QuizRunner({
             />
           ) : null}
           <InfoCell label="地基姿态" value={d.foundation_pose ?? "—"} fail={failSet.has("地基姿态")} />
-          <InfoCell label="距前涨停高" value={fmtSigned(d.anchor_pos ?? null)} fail={failSet.has("距前涨停高")} />
+          <InfoCell
+            label="距前涨停高"
+            value={
+              d.anchor_pose === "无前板"
+                ? "无前板"
+                : d.anchor_pose
+                  ? `${fmtSigned(d.anchor_pos ?? null)}·${d.anchor_pose}`
+                  : fmtSigned(d.anchor_pos ?? null)
+            }
+            fail={failSet.has("距前涨停高")}
+          />
           <InfoCell label="一板开" value={fmtSigned(d.b1_open)} fail={failSet.has("一板开")} />
           <InfoCell
             label="二板开"

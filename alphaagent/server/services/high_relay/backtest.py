@@ -143,6 +143,9 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
                          | (done_all["弱口诀"] != "—")].copy()
     hit_frame["同票持仓重叠"] = _mark_overlap_any(hit_frame)
     payload["koujue_trades"] = _koujue_trades(hit_frame, month_states)
+    # v7.28 展示成绩单一来源:规则页/题库直接读这份(成交口径,点+分支),
+    # 不再手写 POINT_STATS/速查表 stat——口径一处算,多处读。
+    payload["stat_rows"] = _stat_rows(payload["koujue_trades"])
 
     def _dyn_take(row) -> str:
         """按当月组与通用整点/分支决定是否出手;切换判定轻表不受常驻影响。"""
@@ -552,6 +555,30 @@ def _mark_overlap(done: pd.DataFrame) -> None:
             done.at[idx, "同票持仓重叠"] = True  # 持仓中,未加仓
         elif exit_day is not None and exit_day == exit_day:
             last_exit[code] = pd.Timestamp(str(exit_day))
+
+
+def _stat_rows(trades: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    """本口诀成交成绩(点+分支两级,全时段),供规则页/题库原样展示。
+
+    tk=true 才计;同票持仓重叠照算(与 dyn_sim/合计卡同口径,不再另开一套)。
+    """
+    buckets: dict[str, list[float]] = {}
+    for t in trades:
+        r = t.get("r")
+        if not t.get("tk") or r is None:
+            continue
+        point = str(t["p"])
+        sub = str(t.get("s") or "")
+        keys = [point, f"{point}|{sub}"] if sub else [point]
+        for key in keys:
+            buckets.setdefault(key, []).append(float(r))
+    out: dict[str, dict[str, object]] = {}
+    for key, vals in buckets.items():
+        n = len(vals)
+        out[key] = {"n": n,
+                    "win": round(sum(1 for v in vals if v > 0) / n, 4),
+                    "mean": round(sum(vals) / n, 4)}
+    return out
 
 
 def _stats(e: pd.DataFrame) -> dict[str, object]:

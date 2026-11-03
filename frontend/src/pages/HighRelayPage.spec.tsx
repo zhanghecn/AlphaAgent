@@ -598,7 +598,7 @@ const QUIZ_WEAK_HIT_Q: HprQuizQuestion = {
     scheme_row: {
       no: "K5", name: "K5 二板贴零强开",
       yang: "阴·打4板", b1: "不看", b2: "平开0~3", b3: "不看",
-      today: "强开6~9.5", ground: "前波=0(60日没炒过)", stat: "13笔·胜85%·均+5.2",
+      today: "强开6~9.5", ground: "前波=0(60日没炒过)", stat: "25笔·胜84%·均+7.8",
     },
     matched_line: "阴地基 × 二板开+2.0 贴零 × 今开+7.2 强开 × 前波=0",
   },
@@ -986,7 +986,7 @@ describe("HprKoujueTradesPanel 口诀历史票", () => {
     ).toBe("off");
   });
 
-  it("筛选与统计:三态筛选,持仓重叠不计入均值", () => {
+  it("筛选与统计:三态筛选,持仓重叠按成交口径计入均值", () => {
     expect(
       filterKoujueTrades(KOUJUE_TRADES, {
         year: "all", scope: "taken", keyword: "", alwaysOn: ["K5", "B1·转温"],
@@ -1005,9 +1005,8 @@ describe("HprKoujueTradesPanel 口诀历史票", () => {
 
     const summary = summarizeKoujueTrades(KOUJUE_TRADES);
     expect(summary.n).toBe(3);
-    expect(summary.nExec).toBe(2);
-    expect(summary.avg).toBeCloseTo(15.85);
-    expect(summary.win).toBe(0.5);
+    expect(summary.avg).toBeCloseTo(13.9);
+    expect(summary.win).toBeCloseTo(2 / 3);
   });
 
   it("渲染年份、状态徽章、条件明细与股票链接", () => {

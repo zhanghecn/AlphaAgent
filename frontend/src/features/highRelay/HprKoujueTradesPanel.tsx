@@ -43,21 +43,19 @@ export function koujueTradeMode(
 
 export interface KoujueTradeSummary {
   n: number;
-  nExec: number;
   win: number | null;
   avg: number | null;
   sum: number;
 }
 
-/** 过滤后的逐笔统计:同票持仓重叠行保留展示,但不计入胜率/均值/合计。 */
+/** 过滤后的逐笔统计:成交口径,与规则页/物化 stat_rows 同源(重叠也计)。 */
 export function summarizeKoujueTrades(trades: HprKoujueTrade[]): KoujueTradeSummary {
   const rets = trades
-    .filter((t) => t.r != null && !t.ov)
+    .filter((t) => t.r != null)
     .map((t) => t.r as number);
   const sum = rets.reduce((acc, v) => acc + v, 0);
   return {
     n: trades.length,
-    nExec: rets.length,
     win: rets.length ? rets.filter((v) => v > 0).length / rets.length : null,
     avg: rets.length ? sum / rets.length : null,
     sum,
@@ -245,11 +243,6 @@ export function HprKoujueTradesPanel({
               <span className="text-muted-foreground">
                 成交 <span className="text-foreground">{execSummary.n}</span> 笔
               </span>
-              {execSummary.n > execSummary.nExec ? (
-                <span className="text-amber-600">
-                  {execSummary.n - execSummary.nExec} 笔重叠不计
-                </span>
-              ) : null}
               <span className="text-muted-foreground">
                 胜率{" "}
                 <span className="text-foreground">

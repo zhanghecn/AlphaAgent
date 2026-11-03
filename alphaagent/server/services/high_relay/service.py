@@ -343,7 +343,8 @@ def _execute_rebuild(run_id: int) -> dict[str, object]:
         repository.update_rebuild_run(run_id, status="running", stage="题库构建")
         # v7.3 题库注入同一份物化月状态(单一事实源:回测/交割单/koujue 共用)
         questions = quiz_mod.build_questions(
-            E, bars, payload.get("dyn_month_states") or None)
+            E, bars, payload.get("dyn_month_states") or None,
+            payload.get("stat_rows") or None)
     except Exception as exc:  # noqa: BLE001
         logger.warning("hpr backtest rebuild failed: %s", exc, exc_info=True)
         repository.update_rebuild_run(
@@ -701,14 +702,30 @@ def get_koujue_trades(point: str, sub: str | None = None) -> dict[str, object]:
 
 
 def get_rules() -> dict[str, object]:
-    # 姿态案例K线窗随物化 payload 出(v6.10 规则页四宫格图解;旧物化无此键→空表)
+    # 姿态案例K线窗/成交成绩随物化 payload 出(v6.10 图解;v7.28 成绩单一来源);
+    # 旧物化无 stat_rows 时回退 contracts 里的常量,不阻断规则页。
     pose_cases: list[dict[str, object]] = []
+    stat_rows: dict[str, dict[str, object]] = {}
     try:
         row = repository.load_backtest_report(contracts.HPR_RULES_VERSION)
         if row:
             pose_cases = list(row.get("pose_cases") or [])
+            stat_rows = dict(row.get("stat_rows") or {})
     except Exception:
         pose_cases = []
+        stat_rows = {}
+
+    def with_stat(r: dict[str, object]) -> dict[str, object]:
+        """速查表成绩=物化 stat_rows(成交口径·全时段),不再手写。"""
+        key = str(r.get("no")) + (f"|{r['sub']}" if r.get("sub") else "")
+        text = contracts.stat_text(stat_rows.get(key))
+        return {**r, "stat": text} if text else r
+
+    point_stats = dict(contracts.POINT_STATS)
+    for point in point_stats:
+        text = contracts.stat_text(stat_rows.get(point))
+        if text:
+            point_stats[point] = text
     return {
         "rules_version": contracts.HPR_RULES_VERSION,
         "group4_labels": contracts.GROUP4_LABELS,
@@ -717,15 +734,15 @@ def get_rules() -> dict[str, object]:
         "point_desc": contracts.POINT_DESC,
         "point_names": {s["no"]: s["name"] for s in contracts.SCHEMES},
         "point_psycho": contracts.POINT_PSYCHO,
-        "point_stats": contracts.POINT_STATS,     # 成绩速览(16笔·胜69%·均+12.0)
+        "point_stats": point_stats,              # 成绩速览(成交口径·全时段,物化生成)
         "point_boards": contracts.POINT_BOARDS,   # 板位归属(打3板/打4板)
         "rules": contracts.RULES,
-        "cheat_rows": [r for r in contracts.CHEAT_ROWS
+        "cheat_rows": [with_stat(r) for r in contracts.CHEAT_ROWS
                        if not contracts.is_common_scheme(r.get("no"), r.get("sub"))],
         # 弱市组速查表排除通用组行,通用组单列(v7.17第三组;答题讲解仍读WEAK_CHEAT_ROWS全表不受分区影响)
-        "weak_cheat_rows": [r for r in contracts.WEAK_CHEAT_ROWS
+        "weak_cheat_rows": [with_stat(r) for r in contracts.WEAK_CHEAT_ROWS
                             if str(r.get("no")) not in contracts.COMMON_POINT_KEYS],
-        "common_cheat_rows": [r for r in contracts.WEAK_CHEAT_ROWS + contracts.CHEAT_ROWS
+        "common_cheat_rows": [with_stat(r) for r in contracts.WEAK_CHEAT_ROWS + contracts.CHEAT_ROWS
                               if contracts.is_common_scheme(r.get("no"), r.get("sub"))],
         "weak_point_boards": contracts.WEAK_POINT_BOARDS,
         "dyn_group_window": contracts.DYN_GROUP_WINDOW,
