@@ -621,7 +621,7 @@ _RECOMMENDED_PRIORITY: tuple[str, ...] = (
 # jobs first to satisfy data dependencies). Replaces the per-job crons that
 # used to live on DEFAULT_JOBS. See
 # requirements/alphaagent_unified_incremental_schedule_plan.md.
-CURRENT_EOD_SCHEDULE_ID = "eod_1900"
+CURRENT_EOD_SCHEDULE_ID = "eod_1800"
 # 盘后主链(2026-09-30 重排):快段=日线+四池定版约15分钟出次日池,慢段后置;
 # 线上实测全链约40分钟。窗口阈值保留,防恢复逻辑误杀正常推进的主链。
 PRIMARY_EOD_BATCH_THRESHOLD_SECONDS = 5 * 60 * 60
@@ -629,6 +629,9 @@ PRIMARY_EOD_RECOVERY_CUTOFF_HOUR = 21
 LEGACY_DEFAULT_BATCH_SCHEDULE_IDS = {
     "eod_finalize_2130",  # 2026-09-30 删:无条件全跑20job的补偿批(主链失败由数据健康页+手动重跑兜底)
     "eod_18h",
+    # 2026-11-03 盘后批 19:00→18:00 提前(主人拍板:收盘后更早出次日池,日线源17点前后全齐,
+    # 风险=个别票晚到漏进池,由数据健康页+手动重跑兜底);id 随时刻更名,旧行 seed 时清理。
+    "eod_1900",
     "tail_quant_1430",
     "limit_up_live_scan",
     "limit_up_concept_scan",
@@ -730,8 +733,8 @@ DEFAULT_BATCH_SCHEDULES: list[dict[str, Any]] = [
     },
     {
         "id": CURRENT_EOD_SCHEDULE_ID,
-        "name": "盘后统一更新（19:00）",
-        "cron": "0 19 * * 1-5",
+        "name": "盘后统一更新（18:00）",
+        "cron": "0 18 * * 1-5",
         "action": "sync",
         "enabled": True,
         "concurrency": 1,

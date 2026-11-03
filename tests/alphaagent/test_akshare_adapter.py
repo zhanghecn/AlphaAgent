@@ -2029,7 +2029,7 @@ def _kline_row(date_str: str, close: float = 1.0) -> dict:
 def test_daily_bars_incremental_prefers_tencent_when_covered(monkeypatch) -> None:
     """日线增量同步(带 start_date)在 tencent 覆盖范围内时应优先 tencent_full,避免落到慢源 akshare。
 
-    回归:盘后 eod_1900 的 sync_stock_daily_bars 走增量(start_date=上一交易日+1),
+    回归:盘后 eod_1800 的 sync_stock_daily_bars 走增量(start_date=上一交易日+1),
     此前因 tencent 被硬性排除而全部 fallback 到 akshare.stock_zh_a_hist(单股 ~3s),
     导致 4057 只股票要 ~1 小时,候选生成被拖到 21:00 之后。
     """

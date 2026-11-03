@@ -33,7 +33,7 @@ def test_primary_eod_batch_watchdog_allows_extended_runtime() -> None:
     batch = {
         "id": "primary-eod",
         "status": "running",
-        "schedule_id": "eod_1900",
+        "schedule_id": "eod_1800",
         "started_at": now - timedelta(hours=3),
     }
 
@@ -177,7 +177,7 @@ def test_default_batch_schedules_defined():
         "auction_0926",
         "intraday_market_snapshot",
         "intraday_hourly",
-        "eod_1900",
+        "eod_1800",
         "short_term_live_scan",
         "hpr_backtest_2305",
         "fbb_backtest_2320",
@@ -624,8 +624,8 @@ def test_seed_default_registry_deletes_disabled_non_default_schedules(monkeypatc
 
 def test_seed_default_registry_preserves_default_schedule_enabled_setting(monkeypatch):
     rows: dict[str, dict[str, Any]] = {
-        "eod_1900": {
-            "id": "eod_1900",
+        "eod_1800": {
+            "id": "eod_1800",
             "enabled": False,
             "last_status": None,
         }
@@ -669,7 +669,7 @@ def test_seed_default_registry_preserves_default_schedule_enabled_setting(monkey
 
     svc.seed_default_registry()
 
-    assert rows["eod_1900"]["enabled"] is False
+    assert rows["eod_1800"]["enabled"] is False
 
 
 def test_seed_default_registry_deletes_legacy_schedules(monkeypatch):
@@ -737,7 +737,7 @@ def test_seed_default_registry_deletes_legacy_schedules(monkeypatch):
     assert "eod_18h" not in rows
     assert "tail_quant_1430" not in rows
     assert "custom_quant" not in rows
-    assert "eod_1900" in rows
+    assert "eod_1800" in rows
 
 
 def test_default_jobs_have_no_cron():
@@ -762,7 +762,7 @@ def test_intraday_schedule_contains_intraday_jobs():
 def test_heavy_default_schedules_use_bounded_concurrency():
     schedules = {row["id"]: row for row in svc.DEFAULT_BATCH_SCHEDULES}
 
-    assert schedules["eod_1900"]["concurrency"] == 1
+    assert schedules["eod_1800"]["concurrency"] == 1
 
 
 
@@ -776,9 +776,9 @@ def test_stock_sector_reverse_index_is_frozen_daily():
 
 
 def test_eod_schedule_runs_unified_post_close_chain():
-    eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_1900")
+    eod = next(s for s in svc.DEFAULT_BATCH_SCHEDULES if s["id"] == "eod_1800")
     assert eod["action"] == "sync"
-    assert eod["cron"] == "0 19 * * 1-5"
+    assert eod["cron"] == "0 18 * * 1-5"
     assert "sync_stock_daily_bars" in eod["job_ids"]
     assert "sync_index_daily_bars" in eod["job_ids"]
     assert "sync_mainline_sentiment_history" in eod["job_ids"]
@@ -806,7 +806,7 @@ def test_mainline_sentiment_history_job_runs_after_daily_bar_inputs():
     assert job.target_table == "mainline_sentiment_history"
     assert svc.JOB_RUNNERS[job.id] == "_run_sync_mainline_sentiment_history"
     assert svc.JOB_CADENCES[job.id].freshness_table == "mainline_sentiment_history"
-    for schedule_id in ("eod_1900",):
+    for schedule_id in ("eod_1800",):
         schedule = next(
             item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
         )
@@ -829,7 +829,7 @@ def test_rebuild_stock_limit_up_daily_runs_after_daily_bar_sync():
     assert svc._RECOMMENDED_PRIORITY.index("sync_stock_daily_bars") < (
         svc._RECOMMENDED_PRIORITY.index(job.id)
     )
-    for schedule_id in ("eod_1900",):
+    for schedule_id in ("eod_1800",):
         schedule = next(
             item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
         )
@@ -851,7 +851,7 @@ def test_sync_limit_up_pool_snapshots_registered_and_scheduled():
     assert svc._RECOMMENDED_PRIORITY.index("rebuild_stock_limit_up_daily") < (
         svc._RECOMMENDED_PRIORITY.index(job.id)
     )
-    for schedule_id in ("eod_1900",):
+    for schedule_id in ("eod_1800",):
         schedule = next(
             item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == schedule_id
         )
@@ -892,7 +892,7 @@ def test_backfill_limit_up_pool_snapshots_is_manual_only():
 
 def test_eod_schedule_passes_incremental_concept_index_params() -> None:
     schedule = next(
-        item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == "eod_1900"
+        item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == "eod_1800"
     )
 
     params = svc._schedule_batch_params(
@@ -1080,7 +1080,7 @@ def test_mark_interrupted_runs_queues_running_schedules(monkeypatch):
             return self
 
         def all(self):
-            return ["eod_1900"]
+            return ["eod_1800"]
 
     class FakeSession:
         def __init__(self):
@@ -1103,15 +1103,15 @@ def test_mark_interrupted_runs_queues_running_schedules(monkeypatch):
     monkeypatch.setattr(svc, "session_scope", fake_session_scope)
     monkeypatch.setattr(svc, "_queue_interrupted_schedule_recovery", lambda ids: queued.extend(ids), raising=False)
 
-    assert svc.mark_interrupted_runs() == ["eod_1900"]
-    assert queued == ["eod_1900"]
+    assert svc.mark_interrupted_runs() == ["eod_1800"]
+    assert queued == ["eod_1800"]
 
 
 def test_recover_interrupted_schedules_runs_only_still_interrupted(monkeypatch):
     rows = {
-        "eod_1900": {
-            "id": "eod_1900",
-            "cron": "0 19 * * 1-5",
+        "eod_1800": {
+            "id": "eod_1800",
+            "cron": "0 18 * * 1-5",
             "enabled": True,
             "action": "sync",
             "job_ids": ["sync_stock_daily_bars"],
@@ -1135,9 +1135,9 @@ def test_recover_interrupted_schedules_runs_only_still_interrupted(monkeypatch):
         lambda: datetime.fromisoformat("2026-07-20T19:05:00+08:00"),
     )
 
-    svc._recover_interrupted_schedules(["eod_1900", "eod_finalize_2130"])
+    svc._recover_interrupted_schedules(["eod_1800", "eod_finalize_2130"])
 
-    assert recovered == [("eod_1900", "recovery")]
+    assert recovered == [("eod_1800", "recovery")]
 
 
 def test_interrupted_schedule_resumes_only_pending_jobs(monkeypatch):
@@ -1169,8 +1169,8 @@ def test_interrupted_schedule_resumes_only_pending_jobs(monkeypatch):
 
 def test_recover_interrupted_eod_waits_for_its_scheduled_time(monkeypatch):
     row = {
-        "id": "eod_1900",
-        "cron": "0 19 * * 1-5",
+        "id": "eod_1800",
+        "cron": "0 18 * * 1-5",
         "enabled": True,
         "action": "sync",
         "job_ids": ["sync_stock_daily_bars"],
@@ -1195,13 +1195,13 @@ def test_recover_interrupted_eod_waits_for_its_scheduled_time(monkeypatch):
         lambda value: recovered.append(str(value["id"])),
     )
 
-    svc._recover_interrupted_schedules(["eod_1900"])
+    svc._recover_interrupted_schedules(["eod_1800"])
 
     assert recovered == []
 
 
 def test_primary_eod_recovery_defers_to_2130_retry_after_2100() -> None:
-    primary = {"id": "eod_1900", "cron": "0 19 * * 1-5"}
+    primary = {"id": "eod_1800", "cron": "0 18 * * 1-5"}
     retry = {"id": "eod_finalize_2130", "cron": "30 21 * * 1-5"}
 
     assert svc._interrupted_schedule_recovery_due(
@@ -1239,10 +1239,10 @@ def test_start_interrupted_schedule_recovery_drains_queue(monkeypatch):
     svc._interrupted_recovery_thread = None
     svc._INTERRUPTED_SCHEDULE_RECOVERY_IDS.clear()
 
-    svc._queue_interrupted_schedule_recovery(["eod_1900", "eod_finalize_2130"])
+    svc._queue_interrupted_schedule_recovery(["eod_1800", "eod_finalize_2130"])
     svc.start_interrupted_schedule_recovery(delay_seconds=0)
 
-    assert started == [(["eod_1900", "eod_finalize_2130"], 0)]
+    assert started == [(["eod_1800", "eod_finalize_2130"], 0)]
     assert not svc._INTERRUPTED_SCHEDULE_RECOVERY_IDS
     svc._interrupted_recovery_thread = None
 
@@ -1271,11 +1271,11 @@ def test_start_sync_batch_accepts_custom_job_ids(monkeypatch):
         job_ids=["sync_stock_list", "sync_stock_daily_bars"],
         concurrency=12,
         source="schedule",
-        schedule_id="eod_1900",
+        schedule_id="eod_1800",
     )
     assert captured["concurrency"] == 12
     assert captured["source"] == "schedule"
-    assert captured["schedule_id"] == "eod_1900"
+    assert captured["schedule_id"] == "eod_1800"
     assert captured["job_ids"] == ["sync_stock_list", "sync_stock_daily_bars"]
 
 
@@ -3685,7 +3685,7 @@ def test_scheduler_triggers_matching_batch_schedule(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_1900", "cron": "0 19 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_1800", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
     monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 19, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
 
@@ -3694,7 +3694,7 @@ def test_scheduler_triggers_matching_batch_schedule(monkeypatch):
     assert triggered, "expected the matching schedule to trigger a batch"
     assert triggered[0]["job_ids"] == ["sync_stock_list"]
     assert triggered[0]["source"] == "schedule"
-    assert triggered[0]["schedule_id"] == "eod_1900"
+    assert triggered[0]["schedule_id"] == "eod_1800"
 
 
 def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
@@ -3705,7 +3705,7 @@ def test_scheduler_skips_weekend_for_weekday_cron(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_1900", "cron": "0 19 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_1800", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
     monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 20, 19, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
 
@@ -3832,8 +3832,8 @@ def test_scheduler_catches_up_missed_default_schedule(monkeypatch):
         "_load_batch_schedules",
         lambda: [
             {
-                "id": "eod_1900",
-                "cron": "0 19 * * 1-5",
+                "id": "eod_1800",
+                "cron": "0 18 * * 1-5",
                 "enabled": True,
                 "action": "sync",
                 "job_ids": ["sync_stock_daily_bars"],
@@ -3847,7 +3847,7 @@ def test_scheduler_catches_up_missed_default_schedule(monkeypatch):
     svc._run_scheduled_jobs()
 
     assert triggered
-    assert triggered[0]["schedule_id"] == "eod_1900"
+    assert triggered[0]["schedule_id"] == "eod_1800"
 
 
 def test_scheduler_skips_non_matching_cron(monkeypatch):
@@ -3858,7 +3858,7 @@ def test_scheduler_skips_non_matching_cron(monkeypatch):
     monkeypatch.setattr(
         svc,
         "_load_batch_schedules",
-        lambda: [{"id": "eod_1900", "cron": "0 19 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
+        lambda: [{"id": "eod_1800", "cron": "0 18 * * 1-5", "enabled": True, "action": "sync", "job_ids": ["sync_stock_list"], "concurrency": 8, "last_started_at": None}],
     )
     # now is 14:00, does not match the 19:00 cron
     monkeypatch.setattr(svc, "_now_china", lambda: dt.datetime(2026, 6, 17, 14, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))))
@@ -3905,7 +3905,7 @@ def test_schedule_endpoints_crud(monkeypatch):
     from alphaagent.server.api import data_sync as data_sync_api
     from alphaagent.server.main import create_app
 
-    monkeypatch.setattr(data_sync_api.service, "list_schedules", lambda: [{"id": "eod_1900", "name": "盘后同步"}])
+    monkeypatch.setattr(data_sync_api.service, "list_schedules", lambda: [{"id": "eod_1800", "name": "盘后同步"}])
     monkeypatch.setattr(data_sync_api.service, "create_schedule", lambda payload: {"id": "new_1", **payload})
     monkeypatch.setattr(data_sync_api.service, "update_schedule", lambda sid, payload: {"id": sid, **payload})
     monkeypatch.setattr(data_sync_api.service, "delete_schedule", lambda sid: {"id": sid, "deleted": True})
@@ -3915,7 +3915,7 @@ def test_schedule_endpoints_crud(monkeypatch):
 
     resp = client.get("/api/data-sync/schedules")
     assert resp.status_code == 200
-    assert resp.json()["data"][0]["id"] == "eod_1900"
+    assert resp.json()["data"][0]["id"] == "eod_1800"
 
     resp = client.post(
         "/api/data-sync/schedules",
@@ -3931,8 +3931,8 @@ def test_schedule_endpoints_crud(monkeypatch):
     resp = client.delete("/api/data-sync/schedules/new_1")
     assert resp.json()["data"]["deleted"] is True
 
-    resp = client.post("/api/data-sync/schedules/eod_1900/run")
-    assert resp.json()["data"]["schedule_id"] == "eod_1900"
+    resp = client.post("/api/data-sync/schedules/eod_1800/run")
+    assert resp.json()["data"]["schedule_id"] == "eod_1800"
 
 
 def test_default_schedules_exclude_legacy_quant_actions():

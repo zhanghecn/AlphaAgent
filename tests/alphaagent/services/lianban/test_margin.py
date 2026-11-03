@@ -282,7 +282,7 @@ def test_margin_job_registered_in_data_sync():
     assert job.id in svc._RECOMMENDED_PRIORITY
     # 2026-09-30 手术后:财务/两融类移出 eod 主链(仅个股画像消费),
     # 2026-10-08 起潜龙/N型定版随产品线下线——margin 不再在 eod_1900 里
-    eod = next(item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == "eod_1900")
+    eod = next(item for item in svc.DEFAULT_BATCH_SCHEDULES if item["id"] == "eod_1800")
     assert "sync_margin_balance" not in eod["job_ids"]
 
 

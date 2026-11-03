@@ -64,7 +64,7 @@ def test_adjusted_daily_sync_is_registered_after_raw_daily_bars() -> None:
         "low_suction_adjusted_daily_bar_scopes"
     )
 
-    for schedule_id in ("eod_1900",):
+    for schedule_id in ("eod_1800",):
         jobs = next(
             item["job_ids"]
             for item in svc.DEFAULT_BATCH_SCHEDULES
