@@ -244,14 +244,14 @@ def _finalize_exits(data_date: date) -> dict[str, int]:
             if exit_date2 is None:
                 # 次日数据未到 / 检查窗内全是一字跌停:炸板在持,等数据幂等补
                 repository.upsert_signal(entry_date, vt, status="holding", sealed=False,
-                                         streak_h=0)
+                                         streak_h=0, **sig_base)
                 holding += 1
                 continue
             repository.upsert_signal(
                 entry_date, vt, status="closed", sealed=False, streak_h=0,
                 exit_date=exit_date2, exit_price=exit_price2,
                 exit_reason="break_day_close", bad_ticket=bad_ticket,
-                ret_pct=round((exit_price2 / entry_price - 1) * 100, 3))
+                ret_pct=round((exit_price2 / entry_price - 1) * 100, 3), **sig_base)
             closed += 1
             continue
         # 封住了 → 次日起首个未涨停日收盘卖,15 日兜底
