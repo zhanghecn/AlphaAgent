@@ -9,6 +9,7 @@ import {
   fetchHprLedger,
   fetchHprLive,
   fetchHprLiveDates,
+  fetchHprPoolAlert,
   rebuildHprBacktest,
   type HprRebuildStatus,
 } from "@/api/highRelay";
@@ -37,6 +38,35 @@ function isBuilding(status: HprRebuildStatus | undefined) {
   return status?.status === "queued" || status?.status === "running";
 }
 
+// 池哨兵横幅:19 点后仍无次日池时红条报原因(判定同源在后端,前端只展示)
+function PoolAlertBanner() {
+  const query = useQuery({
+    queryKey: ["hprPoolAlert"],
+    queryFn: fetchHprPoolAlert,
+    refetchInterval: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
+    retry: false,
+  });
+  const alert = query.data;
+  if (alert?.status !== "alert") return null;
+  return (
+    <div
+      data-testid="hpr-pool-alert"
+      className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400"
+    >
+      <span className="font-semibold">{alert.message ?? "今晚次日池未更新"}</span>
+      {alert.batch_status ? <span className="ml-2">批状态 {alert.batch_status}</span> : null}
+      {(alert.reasons ?? []).length > 0 ? (
+        <ul className="mt-1 list-disc pl-5 text-xs leading-5 text-red-400/90">
+          {(alert.reasons ?? []).map((r, i) => (
+            <li key={i}>{r}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 // 子页签进 URL(?view=quiz 深链,手机刷新/回退/加书签不丢页签);非法/缺省=live 与历史行为一致
 function parseView(raw: string | null): HprView {
   return HPR_VIEWS.some((v) => v.value === raw) ? (raw as HprView) : "live";
@@ -54,6 +84,7 @@ export function HighRelayPage() {
   };
   return (
     <div className="min-w-0">
+      <PoolAlertBanner />
       <nav
         className="mb-3 flex h-11 items-end gap-6 overflow-x-auto border-b"
         role="tablist"

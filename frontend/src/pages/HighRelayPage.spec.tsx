@@ -400,6 +400,48 @@ describe("ShortTermResearchPage", () => {
   });
 });
 
+// ── 池哨兵横幅(11-04 事故产物):alert 时红条报原因,ok 时完全隐藏 ──
+describe("PoolAlertBanner", () => {
+  it("alert 时渲染红条与原因", () => {
+    // setQueryData 需要拿到同一个 client:复用 withProviders 的默认缓存键约定
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["hprPoolAlert"], {
+      status: "alert",
+      message: "今晚次日池未更新",
+      batch_status: "partial",
+      reasons: ["sync_stock_daily_bars: 日线覆盖未完成：5 只"],
+    });
+    const html = renderToStaticMarkup(
+      <ThemeProvider>
+        <QueryClientProvider client={client}>
+          <MemoryRouter initialEntries={["/short-term?research=high-relay"]}>
+            <ShortTermResearchPage />
+          </MemoryRouter>
+        </QueryClientProvider>
+      </ThemeProvider>,
+    );
+    expect(html).toContain("hpr-pool-alert");
+    expect(html).toContain("今晚次日池未更新");
+    expect(html).toContain("批状态 partial");
+    expect(html).toContain("日线覆盖未完成：5 只");
+  });
+
+  it("ok 时不渲染横幅", () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["hprPoolAlert"], { status: "ok", next_pool_date: "2026-11-05" });
+    const html = renderToStaticMarkup(
+      <ThemeProvider>
+        <QueryClientProvider client={client}>
+          <MemoryRouter initialEntries={["/short-term?research=high-relay"]}>
+            <ShortTermResearchPage />
+          </MemoryRouter>
+        </QueryClientProvider>
+      </ThemeProvider>,
+    );
+    expect(html).not.toContain("hpr-pool-alert");
+  });
+});
+
 // ── 答题训练 · 判分四档矩阵(主人定稿) ──
 // 符合口诀×结果配合=+10 / 符合×不配合=+3 / 违背×配合=+2 / 违背×不配合=-5
 

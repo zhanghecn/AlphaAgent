@@ -35,6 +35,17 @@ def live_dates():
             {"reason": exc.__class__.__name__}))
 
 
+@router.get("/pool-alert", response_model=None)
+def pool_alert():
+    """次日池哨兵:19 点后仍无次日池时返回 alert+原因(页面顶红条)。"""
+    try:
+        return ok(service.get_pool_alert())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content=fail(
+            "HPR_POOL_ALERT_UNAVAILABLE", "池哨兵暂时不可用",
+            {"reason": exc.__class__.__name__}))
+
+
 @router.get("/backtest", response_model=None)
 def backtest():
     """回测报告(物化,CLI/调度写库,API 只读)。"""

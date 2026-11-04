@@ -451,6 +451,21 @@ export function fetchHprLiveDates() {
   return apiClient.get<{ dates: string[] }>("/high-relay/live/dates");
 }
 
+// 池哨兵(11-04 事故产物):19 点后仍无次日池时 status=alert+原因,页面顶红条
+export interface HprPoolAlert {
+  status: "ok" | "alert";
+  checked_at?: string;
+  next_pool_date?: string;
+  detail?: string;
+  message?: string;
+  batch_status?: string;
+  reasons?: string[];
+}
+
+export function fetchHprPoolAlert() {
+  return apiClient.get<HprPoolAlert>("/high-relay/pool-alert");
+}
+
 export function fetchHprBacktest() {
   return apiClient.get<HprBacktestPayload>("/high-relay/backtest");
 }

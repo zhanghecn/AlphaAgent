@@ -143,6 +143,54 @@ def list_pool_dates(limit: int = 250) -> list[str]:
     return [r.isoformat() for r in rows if isinstance(r, date)]
 
 
+def pool_sentinel_data(today: date) -> dict[str, object]:
+    """池哨兵一次取数:次日池/今日日线/盘后批状态/批内失败任务(get_pool_alert 判定同源)。"""
+    from alphaagent.server.services.data_sync import CURRENT_EOD_SCHEDULE_ID  # lazy 防循环
+
+    schema.ensure_schema_once(get_engine())
+    with session_scope() as session:
+        next_pool = session.execute(
+            select(schema.hpr_pool_entries.c.trade_date)
+            .where(schema.hpr_pool_entries.c.trade_date > today)
+            .order_by(desc(schema.hpr_pool_entries.c.trade_date))
+            .limit(1)
+        ).scalar_one_or_none()
+        today_has_bars = session.execute(
+            select(schema.stock_daily_bars.c.vt_symbol)
+            .where(schema.stock_daily_bars.c.trade_date == today)
+            .limit(1)
+        ).first() is not None
+        batch_row = session.execute(
+            select(
+                schema.sync_batch_schedules.c.last_status,
+                schema.sync_batch_schedules.c.last_started_at,
+            )
+            .where(schema.sync_batch_schedules.c.id == CURRENT_EOD_SCHEDULE_ID)
+        ).first()
+        failed_jobs: list[dict[str, object]] = []
+        if batch_row is not None and batch_row[1] is not None:
+            failed_jobs = [
+                {"job_id": str(r[0]), "message": str(r[1] or "")}
+                for r in session.execute(
+                    select(
+                        schema.sync_job_runs.c.job_id,
+                        schema.sync_job_runs.c.message,
+                    )
+                    .where(schema.sync_job_runs.c.finished_at >= batch_row[1])
+                    .where(schema.sync_job_runs.c.status == "failed")
+                    .order_by(schema.sync_job_runs.c.finished_at)
+                    .limit(5)
+                ).all()
+            ]
+    return {
+        "next_pool_date": next_pool if isinstance(next_pool, date) else None,
+        "today_has_bars": bool(today_has_bars),
+        "batch_status": str(batch_row[0]) if batch_row else None,
+        "batch_started_at": batch_row[1] if batch_row else None,
+        "failed_jobs": failed_jobs,
+    }
+
+
 # ── 信号 ──
 
 def upsert_signal(trade_date: date, vt_symbol: str, **fields: object) -> None:

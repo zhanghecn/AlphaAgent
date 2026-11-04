@@ -149,6 +149,47 @@ def get_live_dates() -> list[str]:
     return repository.list_pool_dates()
 
 
+# 池哨兵:盘后批(18:00)正常 25~40 分钟出次日池,19 点后仍无次日池=异常,
+# 页面顶红条报原因(11-04 事故:北交所缺口卡定版链,主人开页面才发现)。
+POOL_ALERT_HOUR = 19
+
+
+def get_pool_alert(now: datetime | None = None) -> dict[str, object]:
+    """次日池哨兵:ok=无事;alert=今晚池未更新+原因(判定同源,前端只展示)。"""
+    now = now or datetime.now(SHANGHAI)
+    out: dict[str, object] = {"status": "ok", "checked_at": now.isoformat()}
+    if now.weekday() >= 5:
+        return out
+    data = repository.pool_sentinel_data(now.date())
+    if data["next_pool_date"]:
+        out["next_pool_date"] = str(data["next_pool_date"])
+        return out
+    if now.hour < POOL_ALERT_HOUR:
+        out["detail"] = "盘后批窗口内,池未出属正常"
+        return out
+    batch_status = str(data.get("batch_status") or "")
+    batch_started = data.get("batch_started_at")
+    batch_today = bool(batch_started) and batch_started.date() == now.date()  # type: ignore[union-attr]
+    if batch_status == "running" and batch_today:
+        out["detail"] = "盘后批仍在运行(慢),池稍后出"
+        return out
+    reasons: list[str] = []
+    if not data["today_has_bars"]:
+        reasons.append("今日日线未入库(盘后批未正常同步;若今日休市请忽略)")
+    else:
+        reasons.append("今日日线已入库但次日池未产出(定版被跳过或失败)")
+    for job in data.get("failed_jobs") or []:
+        msg = str(job.get("message") or "").strip()
+        reasons.append(f"{job.get('job_id')}: {msg}" if msg else str(job.get("job_id")))
+    out.update({
+        "status": "alert",
+        "message": "今晚次日池未更新",
+        "batch_status": batch_status or "未运行",
+        "reasons": reasons,
+    })
+    return out
+
+
 def _live_row(entry: dict[str, object] | None,
               sig: dict[str, object] | None) -> dict[str, object]:
     row: dict[str, object] = {}
