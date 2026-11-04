@@ -82,6 +82,8 @@ SECTOR_MEMBER_MAX_PAGES = 100
 SECTOR_MEMBERSHIP_REFRESH_DAYS = 7
 SECTOR_MEMBERSHIP_UPSERT_BATCH_SIZE = 500
 STOCK_DAILY_INCREMENTAL_REFRESH_DAYS = 5
+# 日线覆盖尾差容忍:北交所/临停票源当日无 bar,0.5%(约 27/5573)以内不阻断下游定版
+DAILY_SESSION_MISSING_TOLERANCE_RATIO = 0.005
 STOCK_DAILY_COMPLETE_COVERAGE_RATIO = 0.95
 MIN_COMPLETE_DAILY_SYMBOL_COUNT = 3000
 STOCK_DAILY_REFERENCE_LOOKBACK_SESSIONS = 10
@@ -6154,13 +6156,19 @@ def _daily_session_coverage_from_symbols(
     expected_vt_symbols: set[str],
     observed_vt_symbols: set[str],
     excluded_non_trading_symbol_count: int = 0,
+    missing_tolerance_ratio: float = 0.0,
 ) -> dict[str, Any]:
     expected = set(expected_vt_symbols)
     observed = set(observed_vt_symbols)
     covered = expected & observed
     missing = sorted(expected - observed)
+    # 尾差容忍:北交所/临停票日线源当日不出 bar(11-04 天元重工等 5 只卡死定版链事故),
+    # 缺口占比 ≤ ratio 时仍判 complete(带 tolerated_missing 标记供健康页观察);
+    # 塌方式缺口(2026-10-21 事故 23%~64%)远超此界,照样拦。
+    tolerated = bool(expected) and len(missing) <= int(len(expected) * missing_tolerance_ratio)
     result = {
-        "status": "complete" if expected and not missing else "incomplete",
+        "status": "complete" if (expected and not missing) or tolerated else "incomplete",
+        "tolerated_missing": bool(tolerated and missing),
         "target_trade_date": target_date.isoformat(),
         "symbol_count": len(covered),
         "expected_symbol_count": len(expected),
@@ -6301,6 +6309,7 @@ def _completed_stock_daily_session_coverage(
                 & (reference_vt_symbols | newly_discovered_vt_symbols)
             )
         ),
+        missing_tolerance_ratio=DAILY_SESSION_MISSING_TOLERANCE_RATIO,
     )
 
 

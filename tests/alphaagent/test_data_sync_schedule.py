@@ -1707,6 +1707,48 @@ def test_daily_session_coverage_requires_every_expected_symbol():
     assert coverage["missing_vt_symbols"] == ["600004.SSE"]
 
 
+def test_daily_session_coverage_tolerates_tail_gap_within_ratio():
+    """北交所/临停票源当日无 bar:缺口占比 ≤ 容忍比判 complete,不阻断下游定版。"""
+    expected = {f"6{i:05d}.SSE" for i in range(2000)}
+    observed_full = set(expected)
+
+    # 9/2000 = 0.45% ≤ 0.5% → complete + tolerated_missing
+    observed_gap9 = observed_full - set(sorted(expected)[:9])
+    coverage = svc._daily_session_coverage_from_symbols(
+        target_date=date(2026, 11, 4),
+        reference_date=date(2026, 11, 3),
+        expected_vt_symbols=expected,
+        observed_vt_symbols=observed_gap9,
+        missing_tolerance_ratio=svc.DAILY_SESSION_MISSING_TOLERANCE_RATIO,
+    )
+    assert coverage["status"] == "complete"
+    assert coverage["tolerated_missing"] is True
+    assert coverage["missing_symbol_count"] == 9
+
+    # 20/2000 = 1.0% > 0.5% → incomplete(塌方式缺口照拦)
+    observed_gap20 = observed_full - set(sorted(expected)[:20])
+    coverage = svc._daily_session_coverage_from_symbols(
+        target_date=date(2026, 11, 4),
+        reference_date=date(2026, 11, 3),
+        expected_vt_symbols=expected,
+        observed_vt_symbols=observed_gap20,
+        missing_tolerance_ratio=svc.DAILY_SESSION_MISSING_TOLERANCE_RATIO,
+    )
+    assert coverage["status"] == "incomplete"
+    assert coverage["tolerated_missing"] is False
+
+    # 全覆盖 → complete 且不带 tolerated 标记
+    coverage = svc._daily_session_coverage_from_symbols(
+        target_date=date(2026, 11, 4),
+        reference_date=date(2026, 11, 3),
+        expected_vt_symbols=expected,
+        observed_vt_symbols=observed_full,
+        missing_tolerance_ratio=svc.DAILY_SESSION_MISSING_TOLERANCE_RATIO,
+    )
+    assert coverage["status"] == "complete"
+    assert coverage["tolerated_missing"] is False
+
+
 def test_select_daily_bar_stocks_avoids_raw_snapshot_payload(monkeypatch):
     selected_columns: list[str] = []
 
@@ -1806,6 +1848,7 @@ def test_completed_stock_daily_session_uses_previous_cross_section(monkeypatch):
 
     assert result == {
         "status": "incomplete",
+        "tolerated_missing": False,
         "target_trade_date": "2026-07-20",
         "symbol_count": 1,
         "expected_symbol_count": 2,
