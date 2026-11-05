@@ -698,24 +698,37 @@ def _anchor_check(summary: dict[str, object]) -> dict[str, object]:
 
 
 def _case_gates(done: pd.DataFrame) -> list[dict[str, object]]:
-    """案例门禁:具名案例买入日的方案点归属与期望比对。"""
+    """案例门禁:具名案例买入日的方案点归属与期望比对。
+
+    expect 支持 in_<point> / out_<point> / out_any,以及 in_<point>@<sub> 分支级校验
+    (v7.31: K10 两分支各锁一个 in 案例,防止分支被改坏但点级仍 pass)。
+    """
     out: list[dict[str, object]] = []
     for case in contracts.CASE_GATES:
-        sub = done[(done["名称"] == case["name"])
-                   & (done["买入日"] == pd.Timestamp(str(case["date"])))]
+        sub_df = done[(done["名称"] == case["name"])
+                      & (done["买入日"] == pd.Timestamp(str(case["date"])))]
         expect = str(case["expect"])
-        point = expect.split("_", 1)[1] if "_" in expect else ""
+        body = expect.split("_", 1)[1] if "_" in expect else ""
+        point, _, sub_expect = body.partition("@")
         col = "弱口诀" if point in contracts.WEAK_POINT_KEYS else "方案点"
-        actual = sorted({str(p) for p in sub[col] if pd.notna(p)})
+        subcol = "弱子项" if col == "弱口诀" else "方案子项"
+        subs = (sub_df[subcol] if subcol in sub_df.columns
+                else pd.Series([""] * len(sub_df), index=sub_df.index))
+        pairs = {(str(p), str(s or ""))
+                 for p, s in zip(sub_df[col], subs) if pd.notna(p)}
+        actual = sorted({p for p, _ in pairs})
+        actual_subs = sorted({s for _, s in pairs if s})
         if expect == "out_any":
             passed = not actual or actual == ["—"]
         elif expect.startswith("out_"):
-            passed = expect[4:] not in actual
-        else:  # in_<point>
-            passed = expect[3:] in actual
+            passed = ((point, sub_expect) not in pairs if sub_expect
+                      else point not in actual)
+        else:  # in_<point>[@sub]
+            passed = ((point, sub_expect) in pairs if sub_expect
+                      else point in actual)
         out.append({"name": case["name"], "date": case["date"], "expect": expect,
-                    "actual_points": actual, "pass": bool(passed),
-                    "note": case["note"]})
+                    "actual_points": actual, "actual_subs": actual_subs,
+                    "pass": bool(passed), "note": case["note"]})
     return out
 
 

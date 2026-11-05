@@ -106,6 +106,6 @@ def test_quiz_explains_turnover_leg():
 
 
 def test_version_and_schema_column():
-    assert contracts.HPR_RULES_VERSION == "hpr-v7.31"
+    assert contracts.HPR_RULES_VERSION == "hpr-v7.32"
     assert quiz.QUIZ_CONTENT_VERSION == 63
     assert "b1_f_turn_ratio" in schema.hpr_pool_entries.c

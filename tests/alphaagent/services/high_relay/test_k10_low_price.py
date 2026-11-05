@@ -7,7 +7,7 @@ def test_k10_is_registered_with_low_price_branches():
     assert "K10" in contracts.WEAK_POINT_KEYS
     rows = [r for r in contracts.WEAK_CHEAT_ROWS if r["no"] == "K10"]
     assert {r["sub"] for r in rows} == {"低价·二接三", "低价·三接四"}
-    assert contracts.HPR_RULES_VERSION == "hpr-v7.31"
+    assert contracts.HPR_RULES_VERSION == "hpr-v7.32"
     assert quiz.QUIZ_CONTENT_VERSION == 63
 
 
@@ -71,3 +71,11 @@ def test_match_weak_schemes_mirrors_k10():
         "三接四阳", None, None, None, b2_type="一字", buy_price=3.5,
         b1_f_turn_ratio=0.8, dist_h60=-1.0, dist_ma10=5.0)
     assert not [s for s in hot if s["no"] == "K10"]
+
+def test_case_gates_verify_branch_not_just_point():
+    """v7.31 案例门支持 @sub:两个新分支各锁一个 in 案例,换手带 out 案例守住边界。"""
+    gates = {c["name"]: c for c in contracts.CASE_GATES if "K10" in str(c["expect"])}
+    assert gates["天保基建"]["expect"] == "in_K10@低价·二接三"
+    assert gates["美邦服饰"]["expect"] == "in_K10@低价·三接四"
+    assert gates["正源股份"]["expect"] == "out_K10"
+    assert "宏润建设" in gates and gates["宏润建设"]["expect"] == "out_K10"
