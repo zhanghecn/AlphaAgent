@@ -59,10 +59,11 @@ const POINT_BADGES: Record<string, { label: string; full: string; className: str
   K5: { label: "K5", full: "K5 二板贴零强开(弱市组,前波=0)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
   K9: { label: "K9", full: "K9 一平二低温开(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
   K3: { label: "K3", full: "K3 双低温开贴顶(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
+  K10: { label: "K10", full: "K10 低价一字锁仓(弱市组)", className: "bg-violet-500/15 text-violet-500 ring-1 ring-violet-500/40" },
 };
 
 const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"] as const;
-const WEAK_POINT_KEYS = ["K2", "K4", "K5", "K9", "K3"] as const;
+const WEAK_POINT_KEYS = ["K2", "K4", "K5", "K9", "K3", "K10"] as const;
 
 const POINT_COUNT_TONE: Record<string, string> = {
   A1: "text-rise",
@@ -78,6 +79,7 @@ const POINT_COUNT_TONE: Record<string, string> = {
   K5: "text-violet-500",
   K9: "text-violet-500",
   K3: "text-violet-500",
+  K10: "text-violet-500",
 };
 
 /** 动态口诀组横幅样式(v7.1):当前组=哪组口诀赚得多用哪组 */

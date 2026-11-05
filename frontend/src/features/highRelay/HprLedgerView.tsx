@@ -13,7 +13,7 @@ const EXIT_REASON_LABELS: Record<string, string> = {
 };
 
 // v7.3 交割单切动态组口径:含 K 系出手点(当月弱市组启用的成交笔,紫色系)
-const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3", "K2", "K4", "K5", "K9", "K3"] as const;
+const POINT_KEYS = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3", "K2", "K4", "K5", "K9", "K3", "K10"] as const;
 
 const POINT_BADGES: Record<string, { label: string; className: string }> = {
   A1: { label: "A1", className: "bg-rise/15 text-rise" },
@@ -30,6 +30,7 @@ const POINT_BADGES: Record<string, { label: string; className: string }> = {
   K5: { label: "K5", className: "bg-violet-500/15 text-violet-500" },
   K9: { label: "K9", className: "bg-violet-500/15 text-violet-500" },
   K3: { label: "K3", className: "bg-violet-500/15 text-violet-500" },
+  K10: { label: "K10", className: "bg-violet-500/15 text-violet-500" },
 };
 
 /** 高位接力历史交割单:横向平铺列表(全部命中信号逐笔,不限仓位),支持月份/点/搜票筛选。 */

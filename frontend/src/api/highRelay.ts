@@ -9,7 +9,7 @@ import { apiClient } from "./client";
 export type HprPoint =
   | "A1" | "A2" | "B1" | "B2" | "C1"
   | "A3" | "B3" | "C2" | "C3" | "—";   // v6.0:A=阳/B=阴/C=中性(字母跨板位统一,E退休);v6.11:C3一字换手拆自C2
-export type HprWeakPoint = "K2" | "K4" | "K5" | "K9" | "K3";   // 弱市组(v7.0;v7.7 K7退役)
+export type HprWeakPoint = "K2" | "K4" | "K5" | "K9" | "K3" | "K10";   // 弱市组(v7.0;v7.7 K7退役;v7.30 K10新增)
 export type HprAnyPoint = HprPoint | HprWeakPoint;   // 动态口诀组:点位可能是两组任一编号
 export type HprGroup4 = "二接三阴" | "二接三阳" | "三接四阴" | "三接四阳";
 export type HprDynGroup = "weak" | "strong" | "both";

@@ -112,7 +112,7 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
         "anchors": contracts.BACKTEST_ANCHORS,
         "anchor_tolerances": contracts.ANCHOR_TOLERANCES,
         "anchor_check": _anchor_check(summary),
-        "case_gates": _case_gates(done),
+        "case_gates": _case_gates(done_all),
         "avoid_stats": _avoid_stats(done),
         "radar": _radar_stats(done),
     }
@@ -376,7 +376,8 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             foundation_chg=rec.get("foundation_chg"),
             prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"),
             b1_type=rec.get("b1_type"), b2_type=rec.get("b2_type"),
-            b3_type=rec.get("b3_type"))
+            b3_type=rec.get("b3_type"), dist_ma10=rec.get("dist_ma10"),
+            buy_price=buy, b1_f_turn_ratio=rec.get("b1_f_turn_ratio"))
         avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
                                       rec.get("b2_open"), rec.get("pre3_pct"))
         sealed = bool(cols["is_lim"][i])
@@ -702,8 +703,10 @@ def _case_gates(done: pd.DataFrame) -> list[dict[str, object]]:
     for case in contracts.CASE_GATES:
         sub = done[(done["名称"] == case["name"])
                    & (done["买入日"] == pd.Timestamp(str(case["date"])))]
-        actual = sorted({str(p) for p in sub["方案点"]})
         expect = str(case["expect"])
+        point = expect.split("_", 1)[1] if "_" in expect else ""
+        col = "弱口诀" if point in contracts.WEAK_POINT_KEYS else "方案点"
+        actual = sorted({str(p) for p in sub[col] if pd.notna(p)})
         if expect == "out_any":
             passed = not actual or actual == ["—"]
         elif expect.startswith("out_"):

@@ -162,6 +162,12 @@ Read these before writing new A-share code:
 - `examples/alpha_research/download_data_xt.ipynb`: XT A-share component/history
   download example for AlphaLab.
 
+## Durable Research Memory
+
+- Rule-research methodology and current candidate conclusions live in
+  `量化因子研究/高位接力/口诀研究方法.md`. Read it before researching a new rule;
+  update conclusions in place, not as a chronological log.
+
 ## Research Reporting and Workspace Notes
 
 - Do not create or use a `memory/` directory. It is intentionally absent.

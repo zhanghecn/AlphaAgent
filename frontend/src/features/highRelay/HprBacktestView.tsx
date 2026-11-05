@@ -36,13 +36,14 @@ const POINT_TONE: Record<string, string> = {
   C3: "stroke-primary",
 };
 // 弱市组 K 系(v7.1):成绩卡片区展示(summary 有 2023+ 段锚定数字)
-const WEAK_POINTS = ["K2", "K4", "K5", "K9", "K3"] as const;
+const WEAK_POINTS = ["K2", "K4", "K5", "K9", "K3", "K10"] as const;
 const WEAK_POINT_SHORT: Record<string, string> = {
   K2: "C2·弱市版 四板换手",
   K4: "K4 一三换手弱开",
   K5: "K5 二板贴零强开",
   K9: "K9 一平二低温开",
   K3: "K3 双低温开贴顶",
+  K10: "K10 低价一字锁仓",
 };
 
 export function HprBacktestView({

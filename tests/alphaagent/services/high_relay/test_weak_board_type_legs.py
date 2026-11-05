@@ -71,6 +71,6 @@ def test_quiz_explains_weak_board_type_leg():
 
 
 def test_version():
-    assert contracts.HPR_RULES_VERSION == "hpr-v7.29"
-    assert quiz.QUIZ_CONTENT_VERSION == 61
+    assert contracts.HPR_RULES_VERSION == "hpr-v7.31"
+    assert quiz.QUIZ_CONTENT_VERSION == 63
 

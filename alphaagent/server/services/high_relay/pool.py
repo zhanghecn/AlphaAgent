@@ -352,7 +352,8 @@ def tag_scheme(group4: str, b1_open, b2_open, b3_open,
 def tag_weak(group4: str, b1_open, b2_open, b3_open,
              auction_pct=None, b1_turn=None, b2_turn=None, b3_turn=None,
              foundation_chg=None, prev_wave60=None, dist_h60=None,
-             b1_type=None, b2_type=None, b3_type=None):
+             b1_type=None, b2_type=None, b3_type=None,
+             buy_price=None, dist_ma10=None, b1_f_turn_ratio=None):
     """弱市口诀组打标(v7.0起,以 contracts.WEAK_SCHEMES 为唯一判定定义)。
 
     判定独立于 tag_scheme(强市组零回归):K系含缩量承接(三换<二换)/前波=0/
@@ -395,6 +396,18 @@ def tag_weak(group4: str, b1_open, b2_open, b3_open,
         dmin = s.get("dist_h60_min")
         if dmin is not None and (dist_h60 is None or dist_h60 < dmin):
             continue
+        btype = s.get("b2_type")
+        if btype is not None and b2_type != btype:
+            continue  # 二板板型必须为该型(v7.30 K10 一字)
+        pmax = s.get("buy_price_max")
+        if pmax is not None and (buy_price is None or buy_price > pmax):
+            continue  # 买价上界(v7.30 K10 低价)
+        hacc = s.get("block_high_accel")
+        if (hacc is not None and dist_h60 is not None and dist_ma10 is not None
+                and dist_h60 > hacc[0] and dist_ma10 > hacc[1]):
+            continue  # 高位加速不碰(v7.30 K10 N=3)
+        if _blocked_by_b1_f_turn_ratio(s, b1_f_turn_ratio):
+            continue  # 一板/地基换手带不碰(v7.30 K10 复用 A2 腿)
         if (_blocked_by_board_type(s, "block_b1_type", b1_type)
                 or _blocked_by_board_type(s, "block_b2_type", b2_type)
                 or _blocked_by_board_type(s, "block_b3_type", b3_type)):
@@ -410,7 +423,8 @@ def match_weak_schemes(group4: str, b1_open, b2_open, b3_open,
                        b1_turn=None, b2_turn=None, b3_turn=None,
                        foundation_chg=None, prev_wave60=None,
                        dist_h60=None, b1_type=None, b2_type=None,
-                       b3_type=None) -> list[dict]:
+                       b3_type=None, buy_price=None, dist_ma10=None,
+                       b1_f_turn_ratio=None) -> list[dict]:
     """弱市组链级候选定位(v7.1,不含今开窗;镜像 tag_weak 的链段判定,
     改任何一处另一处必须同步)。返回链条件全过的 WEAK_SCHEMES 条目按优先级序——
     池打标/竞价门用(窗=全部候选条目 today 并集,竞价定型后归属=tag_weak 首窗命中者,
@@ -445,6 +459,18 @@ def match_weak_schemes(group4: str, b1_open, b2_open, b3_open,
         dmin = s.get("dist_h60_min")
         if dmin is not None and (dist_h60 is None or dist_h60 < dmin):
             continue
+        btype = s.get("b2_type")
+        if btype is not None and b2_type != btype:
+            continue  # 二板板型必须为该型(v7.30 K10 一字;镜像 tag_weak)
+        pmax = s.get("buy_price_max")
+        if pmax is not None and (buy_price is None or buy_price > pmax):
+            continue  # 买价上界(v7.30 K10 低价;镜像 tag_weak)
+        hacc = s.get("block_high_accel")
+        if (hacc is not None and dist_h60 is not None and dist_ma10 is not None
+                and dist_h60 > hacc[0] and dist_ma10 > hacc[1]):
+            continue  # 高位加速不碰(v7.30 K10 N=3;镜像 tag_weak)
+        if _blocked_by_b1_f_turn_ratio(s, b1_f_turn_ratio):
+            continue  # 一板/地基换手带不碰(v7.30 K10;镜像 tag_weak)
         if (_blocked_by_board_type(s, "block_b1_type", b1_type)
                 or _blocked_by_board_type(s, "block_b2_type", b2_type)
                 or _blocked_by_board_type(s, "block_b3_type", b3_type)):
@@ -623,7 +649,11 @@ def entry_weak_candidates(entry: Mapping[str, object]) -> list[dict]:
         b1_turn=entry.get("b1_turn"), b2_turn=entry.get("b2_turn"),
         b3_turn=entry.get("b3_turn"),
         foundation_chg=entry.get("foundation_chg"),
-        prev_wave60=entry.get("prev_wave60"), dist_h60=entry.get("dist_h60"))
+        prev_wave60=entry.get("prev_wave60"), dist_h60=entry.get("dist_h60"),
+        b1_type=entry.get("b1_type"), b2_type=entry.get("b2_type"),
+        b3_type=entry.get("b3_type"), dist_ma10=entry.get("dist_ma10"),
+        buy_price=entry.get("limit_price"),
+        b1_f_turn_ratio=entry.get("b1_f_turn_ratio"))
     return [_cand_row(s) for s in wbrs]
 
 
@@ -727,7 +757,9 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
             b3_turn=rec.get("b3_turn"), foundation_chg=rec.get("foundation_chg"),
             prev_wave60=rec.get("prev_wave60"), dist_h60=rec.get("dist_h60"),
             b1_type=rec.get("b1_type"), b2_type=rec.get("b2_type"),
-            b3_type=rec.get("b3_type"))
+            b3_type=rec.get("b3_type"), dist_ma10=rec.get("dist_ma10"),
+            buy_price=round(float(row.close_price) * 1.10 + 1e-9, 2),
+            b1_f_turn_ratio=rec.get("b1_f_turn_ratio"))
         weak_point = str(weak_branches[0]["no"]) if weak_branches else "—"
         weak_wins: list[tuple[float, float]] = []
         for s in weak_branches:

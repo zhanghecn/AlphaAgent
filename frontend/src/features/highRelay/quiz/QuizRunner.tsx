@@ -37,6 +37,7 @@ const POINT_BADGES: Record<string, string> = {
   K5: "bg-violet-500/15 text-violet-500",
   K9: "bg-violet-500/15 text-violet-500",
   K3: "bg-violet-500/15 text-violet-500",
+  K10: "bg-violet-500/15 text-violet-500",
 };
 
 const TIER_STYLES: Record<string, string> = {
