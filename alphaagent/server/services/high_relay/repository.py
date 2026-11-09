@@ -430,7 +430,8 @@ def quiz_bank_status() -> dict[str, object]:
 
 
 def load_quiz_mix_projection(years: list[str] | None = None,
-                             era: str | None = None) -> list[dict[str, object]]:
+                             era: str | None = None,
+                             dyn_state: str | None = None) -> list[dict[str, object]]:
     """综合挑战卷抽题投影:[{decision_date, vt_symbol, point, trap_kind}](轻量,
     trap_kind 从 payload.explain JSON 抽取,命中题为 NULL→None;不读K线大字段)。
     years 非空时只抽这些年(主人定:按年份练市场环境,2023熊尾/2024牛市/2025-26
@@ -438,7 +439,11 @@ def load_quiz_mix_projection(years: list[str] | None = None,
     era 优先于 years,按年份段过滤(与抽题范围 chip 文案一致;v7.2 旧实现按月状态
     in_(strong,both) 会把 2020-01~06 暖机双开段混进「强市时代 23 起」——主人做题
     撞 2020-02 双开题报障):weak=2020-22,strong=2023 起(该段内的弱市组题照抽,
-    题上组别 chip 会如实标注)。"""
+    题上组别 chip 会如实标注);
+    dyn_state(v7.33 当前口径卷,主人2026-11-09拍板「按当前动态口径抽题」)优先于
+    era/years:按题库物化的月组状态精确过滤(weak|strong),比 era 年份段更纯——
+    2023-01~08 的题月状态=weak,不会再混进强市口径卷(判分/讲解本就按当月组
+    打好标,抽题层过滤即可);暖机 both 排除逻辑不变。"""
     schema.ensure_schema_once(get_engine())
     t = schema.hpr_quiz_questions
     stmt = select(t.c.decision_date, t.c.vt_symbol, t.c.point,
@@ -448,7 +453,9 @@ def load_quiz_mix_projection(years: list[str] | None = None,
     # 暖机月判定本身不可靠);未来12月窗口永远满不会再双开,练这些题没有价值」。
     # 月度题/overview 同步过滤(月度入口整月不显示)
     stmt = stmt.where(t.c.payload["dyn_state"].astext != "both")
-    if era == "weak":
+    if dyn_state:
+        stmt = stmt.where(t.c.payload["dyn_state"].astext == dyn_state)
+    elif era == "weak":
         stmt = stmt.where(t.c.year.in_(("2020", "2021", "2022")))
     elif era == "strong":
         stmt = stmt.where(t.c.year >= "2023")

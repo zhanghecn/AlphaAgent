@@ -596,6 +596,8 @@ export interface HprQuizQuestionsPayload {
   month?: string;
   rules_version?: string;
   count?: number;
+  /** 本卷实际口径(v7.33:era=current 时后端下发 strong|weak|both,卷内横幅用) */
+  era_group?: string;
   questions?: HprQuizQuestion[];
 }
 
@@ -609,11 +611,14 @@ export function fetchHprQuizQuestions(month: string) {
   );
 }
 
-// 综合挑战卷(主人定 2026-09-28):六条口诀每条随机2道好票+21道陷阱差票
-// (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序;
+// 综合挑战卷(主人定 2026-09-28):每条口诀随机2道好票+28~35道陷阱差票
+// (阴阳反串/形态接近/毒段三等分,差:好=1.5:1~3:1),每次调用重抽、全卷乱序;
 // year 指定=只在该年抽(按年份练市场环境,单年池不足的口诀有多少抽多少);
+// era 优先于 year:weak/strong=按年份段的时代抽题(v7.2);
+// current=当前口径卷(v7.33):后端按当前动态口诀组抽题(整卷只出当前组
+// 启用时代的题,切组自动跟随),响应 era_group=本卷实际口径;
 // 结构与月题一致(month 缺省),进度与月题共享(同一题 key)。
-export function fetchHprQuizMixed(scope?: { year?: string; years?: string[]; era?: "weak" | "strong" }) {
+export function fetchHprQuizMixed(scope?: { year?: string; years?: string[]; era?: "weak" | "strong" | "current" }) {
   const params = new URLSearchParams();
   const yearParam = scope?.years?.length ? scope.years.join(",") : scope?.year;
   if (yearParam) params.set("year", yearParam);

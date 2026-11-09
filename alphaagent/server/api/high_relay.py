@@ -161,11 +161,13 @@ def quiz_questions(month: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
 
 @router.get("/quiz/mixed", response_model=None)
 def quiz_mixed(year: str | None = Query(None, pattern=r"^\d{4}(,\d{4})*$"),
-               era: str | None = Query(None, pattern=r"^(weak|strong)$")):
+               era: str | None = Query(None, pattern=r"^(weak|strong|current)$")):
     """综合挑战卷:六条口诀每条随机2道好票+21道陷阱差票(阴阳反串/形态接近/
     毒段三等分),每次调用重抽不重样,全卷乱序;year 指定=只在该年抽,
     逗号分隔=多选年份一起综合(v7.5);
-    era(v7.2 时代抽题,优先于 year,按年份段):weak=2020-22,strong=2023 起。"""
+    era(v7.2 时代抽题,优先于 year,按年份段):weak=2020-22,strong=2023 起;
+    current(v7.33 当前口径卷):按当前动态口诀组抽题(组=strong 只抽强市月题/
+    weak 只抽弱市月题),响应 era_group=本卷实际口径。"""
     try:
         return ok(service.get_quiz_mixed(year, era))
     except Exception as exc:  # noqa: BLE001

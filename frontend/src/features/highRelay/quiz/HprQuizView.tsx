@@ -55,9 +55,11 @@ export function HprQuizView() {
   // 综合挑战卷:nonce=null 未进卷;每点一次「开始挑战」+1 → queryKey 变 →
   // 强制重新随机抽题(禁缓存,主人要每次重抽不重样);mixYears=[] 全库,
   // 多选=所选年份并集一起抽(v7.5;点 chip toggle 选/取消);
-  // mixEra(v7.2)=时代抽题,与年份互斥:weak=2020-22,strong=2023 起
+  // mixEra(v7.2)=时代抽题,与年份互斥:weak=2020-22,strong=2023 起;
+  // current(v7.33)=当前口径卷:整卷只出当前动态组启用时代的题(月状态精确
+  // 过滤,切组自动跟随)——平时训练默认入口,做题即练当前行情该用的口诀
   const [mixYears, setMixYears] = useState<string[]>([]);
-  const [mixEra, setMixEra] = useState<"weak" | "strong" | null>(null);
+  const [mixEra, setMixEra] = useState<"weak" | "strong" | "current" | null>(null);
   const [mixedNonce, setMixedNonce] = useState<number | null>(null);
   const [showName, setShowName] = useState(false);
   const [answers, setAnswers] = useState<Record<string, QuizAnswerRec>>({});
@@ -117,6 +119,7 @@ export function HprQuizView() {
             rulesVersion={rulesVersion}
             showName={showName}
             dynGroup={dynGroup}
+            eraGroup={mixedQuery.data?.era_group ?? null}
             answers={answers}
             onAnswersChange={setAnswers}
             onBack={() => setMixedNonce(null)}
@@ -245,6 +248,8 @@ export function HprQuizView() {
             两组口诀各抽 2 道好票（强市组八条 + 弱市组五条）+ 28~35 道陷阱票
             （阴阳反串／形态接近／毒段，每卷随机）——
             每卷练全所有口诀，认熟「看着像但不能打」的票；每次进入重新随机抽题。
+            「当前口径」=只抽当前启用组时代的题（跟随近9月滚动判定，切组自动变），
+            平时练它就是练当前行情该用的口诀。
           </span>
           <button
             type="button"
@@ -256,9 +261,22 @@ export function HprQuizView() {
         </div>
         {/* 年份筛选(主人定):选年=只在该年抽题练该年市场环境;单年某口诀不足2道有多少抽多少;
             v7.5 多选年份=所选年份并集一起综合;v7.2 时代筛选(与年份互斥,按年份段):
-            弱市时代=2020-22,强市时代=2023起 */}
+            弱市时代=2020-22,强市时代=2023起;
+            v7.33 当前口径 chip 放首位(默认训练入口,主人2026-11-09「做题只做最近的
+            动态口径,适配当前行情」):后端按当前动态组抽题,文字/配色随 koujue 当前组
+            动态变,koujue 未加载时灰显可点(后端兜底) */}
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span className="text-[11px] text-muted-foreground">抽题范围</span>
+          <MixYearChip
+            label={dynGroup === "weak"
+              ? "当前口径·弱市组"
+              : dynGroup === "strong"
+                ? "当前口径·强市组"
+                : "当前口径"}
+            tone={dynGroup === "weak" ? "violet" : "primary"}
+            active={mixEra === "current"}
+            onClick={() => { setMixEra("current"); setMixYears([]); }}
+          />
           <MixYearChip
             label="全部年份"
             active={mixYears.length === 0 && mixEra == null}

@@ -938,10 +938,28 @@ def mix_question_keys(rows, per_point: int = MIX_PER_POINT,
     for pool_keys in by_point.values():
         picked.extend(rnd.sample(pool_keys, min(per_point, len(pool_keys))))
     quota, extra = divmod(trap_total, len(MIX_TRAP_KINDS))
+    pools: dict[str, list[tuple[str, str]]] = {k: list(by_trap[k]) for k in MIX_TRAP_KINDS}
     deficit = 0
     for i, kind in enumerate(MIX_TRAP_KINDS):
         want = quota + (1 if i < extra else 0) + deficit
-        got = rnd.sample(by_trap[kind], min(want, len(by_trap[kind])))
+        got = rnd.sample(pools[kind], min(want, len(pools[kind])))
+        for g in got:
+            pools[kind].remove(g)
         picked.extend(got)
         deficit = want - len(got)
+    # 空类配额回填(2026-11-09 主人拍板顺手修):deficit 只向后滚,排最后的类
+    # 存量不足时缺口沉淀——弱市卷 toxic=0(弱市口诀链松,miss 题全归 near),
+    # 陷阱实抽~20 道而非 28~35。循环结束后仍有缺口 → 轮流从还有存量的类
+    # 各补 1 道(保持三混搭意图),补满或全干为止;「弱市时代」卷同病同修。
+    while deficit > 0:
+        alive = [k for k in MIX_TRAP_KINDS if pools[k]]
+        if not alive:
+            break
+        for kind in alive:
+            if deficit <= 0:
+                break
+            got = rnd.sample(pools[kind], 1)
+            pools[kind].remove(got[0])
+            picked.extend(got)
+            deficit -= 1
     return picked

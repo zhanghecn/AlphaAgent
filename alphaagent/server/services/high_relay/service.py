@@ -522,19 +522,32 @@ def get_quiz_mixed(year: str | None = None,
     """综合挑战卷(主人定 2026-09-28):每条口诀随机≥2道好票 + 陷阱差票
     (阴阳反串/形态接近/毒段三等分,差:好=1:1~3:1),每次调用重抽、全卷乱序。
     year 非空=只在该年抽,逗号分隔可多选年份一起综合(v7.5);
-    era 优先于 year(v7.2 时代抽题,按年份段):weak=2020-22,strong=2023 起。"""
+    era 优先于 year(v7.2 时代抽题,按年份段):weak=2020-22,strong=2023 起;
+    era=current(v7.33 当前口径卷,主人2026-11-09拍板「根据当前动态口径自行判断
+    强弱,做题只做最近的动态口径,适配当前行情」):读 current_dyn_group()(与
+    实时推荐/盘中扫描/koujue 同一判定源,物化月状态取末月,缓存1h)——组=strong
+    只抽强市月题/weak 只抽弱市月题(投影按题库物化 dyn_state 精确过滤,无未来
+    函数);组只在月末切换,切组后本卷自动跟随,判分/讲解零改动(题目按当月组
+    打好标)。响应 era_group=本卷实际口径(era=current 时下发,前端横幅用)。"""
     import random
     expect = quiz_mod.quiz_rules_version()
     status = repository.quiz_bank_status()
     if status.get("rules_versions") != [expect]:
         return {"status": "unavailable", "rules_version": expect}
     years = [y for y in (year or "").split(",") if y] or None
-    projection = repository.load_quiz_mix_projection(years, era)
+    era_group = None
+    dyn_state = None
+    if era == "current":
+        era_group = str(current_dyn_group().get("group") or "both")
+        # both=无物化兜底,理论不可达(题库本身是 rebuild 物化产物,题库在⇒
+        # dyn_month_states 在⇒末月必有状态)——防御性回退全库,响应照实标注
+        dyn_state = era_group if era_group in ("weak", "strong") else None
+    projection = repository.load_quiz_mix_projection(years, era, dyn_state=dyn_state)
     keys = quiz_mod.mix_question_keys(projection)
     questions = repository.load_quiz_questions_by_keys(keys)
     random.shuffle(questions)
     return {"status": "ok", "rules_version": expect, "year": year, "era": era,
-            "count": len(questions), "questions": questions}
+            "era_group": era_group, "count": len(questions), "questions": questions}
 
 
 # ── 规则契约 ──

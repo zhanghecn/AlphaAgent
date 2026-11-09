@@ -1,12 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ThemeProvider } from "@/theme/ThemeProvider";
 import { ShortTermResearchPage } from "./ShortTermResearchPage";
 import { HPR_LIVE_REFRESH_INTERVAL_MS } from "./HighRelayPage";
+import { apiClient } from "@/api/client";
 import type { HprKoujueTrade, HprLivePayload, HprQuizQuestion } from "@/api/highRelay";
+import { fetchHprQuizMixed } from "@/api/highRelay";
 import {
   filterKoujueTrades,
   HprKoujueTradesPanel,
@@ -649,6 +651,8 @@ const QUIZ_WEAK_HIT_Q: HprQuizQuestion = {
 function renderRunner(props?: {
   showName?: boolean;
   dynGroup?: string | null;
+  eraGroup?: string | null;
+  variant?: "month" | "mixed";
   answers?: Record<string, { choice: "buy" | "reject"; score: number }>;
   questions?: HprQuizQuestion[];
 }) {
@@ -656,10 +660,12 @@ function renderRunner(props?: {
     withProviders(
       <QuizRunner
         month="2024-11"
+        variant={props?.variant ?? "month"}
         questions={props?.questions ?? [QUIZ_HIT_Q, QUIZ_MISS_Q]}
         rulesVersion="hpr-v4.0·q1"
         showName={props?.showName ?? false}
         dynGroup={props?.dynGroup}
+        eraGroup={props?.eraGroup}
         answers={props?.answers ?? {}}
         onAnswersChange={() => undefined}
         onBack={() => undefined}
@@ -1081,5 +1087,40 @@ describe("HprKoujueTradesPanel 口诀历史票", () => {
     expect(html).toContain("下影→实体");
     expect(html).toContain("/stocks/002.SZSE");
     expect(html).toContain("炸板次日卖");
+  });
+});
+
+// ── 当前口径卷(v7.33):综合挑战卷按当前动态口径抽题,卷内徽章标注本卷口径 ──
+
+describe("QuizRunner 当前口径卷徽章(v7.33)", () => {
+  it("mixed 卷 eraGroup=strong/weak:头部渲染「当前口径卷」徽章(配色随组)", () => {
+    expect(renderRunner({ variant: "mixed", eraGroup: "strong" }))
+      .toContain("当前口径卷 · 强市组");
+    expect(renderRunner({ variant: "mixed", eraGroup: "weak" }))
+      .toContain("当前口径卷 · 弱市组");
+  });
+
+  it("month 卷与未选当前口径的 mixed 卷不渲染徽章", () => {
+    expect(renderRunner({ eraGroup: "strong" })).not.toContain("当前口径卷");
+    expect(renderRunner({ variant: "mixed" })).not.toContain("当前口径卷");
+    // both=后端兜底标注(理论不可达),不按口径渲染徽章
+    expect(renderRunner({ variant: "mixed", eraGroup: "both" }))
+      .not.toContain("当前口径卷 · ");
+  });
+});
+
+describe("fetchHprQuizMixed era=current 参数(v7.33)", () => {
+  it("era=current 透传到查询串,普通时代参数不受影响", async () => {
+    const getSpy = vi.spyOn(apiClient, "get").mockResolvedValue({ status: "ok" });
+    try {
+      await fetchHprQuizMixed({ era: "current" });
+      expect(getSpy).toHaveBeenCalledWith("/high-relay/quiz/mixed?era=current");
+      await fetchHprQuizMixed({ era: "weak" });
+      expect(getSpy).toHaveBeenCalledWith("/high-relay/quiz/mixed?era=weak");
+      await fetchHprQuizMixed();
+      expect(getSpy).toHaveBeenCalledWith("/high-relay/quiz/mixed");
+    } finally {
+      getSpy.mockRestore();
+    }
   });
 });

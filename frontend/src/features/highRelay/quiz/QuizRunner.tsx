@@ -67,6 +67,8 @@ interface QuizRunnerProps {
   showName: boolean;
   /** 当前动态口诀组(weak/strong/both;v7.2 答题页自动拉,题头标注该时代口诀当前启用与否) */
   dynGroup?: string | null;
+  /** 本卷实际口径(v7.33 era=current 卷后端下发 strong|weak;非当前口径卷=null 不渲染) */
+  eraGroup?: string | null;
   answers: Record<string, QuizAnswerRec>;
   onAnswersChange: (next: Record<string, QuizAnswerRec>) => void;
   onBack: () => void;
@@ -79,6 +81,7 @@ export function QuizRunner({
   rulesVersion,
   showName,
   dynGroup,
+  eraGroup,
   answers,
   onAnswersChange,
   onBack,
@@ -284,6 +287,21 @@ export function QuizRunner({
               />
             ) : null}
           </span>
+          {mixed && (eraGroup === "strong" || eraGroup === "weak") ? (
+            // v7.33 当前口径卷徽章:本卷全部题目=抽题时点的当前启用组时代
+            // (整卷口径纯净,按当前启用口诀组判断;切组后下一卷自动跟随)
+            <span
+              className={cn(
+                "rounded-md border px-2 py-1 text-xs font-semibold",
+                eraGroup === "weak"
+                  ? "border-violet-500 bg-violet-500/10 text-violet-500"
+                  : "border-primary bg-primary/10 text-primary",
+              )}
+              title="本卷只抽当前口径(当前启用口诀组)时代的题——按当前启用组的口诀判断,练的就是当前行情该用的口诀"
+            >
+              当前口径卷 · {eraGroup === "weak" ? "弱市组" : "强市组"}
+            </span>
+          ) : null}
           <span className="text-sm font-semibold tabular-nums">
             {retry ? (
               <span className="text-amber-600">错题重练 {idx + 1}/{order.length}</span>
