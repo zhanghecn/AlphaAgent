@@ -580,21 +580,17 @@ def _fmt_window(win) -> str:
 def action_hint(schemes: list[dict]) -> str | None:
     """出手条件人话(主人定:实时推荐必须提示今天开多少+怎么买)。
     单分支=「今天开6~9.5,盘中触涨停价打」;多分支链重叠(C2×A3·B3/B1×转温)=
-    条件表「开X按甲打;开Y按乙买」(顺序=归属优先级,与 tag_point 一致)。
-    弱开/低开类(窗 lo<0 且 hi≤3:捡尸/冒泡转弱/高开低吸)=开盘直接买(低吸)。"""
+    条件表「开X按甲打;开Y按乙打」(顺序=归属优先级,与 tag_point 一致)。
+    今天开盘档只是候选条件,不代表开盘成交;实际统一等待当天触及涨停价后按涨停价成交。"""
     if not schemes:
         return None
     if len(schemes) == 1:
         s = schemes[0]
-        lo, hi = s["today"]
-        buy = "开盘直接买(低吸)" if lo < 0 and hi <= 3 else "盘中触涨停价打"
-        return f"今天开{_fmt_window(s['today'])},{buy}"
+        return f"今天开{_fmt_window(s['today'])},盘中触涨停价打"
     parts = []
     for s in schemes:
-        lo, hi = s["today"]
-        buy = "低开直接买" if lo < 0 and hi <= 3 else "触板打"
         label = f"{s['name']}·{s['sub']}" if s.get("sub") else str(s["name"])
-        parts.append(f"开{_fmt_window(s['today'])}按{label}{buy}")
+        parts.append(f"开{_fmt_window(s['today'])}按{label}触板打")
     return ";".join(parts)
 
 
@@ -617,7 +613,7 @@ def _cand_row(s: dict) -> dict:
     lo, hi = s["today"]
     return {"no": str(s["no"]), "sub": s.get("sub"), "name": str(s["name"]),
             "today": [lo, hi],
-            "buy": "低吸" if lo < 0 and hi <= 3 else "触板打"}
+            "buy": "触板打"}
 
 
 def entry_candidates(entry: Mapping[str, object]) -> list[dict]:

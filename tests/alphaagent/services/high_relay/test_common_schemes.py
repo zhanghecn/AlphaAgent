@@ -107,11 +107,12 @@ def test_rules_split_common_and_strong_rows_by_branch(monkeypatch):
 def test_current_koujue_splits_b1_stats_and_health_by_branch(monkeypatch):
     report = {
         "dyn_trades": [
-            {"m": "2026-01", "g": "strong", "p": "B1", "s": "转温", "r": 10.0},
-            {"m": "2026-01", "g": "strong", "p": "B1", "s": "续强", "r": -5.0},
-            {"m": "2026-01", "g": "weak", "p": "K5", "r": 8.0},
+            # v7.33 成绩只计 asof 前已完结的交易(x=退出月 < 月状态最后一月)
+            {"m": "2025-11", "x": "2025-12", "g": "strong", "p": "B1", "s": "转温", "r": 10.0},
+            {"m": "2025-11", "x": "2025-12", "g": "strong", "p": "B1", "s": "续强", "r": -5.0},
+            {"m": "2025-11", "x": "2025-12", "g": "weak", "p": "K5", "r": 8.0},
         ],
-        "dyn_month_states": {"2026-01": "strong"},
+        "dyn_month_states": {"2025-11": "strong", "2026-01": "strong"},
     }
     monkeypatch.setattr(service.repository, "load_backtest_report", lambda _version: report)
 

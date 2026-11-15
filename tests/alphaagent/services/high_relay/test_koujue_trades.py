@@ -93,8 +93,9 @@ def test_koujue_trades_splits_double_hits_and_marks_taken() -> None:
     assert by_key[("003.SZSE", "A2")]["tk"] is False
     # 弱市分支子项不在「方案子项」里,取「弱子项」(K4 两分支靠它过滤)
     assert by_key[("005.SZSE", "K4")]["s"] == "缩量承接"
+    # v7.33 可执行口径:同票持仓重叠的信号实际不成交,tk=False(仅 ov 标记供排查)
     overlap = by_key[("004.SZSE", "A1")]
-    assert overlap["ov"] is True and overlap["tk"] is True
+    assert overlap["ov"] is True and overlap["tk"] is False
 
     # 最新在前,便于排查
     assert rows[0]["d"] == "2024-02-01"

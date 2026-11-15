@@ -134,18 +134,18 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     # v7.3 动态组模拟(实盘口径):月状态=物化单一事实源(contracts.dyn_month_states,
     # 题库/交割单/koujue 共用);按月过滤出手笔——weak月=K系/strong月=八条/
     # both月=两组任一;对照=全开(两组并集全时段)
-    month_states = contracts.dyn_month_states(dyn_trades)
+    data_end = (bars["trade_date"].max() if bars is not None and len(bars)
+                else E["买入日"].max())
+    through_month = pd.Timestamp(data_end).strftime("%Y-%m") if pd.notna(data_end) else None
+    month_states = contracts.dyn_month_states(dyn_trades, through_month=through_month)
     payload["dyn_month_states"] = month_states
     # v7.24 规则页口诀下钻:每笔命中一只历史票(含条件字段/当月组状态/是否成交)。
     # 与 dyn_trades 的轻表不同,这里保留代码/名称/买卖价/收益和判定条件,
     # 供规则页点口诀直接排查;未启用组的命中保留并以 tk=False 标注为参考。
     hit_frame = done_all[(done_all["方案点"] != "—")
                          | (done_all["弱口诀"] != "—")].copy()
-    hit_frame["同票持仓重叠"] = _mark_overlap_any(hit_frame)
-    payload["koujue_trades"] = _koujue_trades(hit_frame, month_states)
     # v7.28 展示成绩单一来源:规则页/题库直接读这份(成交口径,点+分支),
     # 不再手写 POINT_STATS/速查表 stat——口径一处算,多处读。
-    payload["stat_rows"] = _stat_rows(payload["koujue_trades"])
 
     def _dyn_take(row) -> str:
         """按当月组与通用整点/分支决定是否出手;切换判定轻表不受常驻影响。"""
@@ -156,22 +156,31 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     take = done_all.apply(_dyn_take, axis=1)
     dyn_sim = done_all[take != ""].copy()
     dyn_sim["方案点"] = take[take != ""]      # 出手点=当月启用组命中编号
-    summary["dyn_sim"] = _stats(dyn_sim)
+    _mark_overlap(dyn_sim)
+    hit_frame["同票持仓重叠"] = False
+    hit_frame.loc[dyn_sim.index, "同票持仓重叠"] = dyn_sim["同票持仓重叠"]
+    payload["koujue_trades"] = _koujue_trades(hit_frame, month_states)
+    payload["stat_rows"] = _stat_rows(payload["koujue_trades"])
+    executed = dyn_sim[~dyn_sim["同票持仓重叠"]]
+    summary["dyn_sim"] = _stats(executed)
     # 全开对照=两组任一命中(全时段并集,弱口诀空值口径与轻表一致:notna 且非「—」)
     dyn_open = done_all[(done_all["弱口诀"].notna() & (done_all["弱口诀"] != "—"))
                         | (done_all["方案点"] != "—")]
-    summary["dyn_open_all"] = _stats(dyn_open)
-    payload["dyn_sim_yearly"] = _yearly(dyn_sim)
-    payload["dyn_sim_totals"] = _yearly_totals(dyn_sim)   # v7.4 一年的成绩表(七年,复利/相加列)
-    payload["dyn_open_yearly"] = _yearly(dyn_open)
+    dyn_open = dyn_open.copy()
+    dyn_open["同票持仓重叠"] = _mark_overlap_any(dyn_open)
+    open_executed = dyn_open[~dyn_open["同票持仓重叠"]]
+    summary["dyn_open_all"] = _stats(open_executed)
+    payload["dyn_sim_yearly"] = _yearly(executed)
+    payload["dyn_sim_totals"] = _yearly_totals(executed)
+    payload["dyn_open_yearly"] = _yearly(open_executed)
     # v7.5 分年/月度明细=动态组实盘口径(按出手编号分组,当月启用组才成交)——
     # 分年明细表整表统一实盘口径,不再混研究口径全量行(K 系 2024 起/八条 2021-22
     # 无成交即 --);口诀体检数字留合计卡(强市 2023+ 研究)与弱市卡(时代段);
     # all=全部出手(与 dyn_sim 同源),供月度筛选「全部」键
-    payload["dyn_point_yearly"] = {pk: _yearly(g_) for pk, g_ in dyn_sim.groupby("方案点")}
-    payload["dyn_point_monthly"] = {pk: _monthly(g_) for pk, g_ in dyn_sim.groupby("方案点")}
-    payload["dyn_point_totals"] = {pk: _stats(g_) for pk, g_ in dyn_sim.groupby("方案点")}
-    payload["dyn_point_monthly"]["all"] = _monthly(dyn_sim)
+    payload["dyn_point_yearly"] = {pk: _yearly(g_) for pk, g_ in executed.groupby("方案点")}
+    payload["dyn_point_monthly"] = {pk: _monthly(g_) for pk, g_ in executed.groupby("方案点")}
+    payload["dyn_point_totals"] = {pk: _stats(g_) for pk, g_ in executed.groupby("方案点")}
+    payload["dyn_point_monthly"]["all"] = _monthly(executed)
     # 未启用时代的参考层(全量命中,灰字显示):八条 2020-22/K 系 2023+ 实盘无成交的格
     # 子给「若硬做会怎样」的体检数字——v7.4 丢的是这层,实盘口径(正常色)优先不混
     payload["ref_point_yearly"] = {
@@ -180,7 +189,6 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     }
     # v7.3 动态组口径交割单:按月状态过滤的出手笔(实盘纪律=当月启用组才成交),
     # 重叠标注按出手笔重算(比全量标更贴实盘);旧物化无此键时 API 兜底 ledger_days
-    _mark_overlap(dyn_sim)
     payload["dyn_ledger_days"] = _ledger_days(dyn_sim, repository.load_touch_map())
     if bars is not None:
         payload["pose_cases"] = _pose_cases(E, bars)
@@ -200,11 +208,20 @@ def _dyn_trades(done: pd.DataFrame) -> list[dict[str, object]]:
             continue
         wk = str(r.get("弱口诀") or "—")
         pt = str(r.get("方案点") or "—")
+        exit_day = _text(r.get("E3退出日"))
+        exit_month = exit_day[:7] if exit_day else None
         if wk != "—":
-            out.append({"m": str(r["月"]), "g": "weak", "p": wk, "r": round(float(e3), 2)})
+            item = {"m": str(r["月"]), "g": "weak", "p": wk,
+                    "r": round(float(e3), 2)}
+            if exit_month:
+                item["x"] = exit_month
+            out.append(item)
         elif pt != "—":
-            out.append({"m": str(r["月"]), "g": "strong", "p": pt,
-                        "s": str(r.get("方案子项") or ""), "r": round(float(e3), 2)})
+            item = {"m": str(r["月"]), "g": "strong", "p": pt,
+                    "s": str(r.get("方案子项") or ""), "r": round(float(e3), 2)}
+            if exit_month:
+                item["x"] = exit_month
+            out.append(item)
     return out
 
 
@@ -264,10 +281,10 @@ def _koujue_trades(done: pd.DataFrame,
         }
         if weak_no != "—":
             out.append({**base, "s": weak_sub, "g": "weak", "p": weak_no,
-                        "tk": take == weak_no, "tp": take or None})
+                        "tk": take == weak_no and not base["ov"], "tp": take or None})
         if strong_no != "—":
             out.append({**base, "s": sub, "g": "strong", "p": strong_no,
-                        "tk": take == strong_no, "tp": take or None})
+                        "tk": take == strong_no and not base["ov"], "tp": take or None})
     out.sort(key=lambda t: str(t.get("d") or ""), reverse=True)
     return out
 
@@ -355,7 +372,6 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             continue
         yang = bool(rec["foundation_yang"])
         group4 = ("二接三" if n_board == 2 else "三接四") + ("阳" if yang else "阴")
-        buy = round(float(cols["limit_price"][i]), 2)
         buy_open = round((float(cols["open_price"][i])
                           / float(cols["prev_close"][i]) - 1) * 100, 2)
         scheme = pool_mod.tag_scheme(
@@ -369,6 +385,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             b1_f_turn_ratio=rec.get("b1_f_turn_ratio"))
         point = str(scheme["no"]) if scheme else "—"
         point_sub = str(scheme.get("sub") or "") if scheme else ""
+        buy = round(float(cols["limit_price"][i]), 2)
         weak = pool_mod.tag_weak(
             group4, rec.get("b1_open"), rec.get("b2_open"),
             rec.get("b3_open"), auction_pct=buy_open, b1_turn=rec.get("b1_turn"),
@@ -400,7 +417,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             exit_e0, hold_days = bars[f"n{MAX_K}_close"].iat[i], MAX_K
             exit_idx = i + MAX_K
             capped = True
-        unfinished = exit_e0 != exit_e0
+        unfinished_e0 = exit_e0 != exit_e0
         # E3 退出价(v4.3 起)= max(退出日收盘, (退出日高+低)/2)(主人2026-09-28拍板):
         # 中间价保底,收盘更高按实际收盘算(尾盘卖出≈收盘价,可执行不吃亏);
         # 判别器不稀释(口诀-miss均收差9.58→9.77)。v4.2=T+1:封住→断板日,
@@ -423,6 +440,8 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
                     pc = jc
                     continue
                 return float(jo), i + j, "limit_down_defer"
+            if pd.isna(bars[f"n{MAX_K}_close"].iat[i]):
+                return np.nan, None, "limit_down_pending"
             return dn_close, i + k0, "limit_down_locked"
 
         if sealed:
@@ -473,6 +492,7 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
                 e3_date = i + k
                 e3_reason = "break_day_close"
                 break
+        unfinished = pd.isna(exit_e3) or e3_date is None
         e3_exit_date = None
         if not unfinished and e3_date is not None:
             e3_exit_date = pd.Timestamp(bars["trade_date"].iat[e3_date]).date().isoformat()
@@ -487,15 +507,17 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "阴阳": "阳" if yang else "阴",
             "方案点": point,
             "方案子项": point_sub,
+            "买入方式": "触板打板",
             "弱口诀": str(weak["no"]) if weak else "—",
             "弱子项": str(weak.get("sub") or "") if weak else "",
             "回避": avoid,
             "买价": buy,
+            "涨停价": round(float(cols["limit_price"][i]), 2),
             "买入开盘%": buy_open,
             "封住": sealed,
             "次日开%": round((n1o / buy - 1) * 100, 2) if n1o == n1o else np.nan,
             "次日收%": round((n1c / buy - 1) * 100, 2) if n1c == n1c else np.nan,
-            "持有到断板%": round((exit_e0 / buy - 1) * 100, 2) if not unfinished else np.nan,
+            "持有到断板%": round((exit_e0 / buy - 1) * 100, 2) if not unfinished_e0 else np.nan,
             "E3%": round((exit_e3 / buy - 1) * 100, 2) if not unfinished else np.nan,
             "E3退出日": e3_exit_date,
             "E3退出价": round(float(exit_e3), 3) if not unfinished else None,
@@ -531,6 +553,10 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             "昨日涨停家数": int(cols["mkt_prev"][i]) if cols["mkt_prev"][i] == cols["mkt_prev"][i] else None,
         })
     E = pd.DataFrame(rows)
+    if E.empty:
+        E = pd.DataFrame({"买入日": pd.Series(dtype="datetime64[ns]"),
+                          "E3%": pd.Series(dtype="float64"),
+                          "次日收%": pd.Series(dtype="float64")})
     E["月"] = E["买入日"].dt.strftime("%Y-%m")
     E["年"] = E["买入日"].dt.strftime("%Y")
     E["胜"] = E["次日收%"] > 0
@@ -561,12 +587,12 @@ def _mark_overlap(done: pd.DataFrame) -> None:
 def _stat_rows(trades: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     """本口诀成交成绩(点+分支两级,全时段),供规则页/题库原样展示。
 
-    tk=true 才计;同票持仓重叠照算(与 dyn_sim/合计卡同口径,不再另开一套)。
+    tk=true 且无持仓重叠才计,与动态组合和交割单汇总同口径。
     """
     buckets: dict[str, list[float]] = {}
     for t in trades:
         r = t.get("r")
-        if not t.get("tk") or r is None:
+        if not t.get("tk") or t.get("ov") or r is None:
             continue
         point = str(t["p"])
         sub = str(t.get("s") or "")

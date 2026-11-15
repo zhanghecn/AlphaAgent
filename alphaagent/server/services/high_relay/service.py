@@ -600,25 +600,31 @@ def get_current_koujue() -> dict[str, object]:
         return {"status": "unavailable", "rules_version": contracts.HPR_RULES_VERSION,
                 "reason": "回测物化未生成动态口诀组数据,请等待 rebuild 完成"}
     win = contracts.DYN_GROUP_WINDOW
-    months = sorted({str(t["m"]) for t in trades})
-    recent = set(months[-win:])
+    state_months = sorted(states)
+    recent = set(state_months[-win:])
+    asof = state_months[-1]
+    current = str(states[asof])
+
+    def is_completed_before_asof(trade: dict[str, object]) -> bool:
+        exit_month = str(trade.get("x") or "")
+        return bool(exit_month) and exit_month < asof
+
+    completed_trades = [trade for trade in trades if is_completed_before_asof(trade)]
 
     def agg(g: str, ms: set[str] | None = None) -> dict[str, object]:
         scope = recent if ms is None else ms
-        rs = [float(t["r"]) for t in trades if str(t["m"]) in scope and t["g"] == g]
+        rs = [float(t["r"]) for t in completed_trades
+              if str(t["m"]) in scope and t["g"] == g]
         return {"n": len(rs),
                 "avg": round(sum(rs) / len(rs), 2) if rs else None,
                 "win": round(sum(1 for x in rs if x > 0) / len(rs), 3) if rs else None}
 
     wk, st = agg("weak"), agg("strong")
-    # v7.3 当前组=物化月状态最后一月(单一事实源,与题库/交割单同口径)
-    current = str(states.get(months[-1], "both"))
-
     # 组内口诀逐条近12月动态成绩
     def point_dyn(prefix_keys: list[str]) -> dict[str, dict[str, object]]:
         out: dict[str, dict[str, object]] = {}
         for no in prefix_keys:
-            rs = [float(t["r"]) for t in trades
+            rs = [float(t["r"]) for t in completed_trades
                   if str(t["m"]) in recent and t["p"] == no]
             out[no] = {"n": len(rs),
                        "avg": round(sum(rs) / len(rs), 2) if rs else None,
@@ -639,7 +645,7 @@ def get_current_koujue() -> dict[str, object]:
             d = dyn.get(no) or {"n": 0}
             if no in contracts.COMMON_BRANCH_POINTS and r.get("sub"):
                 sub = str(r["sub"])
-                rs = [float(t["r"]) for t in trades
+                rs = [float(t["r"]) for t in completed_trades
                       if str(t["m"]) in recent and t["p"] == no
                       and str(t.get("s") or "") == sub]
                 d = {"n": len(rs),
@@ -670,8 +676,7 @@ def get_current_koujue() -> dict[str, object]:
 
     # 口诀近况(v7.13 主人「精简美观」): 13条红黄绿体检——红=近24月均值<全时段25%
     # 且近12月为负, 黄=近24月<全时段一半, 绿=其余; 无票=灰。数字与 koujue_monitor 同口径。
-    all_months = set(months)
-    m24, m12 = set(months[-24:]), set(months[-12:])
+    m24, m12 = set(state_months[-24:]), set(state_months[-12:])
     point_names = {**{str(s["no"]): str(s["name"]) for s in contracts.SCHEMES},
                    **{str(s["no"]): str(s["name"]) for s in contracts.WEAK_SCHEMES}}
     health_scopes: list[tuple[str, str]] = []
@@ -683,7 +688,7 @@ def get_current_koujue() -> dict[str, object]:
             health_scopes.append((no, ""))
     health: list[dict[str, object]] = []
     for no, sub in health_scopes:
-        scoped = [t for t in trades if t["p"] == no
+        scoped = [t for t in completed_trades if t["p"] == no
                   and (not sub or str(t.get("s") or "") == sub)]
         rs_all = [float(t["r"]) for t in scoped]
         rs24 = [float(t["r"]) for t in scoped if str(t["m"]) in m24]
@@ -713,7 +718,7 @@ def get_current_koujue() -> dict[str, object]:
         "status": "ok",
         "rules_version": contracts.HPR_RULES_VERSION,
         "window_months": win,
-        "asof": months[-1],
+        "asof": asof,
         "current_group": current,
         "always_on": contracts.common_scheme_labels(),   # v7.17 通用组(跨时代常开)
         "groups": {"common": {"label": "通用组", "rows": common_rows},

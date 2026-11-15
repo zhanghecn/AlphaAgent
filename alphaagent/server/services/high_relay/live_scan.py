@@ -6,7 +6,7 @@
     开盘涨幅 ≥9.5%(顶格)→ skipped_gap(排队买不到,正常开盘口径外,终态)
     三接四阴开盘 <0% → skipped_auction(板深低开=没人接,终态)
     不在方案「今天开」窗(如 A1 要 6~9.5,B1 要 3~5)→ skipped_auction(终态)
-- 触发:现价首次 ≥ 涨停价 → entered,买入价=涨停价(研究口径:触板即买,无时间窗)
+- 打板触发:现价首次 ≥ 涨停价 → entered,买入价=涨停价
 - 卖出由 EOD 定版(E3,与 backtest.py 逐行一致:炸板→次日收盘走(T+1,一字跌停顺延);
   封住→断板日收盘;D+1封板+D+2开盘≤-5%→竞价卖;一字死封顺延;15 日兜底)
 - 现货快照 freshness 以 trade_time 日期兜底(节假日不交易不产生假信号)
@@ -231,7 +231,6 @@ def _scan_once(today: date, pool: list[dict[str, object]], now: datetime) -> dic
                 )
                 patch["point"] = point
                 patch["level"] = level
-
         if status == "watching":
             # 触板即买:现价首次 ≥ 涨停价 → 按涨停价打(链式研究口径,无时间窗)
             if last_price >= limit_price - 1e-6:
