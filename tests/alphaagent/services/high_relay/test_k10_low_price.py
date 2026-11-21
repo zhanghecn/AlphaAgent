@@ -7,7 +7,7 @@ def test_k10_is_registered_with_low_price_branches():
     assert "K10" in contracts.WEAK_POINT_KEYS
     rows = [r for r in contracts.WEAK_CHEAT_ROWS if r["no"] == "K10"]
     assert {r["sub"] for r in rows} == {"低价·二接三", "低价·三接四"}
-    assert contracts.HPR_RULES_VERSION == "hpr-v7.33"
+    assert contracts.HPR_RULES_VERSION == "hpr-v7.34"
     assert quiz.QUIZ_CONTENT_VERSION == 64
 
 

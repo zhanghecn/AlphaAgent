@@ -154,6 +154,9 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
         return contracts.dyn_take_point(st, str(row["方案点"]), wk, row.get("方案子项"))
 
     take = done_all.apply(_dyn_take, axis=1)
+    # v7.34 高价锁仓回避:命中也不买——动态模拟不出手(成交口径剔回避行)。
+    _avoid_mask = done_all["回避"].fillna(False).astype(bool)
+    take = take.where(~_avoid_mask, "")
     dyn_sim = done_all[take != ""].copy()
     dyn_sim["方案点"] = take[take != ""]      # 出手点=当月启用组命中编号
     _mark_overlap(dyn_sim)
@@ -163,9 +166,11 @@ def assemble_report(E: pd.DataFrame, bars: pd.DataFrame | None = None) -> dict[s
     payload["stat_rows"] = _stat_rows(payload["koujue_trades"])
     executed = dyn_sim[~dyn_sim["同票持仓重叠"]]
     summary["dyn_sim"] = _stats(executed)
-    # 全开对照=两组任一命中(全时段并集,弱口诀空值口径与轻表一致:notna 且非「—」)
-    dyn_open = done_all[(done_all["弱口诀"].notna() & (done_all["弱口诀"] != "—"))
-                        | (done_all["方案点"] != "—")]
+    # 全开对照=两组任一命中(全时段并集,弱口诀空值口径与轻表一致:notna 且非「—」);
+    # v7.34 高价锁仓回避是跨口诀硬规则,对照世界同样不买。
+    dyn_open = done_all[((done_all["弱口诀"].notna() & (done_all["弱口诀"] != "—"))
+                         | (done_all["方案点"] != "—"))
+                        & ~_avoid_mask]
     dyn_open = dyn_open.copy()
     dyn_open["同票持仓重叠"] = _mark_overlap_any(dyn_open)
     open_executed = dyn_open[~dyn_open["同票持仓重叠"]]
@@ -203,6 +208,9 @@ def _dyn_trades(done: pd.DataFrame) -> list[dict[str, object]]:
     get_current_koujue 按此表滚动汇总近窗两组成绩与切换判断,数字永远动态。"""
     out: list[dict[str, object]] = []
     for _, r in done.iterrows():
+        # v7.34 高价锁仓回避行不进成交模拟(可执行口径:命中也不买)。
+        if bool(r.get("回避")):
+            continue
         e3 = r.get("E3%")
         if e3 is None or e3 != e3:
             continue
@@ -262,6 +270,8 @@ def _koujue_trades(done: pd.DataFrame,
         sub = _text(r.get("方案子项")) or ""
         weak_sub = _text(r.get("弱子项")) or sub
         take = contracts.dyn_take_point(state, strong_no, weak_no, sub)
+        # v7.34 高价锁仓回避行=命中也不买:tk 恒 false(面板保留可考,不计成交)。
+        avoid_hit = bool(r.get("回避"))
         base: dict[str, object] = {
             "d": _date_str(r["买入日"]), "m": month,
             "code": str(r["代码"]), "name": str(r["名称"]),
@@ -281,10 +291,12 @@ def _koujue_trades(done: pd.DataFrame,
         }
         if weak_no != "—":
             out.append({**base, "s": weak_sub, "g": "weak", "p": weak_no,
-                        "tk": take == weak_no and not base["ov"], "tp": take or None})
+                        "tk": take == weak_no and not base["ov"] and not avoid_hit,
+                        "tp": take or None})
         if strong_no != "—":
             out.append({**base, "s": sub, "g": "strong", "p": strong_no,
-                        "tk": take == strong_no and not base["ov"], "tp": take or None})
+                        "tk": take == strong_no and not base["ov"] and not avoid_hit,
+                        "tp": take or None})
     out.sort(key=lambda t: str(t.get("d") or ""), reverse=True)
     return out
 
@@ -396,7 +408,10 @@ def build_events() -> tuple[pd.DataFrame, pd.DataFrame]:
             b3_type=rec.get("b3_type"), dist_ma10=rec.get("dist_ma10"),
             buy_price=buy, b1_f_turn_ratio=rec.get("b1_f_turn_ratio"))
         avoid = pool_mod.static_avoid(point, group4, rec.get("b1_open"),
-                                      rec.get("b2_open"), rec.get("pre3_pct"))
+                                      rec.get("b2_open"), rec.get("pre3_pct"),
+                                      buy_price=buy, n_board=n_board,
+                                      b2_turn=rec.get("b2_turn"),
+                                      b3_turn=rec.get("b3_turn"))
         sealed = bool(cols["is_lim"][i])
         n1c = bars["n1_close"].iat[i]
         n1o = bars["n1_open"].iat[i]

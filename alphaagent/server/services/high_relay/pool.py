@@ -653,9 +653,16 @@ def entry_weak_candidates(entry: Mapping[str, object]) -> list[dict]:
     return [_cand_row(s) for s in wbrs]
 
 
-def static_avoid(point: str, group4: str, b1_open, b2_open, pre3_pct) -> str:
-    """静态回避原因(v3.0 起恒空:旧「半温不火/追高透支」两条废止为 miss 池观察注记,
-    见 contracts.AVOID_OBSERVE;保留签名兼容回测/池调用)。"""
+def static_avoid(point: str, group4: str, b1_open, b2_open, pre3_pct,
+                 buy_price=None, n_board=None, b2_turn=None, b3_turn=None) -> str:
+    """静态回避原因(v7.34 高价锁仓庄股:买价≥45元×决策板换手<3% 命中也不买;
+    二接三看二板换手/三接四看三板换手。低价锁仓=K10肥腿不拦、高价放量不拦。
+    旧「半温不火/追高透支」两条 v3.0 废止为 miss 池观察注记,见 contracts.AVOID_OBSERVE)。"""
+    if buy_price is not None and n_board in (2, 3):
+        turn = b2_turn if n_board == 2 else b3_turn
+        if (float(buy_price) >= contracts.HIGH_PRICE_LOCK_MIN
+                and turn is not None and float(turn) < contracts.HIGH_PRICE_LOCK_TURN):
+            return contracts.HIGH_PRICE_LOCK_TEXT
     return ""
 
 
@@ -727,7 +734,10 @@ def compute_pool(data_date: date | None = None) -> dict[str, object]:
                           anchor_dist=rec.get("anchor_dist"), dist_ma10=rec.get("dist_ma10"),
                           b1_f_turn_ratio=rec.get("b1_f_turn_ratio"))
         avoid = static_avoid(point, group4, rec.get("b1_open"),
-                             rec.get("b2_open"), rec.get("pre3_pct"))
+                             rec.get("b2_open"), rec.get("pre3_pct"),
+                             buy_price=round(float(row.close_price) * 1.10 + 1e-9, 2),
+                             n_board=n_board,
+                             b2_turn=rec.get("b2_turn"), b3_turn=rec.get("b3_turn"))
         actionable = point != "—" and not avoid
         n_actionable += int(actionable)
         # 候选=链条件已命中,今天开窗(竞价定型后对照;顶格≥9.5不命中)。
